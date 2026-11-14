@@ -1,0 +1,9 @@
+.venv/
+vendor/
+dist/
+build/
+data/
+.superpowers/
+__pycache__/
+*.pyc
+.pytest_cache/
