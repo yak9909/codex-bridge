@@ -27,12 +27,20 @@
         週間枠 <input id="th-week" type="number" min="1" max="100" step="1">%
         <button id="th-save" class="ghost">保存</button>
       </div>
+      <p class="small" id="friend-limits"></p>
       <p class="hint" id="blocked"></p>
     </div>
     <div class="card">
       <h2>状態</h2>
       <dl class="kv">
-        <dt>共有フォルダ</dt><dd id="s-root"></dd>
+        <dt>共有フォルダ</dt><dd>
+          <div id="root-view"><span id="s-root"></span> <button id="root-edit" class="ghost mini">変更</button></div>
+          <div id="root-editor" hidden>
+            <input id="root-input" class="wide" placeholder="例: D:/work/project">
+            <div class="row"><button id="root-pick" class="ghost mini">参照…</button><button id="root-save" class="mini">保存</button>
+              <button id="root-cancel" class="ghost mini">取消</button></div>
+            <p class="small">「参照…」を押すと、この PC にフォルダを選ぶ画面が開きます。作業中のタスクがあるときは変えられません。</p>
+          </div></dd>
         <dt>知人の接続先</dt><dd id="s-bind"></dd>
         <dt>agent</dt><dd id="s-agent"></dd>
         <dt>作業中のタスク</dt><dd id="s-task"></dd>
@@ -50,6 +58,15 @@
   <section class="card approvals" id="approvals-card">
     <h2>確認待ち <span class="count" id="ap-count">0</span></h2>
     <div id="approvals"><p class="empty">確認待ちはありません。</p></div>
+  </section>
+
+  <section class="card">
+    <h2>Codex に依頼する</h2>
+    <textarea id="req-prompt" class="req" placeholder="例: analysis/report.md を読み、要点を 5 行でまとめて analysis/summary.md に書いてください。&#10;パスは共有フォルダからの相対パスで書きます。"></textarea>
+    <div class="row">
+      <label class="check"><input type="checkbox" id="req-continue" disabled><span id="req-continue-label">続きとして依頼する（下のタスク一覧で選んだタスクの会話を続ける）</span></label>
+      <button id="req-send">依頼する</button><span id="req-msg" class="small"></span>
+    </div>
   </section>
 
   <section class="grid-tasks">

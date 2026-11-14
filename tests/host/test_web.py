@@ -162,3 +162,29 @@ async def test_cannot_change_share_root_during_a_task(admin, host, tmp_path):
     new.mkdir()
     r = await admin.put("/admin/api/share-root", json={"path": str(new)}, headers=H)
     assert r.status_code == 409
+
+
+async def test_send_followup_and_cancel_from_admin(admin, host):
+    sent = []
+
+    async def send(m):
+        sent.append(m)
+    link = host.mgr.attach(send)
+    r = await admin.post("/admin/api/tasks", json={"prompt": "hello"}, headers=H)
+    assert r.status_code == 200
+    tid = r.json()["task_id"]
+    assert sent[-1]["type"] == "task_start" and sent[-1]["prompt"] == "hello"
+    assert (await admin.post(f"/admin/api/tasks/{tid}/followup", json={"text": "more"}, headers=H)).status_code == 200
+    assert sent[-1] == {"type": "task_followup", "task_id": tid, "text": "more"}
+    assert (await admin.post(f"/admin/api/tasks/{tid}/cancel", headers=H)).status_code == 200
+    assert sent[-1]["type"] == "task_cancel"
+    await host.mgr.on_agent_message(link, {"type": "task_state", "seq": 5, "task_id": tid, "state": "completed",
+                                           "thread_id": "th", "report": "ok"})
+    r = await admin.post("/admin/api/tasks", json={"prompt": "next", "continue_task_id": tid}, headers=H)
+    assert r.status_code == 200 and sent[-1]["continue_thread_id"] == "th"
+
+
+async def test_send_task_errors_are_readable(admin, host):
+    r = await admin.post("/admin/api/tasks", json={"prompt": "x"}, headers=H)
+    assert r.status_code == 409 and "接続されていません" in r.json()["detail"]
+    assert (await admin.post("/admin/api/tasks", json={"prompt": "  "}, headers=H)).status_code == 400

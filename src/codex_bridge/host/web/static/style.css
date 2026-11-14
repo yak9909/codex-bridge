@@ -105,3 +105,10 @@ textarea#perm-allow { width: 100%; font: 13px/1.5 Consolas, "BIZ UDGothic", mono
 label.check { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; margin: 6px 0; }
 details.adv { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 10px; }
 details.adv summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+
+/* ---- request form, share root ---- */
+textarea.req { width: 100%; min-height: 90px; font: inherit; }
+input.wide { width: 100%; }
+button.mini { padding: 2px 10px; font-size: 12px; }
+.followup { display: flex; gap: 8px; margin-top: 10px; }
+.followup input { flex: 1; }

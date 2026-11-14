@@ -165,6 +165,35 @@ def admin_router(host) -> APIRouter:
         except ToolError as e:
             raise HTTPException(404, str(e))
 
+    @r.post("/api/tasks")
+    async def send_task(body: dict):
+        prompt = str(body.get("prompt") or "").strip()
+        if not prompt:
+            raise HTTPException(400, "依頼の内容を書いてください")
+        try:
+            return {"task_id": await host.mgr.start(prompt, body.get("continue_task_id") or None)}
+        except ToolError as e:
+            raise HTTPException(409, str(e))
+
+    @r.post("/api/tasks/{task_id}/followup")
+    async def followup(task_id: str, body: dict):
+        text = str(body.get("text") or "").strip()
+        if not text:
+            raise HTTPException(400, "追加の指示を書いてください")
+        try:
+            await host.mgr.followup(task_id, text)
+        except ToolError as e:
+            raise HTTPException(409, str(e))
+        return {"ok": True}
+
+    @r.post("/api/tasks/{task_id}/cancel")
+    async def cancel(task_id: str):
+        try:
+            await host.mgr.cancel(task_id)
+        except ToolError as e:
+            raise HTTPException(409, str(e))
+        return {"ok": True}
+
     @r.post("/api/tasks/{task_id}/undo")
     async def undo(task_id: str):
         if task_id not in host.mgr.tasks:

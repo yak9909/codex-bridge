@@ -45,6 +45,10 @@ async function refreshOverview() {
   meter($("m-week"), u.weekly, th.weekly);
   if (!thresholdsDirty) { $("th-five").value = th.five_hour; $("th-week").value = th.weekly; }
   $("blocked").textContent = u.blocked_until ? `しきい値を超えているため、新しい依頼を止めています（${u.blocked_until.replace("T", " ")} まで）` : "";
+  const fl = u.friend_limits;
+  $("friend-limits").textContent = fl && (fl.five_hour || fl.weekly)
+    ? `知人が決めた上限: 5 時間枠 ${fl.five_hour ?? "なし"}% ／ 週間枠 ${fl.weekly ?? "なし"}%（低いほうが効きます）・超えたら${fl.force ? "すぐ強制的に止める" : "区切りで止めてもらう"}`
+    : "知人の上限: 設定なし（こちらのしきい値で止めます）";
 }
 
 async function refreshApprovals() {
@@ -81,9 +85,15 @@ function eventLine(e) {
   return `<span class="k">${t} ${esc(e.kind)}</span>${esc(d.text || d.status || "")}`;
 }
 
+const ACTIVE = ["queued", "running", "agent_offline"];
+
 async function showTask(id) {
   selected = id;
+  $("req-continue").disabled = false;
+  $("req-continue-label").textContent = `続きとして依頼する（選んでいるタスク ${id} の会話を続ける）`;
+  if (document.activeElement && document.activeElement.id === "fu-text") return; // don't wipe what is being typed
   const t = await api("GET", "/tasks/" + encodeURIComponent(id));
+  const active = ACTIVE.includes(t.state);
   $("task-detail").innerHTML = `
     <h2>タスクの詳細 <span class="state ${t.state}">${STATE_JA[t.state] || t.state}</span></h2>
     <dl class="kv"><dt>task_id</dt><dd>${esc(t.task_id)}</dd><dt>セッション</dt><dd>${esc(t.thread_id || "—")}</dd>
@@ -91,8 +101,21 @@ async function showTask(id) {
       <dt>変更したファイル</dt><dd>${t.changed_files.map(esc).join("<br>") || "—"}</dd></dl>
     <h3>依頼文</h3><div class="report">${esc(t.prompt)}</div>
     <h3>最終報告</h3><div class="report">${esc(t.report || "（まだありません）")}</div>
-    <div class="row"><button class="ghost" id="undo-btn">このタスクのファイル変更を取り消す</button></div>
+    ${active ? `<div class="followup"><input id="fu-text" placeholder="作業中の Codex への追加の指示"><button id="fu-send" class="mini">送る</button>
+      <button id="cancel-btn" class="bad mini">中止</button></div>` : ""}
+    <div class="row"><button class="ghost" id="undo-btn" ${active ? "disabled" : ""}>このタスクのファイル変更を取り消す</button></div>
     <div class="events">${t.events.slice().reverse().map((e) => `<div>${eventLine(e)}</div>`).join("")}</div>`;
+  if (active) {
+    $("fu-send").onclick = async () => {
+      const text = $("fu-text").value.trim(); if (!text) return;
+      try { await api("POST", `/tasks/${encodeURIComponent(id)}/followup`, { text }); $("fu-text").value = ""; }
+      catch (e) { alert(e.message); }
+    };
+    $("cancel-btn").onclick = async () => {
+      if (!confirm("このタスクを中止しますか？")) return;
+      try { await api("POST", `/tasks/${encodeURIComponent(id)}/cancel`); } catch (e) { alert(e.message); }
+    };
+  }
   $("undo-btn").onclick = async () => {
     if (!confirm("このタスクがファイル操作の道具で変えたファイルを元に戻します。よろしいですか？")) return;
     try { const r = await api("POST", `/tasks/${encodeURIComponent(id)}/undo`); alert(`${r.restored.length} 件を元に戻しました`); }
@@ -254,3 +277,30 @@ if (!location.search.includes("nolive")) {  // ?nolive: static view for screensh
   es.onmessage = () => { clearTimeout(timer); timer = setTimeout(refreshAll, 150); };
   setInterval(refreshOverview, 15000);
 }
+
+// ---- direct request & share folder ------------------------------------------
+$("req-send").onclick = async () => {
+  const prompt = $("req-prompt").value.trim();
+  if (!prompt) { $("req-msg").textContent = "依頼の内容を書いてください"; return; }
+  const body = { prompt };
+  if ($("req-continue").checked && selected) body.continue_task_id = selected;
+  try {
+    const r = await api("POST", "/tasks", body);
+    $("req-prompt").value = ""; $("req-continue").checked = false;
+    $("req-msg").textContent = `依頼しました（${r.task_id}）`; selected = r.task_id; refreshTasks();
+  } catch (e) { $("req-msg").textContent = "依頼できません: " + e.message; }
+};
+$("root-edit").onclick = () => { $("root-input").value = $("s-root").textContent; $("root-view").hidden = true; $("root-editor").hidden = false; };
+$("root-cancel").onclick = () => { $("root-view").hidden = false; $("root-editor").hidden = true; };
+$("root-pick").onclick = async () => {
+  $("root-pick").disabled = true;
+  try { const r = await api("POST", "/pick-folder"); if (r.path) $("root-input").value = r.path; }
+  finally { $("root-pick").disabled = false; }
+};
+$("root-save").onclick = async () => {
+  try {
+    await api("PUT", "/share-root", { path: $("root-input").value });
+    $("root-view").hidden = false; $("root-editor").hidden = true;
+    refreshOverview(); loadPermissions();
+  } catch (e) { alert("変えられませんでした: " + e.message); }
+};
