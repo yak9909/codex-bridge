@@ -136,10 +136,43 @@ async def test_send_task_with_agent(env):
 
     async def send(m):
         sent.append(m)
-    mgr.attach(send)
+    mgr.attach("friend", send)
     res = await call(local, "send_task", {"prompt": "x"})
     tid = json.loads(res["content"][0]["text"])["task_id"]
     assert sent[-1]["type"] == "task_start" and sent[-1]["task_id"] == tid
+
+
+async def test_undo_refused_for_every_task_in_progress(env, share):
+    # Two lenders work at once: neither task may be undone while it runs.
+    mgr, local, _ = env
+
+    async def send(m):
+        pass
+    mgr.attach("alice", send)
+    mgr.attach("bob", send)
+    tids = [text_of(await call(local, "send_task", {"prompt": p}))["task_id"] for p in ("one", "two")]
+    assert {mgr.tasks[t].lender for t in tids} == {"alice", "bob"}
+    for tid in tids:
+        res = await call(local, "undo_task", {"task_id": tid})
+        assert res["isError"] and "作業中" in res["content"][0]["text"]
+
+
+async def test_session_tools_take_a_lender(env):
+    import asyncio
+    mgr, local, _ = env
+    sent = {"alice": [], "bob": []}
+    links = {}
+    for name in sent:
+        async def send(m, name=name):
+            sent[name].append(m)
+            if m["type"] == "session_list":
+                asyncio.get_running_loop().create_task(mgr.on_agent_message(
+                    links[name], {"type": "reply", "req_id": m["req_id"], "ok": True, "data": [name]}))
+        links[name] = mgr.attach(name, send)
+    res = await call(local, "list_sessions", {})
+    assert res["isError"] and "lender" in res["content"][0]["text"]
+    assert text_of(await call(local, "list_sessions", {"lender": "bob"})) == ["bob"]
+    assert not sent["alice"]
 
 
 async def test_undo_task(env, share):
@@ -179,7 +212,7 @@ async def test_get_status_waits_until_task_finishes(env):
 
     async def send(m):
         sent.append(m)
-    link = mgr.attach(send)
+    link = mgr.attach("friend", send)
     tid = json.loads((await call(local, "send_task", {"prompt": "x"}))["content"][0]["text"])["task_id"]
 
     async def finish_later():
@@ -198,7 +231,7 @@ async def test_get_status_wait_returns_on_new_approval(env, share):
 
     async def send(m):
         pass
-    mgr.attach(send)
+    mgr.attach("friend", send)
     tid = json.loads((await call(local, "send_task", {"prompt": "x"}))["content"][0]["text"])["task_id"]
     asyncio.get_running_loop().call_later(0.5, lambda: share.approvals.request("command", "python x.py", tid))
     t0 = time.monotonic()

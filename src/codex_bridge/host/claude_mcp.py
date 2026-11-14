@@ -157,7 +157,7 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
     async def undo_task(task_id: str) -> CallToolResult:
         async def f():
             mgr.result(task_id)  # raises ToolError for unknown ids
-            if task_id == mgr.current_task_id():
+            if mgr.is_active(task_id):
                 raise ToolError("作業中のタスクは取り消せません。先に cancel_task で止めてください")
             try:
                 return {"restored": snapshots.undo(task_id)}
@@ -165,20 +165,25 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
                 raise ToolError(str(e)) from e
         return await run(f)
 
-    @tool("このツールで作った Codex のセッション（スレッド）の一覧を返します。")
-    async def list_sessions() -> CallToolResult:
-        return await run(mgr.sessions_list)
-
-    @tool("セッションの会話内容を読みます（このツールで作ったセッションのみ）。")
-    async def read_session(thread_id: str) -> CallToolResult:
+    @tool("このツールで作った Codex のセッション（スレッド）の一覧を返します。"
+          "lender は Codex を貸している人の名前（接続しているのが 1 人なら省けます）。")
+    async def list_sessions(lender: str | None = None) -> CallToolResult:
         async def f():
-            return await mgr.session_read(thread_id)
+            return await mgr.sessions_list(lender)
         return await run(f)
 
-    @tool("セッションを削除します（このツールで作ったセッションのみ）。")
-    async def delete_session(thread_id: str) -> CallToolResult:
+    @tool("セッションの会話内容を読みます（このツールで作ったセッションのみ）。"
+          "lender は Codex を貸している人の名前（接続しているのが 1 人なら省けます）。")
+    async def read_session(thread_id: str, lender: str | None = None) -> CallToolResult:
         async def f():
-            return await mgr.session_delete(thread_id)
+            return await mgr.session_read(thread_id, lender)
+        return await run(f)
+
+    @tool("セッションを削除します（このツールで作ったセッションのみ）。"
+          "lender は Codex を貸している人の名前（接続しているのが 1 人なら省けます）。")
+    async def delete_session(thread_id: str, lender: str | None = None) -> CallToolResult:
+        async def f():
+            return await mgr.session_delete(thread_id, lender)
         return await run(f)
 
     # ---- administration (same as the admin web page) -------------------------

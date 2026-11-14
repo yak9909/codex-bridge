@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import secrets
 import threading
@@ -37,6 +38,17 @@ class TokenStore:
 
     def hashes(self) -> set[str]:
         return {v["sha256"] for v in self._items.values()}
+
+    def match(self, token: str) -> str | None:
+        """The invite name this token was issued under, or None."""
+        if not token:
+            return None
+        digest = sha256_hex(token)
+        found = None
+        for name, v in list(self._items.items()):
+            if hmac.compare_digest(digest, v["sha256"]):
+                found = name
+        return found
 
     def list(self) -> list[dict]:
         return [{"name": k, "created": v["created"]} for k, v in self._items.items()]

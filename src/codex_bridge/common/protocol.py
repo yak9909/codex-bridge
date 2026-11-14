@@ -5,7 +5,9 @@ host -> agent:
   session_list{req_id}   session_read{req_id, thread_id}   session_delete{req_id, thread_id}
   settings{thresholds:{five_hour, weekly}, log_visibility}   ack{seq}
 agent -> host:
-  hello{agent_version, codex_version, auth_mode}
+  hello{agent_version, codex_version, auth_mode, current_task_id}
+    v0.2 adds: protocol: 2, capabilities{resumable, pre_approval}, limits{five_hour, weekly, force}
+    (without them the host treats the agent as v0.1: sessions can be continued, no pre-approval)
   event{seq, task_id, kind, data}            kind: started|agent_message|tool_call|turn_completed|status|final_report|error
   usage{five_hour:{used_percent, resets_at}|null, weekly:{...}|null, ts}
   task_state{seq, task_id, state, thread_id, report, resume_at}

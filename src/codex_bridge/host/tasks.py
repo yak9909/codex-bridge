@@ -1,4 +1,4 @@
-"""Task and session bookkeeping on the host; talks to the agent through an attached link."""
+"""Task and session bookkeeping on the host; talks to each lender's agent through its attached link."""
 
 from __future__ import annotations
 
@@ -9,16 +9,21 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Callable
 
 from ..common import protocol
 from ..common.protocol import FINAL_STATES, LOG_VISIBILITY
+from .lenders import V1_CAPABILITIES, Lender, SendFn, blocked_until, pick_lender
 from .paths import ToolError
 
-SendFn = Callable[[dict], Awaitable[None]]
 ACTIVE_STATES = ("queued", "running", "agent_offline")
 DEFAULT_THRESHOLDS = {"five_hour": 90, "weekly": 95}
 REQUEST_TIMEOUT = 30.0
+NOT_CONNECTED = "知人側の agent が接続されていません。知人の PC で codex-bridge-agent が動いているか確かめてください。"
+BUSY = "作業中のタスクがあります: {}（終わるのを待つか cancel_task で止めてください）"
+QUOTA = "使用量の上限のため受け付けません。再開可能: {}"
+# A continuation can only go to the lender whose Codex holds the session (design §3.3).
+RETRY_FRESH = "続きとしては送れないので、前回の報告を添えて新しく依頼してください。"
 
 
 def iso_local(ts: float | None) -> str | None:
@@ -38,6 +43,7 @@ class TaskRecord:
     resume_at: float | None = None
     continue_task_id: str | None = None
     state_before_offline: str | None = None
+    lender: str | None = None  # invite name of the lender doing the task (None: a v0.1 record)
 
 
 class TaskManager:
@@ -48,12 +54,12 @@ class TaskManager:
         self.touched_fn = touched_fn
         self.tasks: dict[str, TaskRecord] = {}
         self._events: dict[str, list[dict]] = {}
-        self._seen_seq: set[int] = set()
+        self._lenders: dict[str, Lender] = {}      # by invite name, in order of first connection
+        self._links: dict[int, Lender] = {}        # live link id -> lender (one link per lender)
+        self._last: Lender | None = None           # the latest to connect, even if gone since
+        self._seen_seq: dict[str, set[int]] = {}   # per lender: each agent numbers its own messages
         self._link_ids = itertools.count(1)
-        self._link: tuple[int, SendFn] | None = None
-        self._agent: dict = {"connected": False}
-        self._usage: dict = {"five_hour": None, "weekly": None, "ts": None}
-        self._pending: dict[str, asyncio.Future] = {}
+        self._pending: dict[str, tuple[str, asyncio.Future]] = {}  # req_id -> (lender name, reply)
         self._req_ids = itertools.count(1)
         self._task_ids = itertools.count(1)
         self.on_change: list[Callable[[], None]] = []
@@ -75,6 +81,9 @@ class TaskManager:
 
     def _save(self, rec: TaskRecord) -> None:
         (self.dir / f"{rec.task_id}.json").write_text(json.dumps(asdict(rec), ensure_ascii=False), encoding="utf-8")
+        lender = self._lenders.get(rec.lender)
+        if lender is not None:
+            lender.current_task_id = self.current_task_id(lender.name)
         self._changed()
 
     def _append_event(self, task_id: str, ev: dict) -> None:
@@ -94,62 +103,116 @@ class TaskManager:
                 pass
 
     # ---- agent link ----------------------------------------------------
-    def attach(self, send: SendFn) -> int:
+    def attach(self, name: str, send: SendFn) -> int:
+        """A lender's agent connected. `name` is the invite name its token matched;
+        a second connection under the same name replaces the first."""
+        lender = self._lenders.get(name)
+        if lender is None:
+            lender = self._lenders[name] = Lender(name=name)
+            lender.current_task_id = self.current_task_id(name)
+        for stale in [i for i, l in self._links.items() if l is lender]:
+            del self._links[stale]
         link_id = next(self._link_ids)
-        self._link = (link_id, send)
-        self._agent = {"connected": True, "since": time.time()}
+        self._links[link_id] = self._last = lender
+        lender.send, lender.connected, lender.since = send, True, time.time()
         self._changed()
         return link_id
 
     def detach(self, link_id: int) -> None:
-        if self._link is None or self._link[0] != link_id:
+        lender = self._links.pop(link_id, None)
+        if lender is None:
             return
-        self._link = None
-        self._agent = {**self._agent, "connected": False}
+        lender.send, lender.connected = None, False
         for rec in self.tasks.values():
-            if rec.state in ("queued", "running"):
+            if rec.lender == lender.name and rec.state in ("queued", "running"):
                 rec.state_before_offline = rec.state
                 rec.state = "agent_offline"
                 self._save(rec)
-        for fut in self._pending.values():
-            if not fut.done():
+        for owner, fut in self._pending.values():
+            if owner == lender.name and not fut.done():
                 fut.set_exception(ToolError("知人側の agent との接続が切れました"))
         self._changed()
 
-    async def _send(self, m: dict) -> None:
-        if self._link is None:
-            raise ToolError("知人側の agent が接続されていません。知人の PC で codex-bridge-agent が動いているか確かめてください。")
-        await self._link[1](m)
+    def _connected(self) -> list[Lender]:
+        return [l for l in self._lenders.values() if l.connected]
 
-    def agent_info(self) -> dict:
-        return dict(self._agent)
+    def _resolve(self, name: str | None) -> Lender:
+        """The named lender, or the only connected one when no name is given."""
+        if name is not None:
+            lender = self._lenders.get(name)
+            if lender is None or not lender.connected:
+                raise ToolError(f"「{name}」の agent が接続されていません。"
+                                "その人の PC で codex-bridge-agent が動いているか確かめてください。")
+            return lender
+        online = self._connected()
+        if not online:
+            raise ToolError(NOT_CONNECTED)
+        if len(online) > 1:
+            raise ToolError("複数の人が接続しています。lender に名前を指定してください: "
+                            + ", ".join(l.name for l in online))
+        return online[0]
+
+    def _primary(self) -> Lender | None:
+        """For the single-lender views (agent_info, top level of usage): the latest connection."""
+        return self._links[max(self._links)] if self._links else self._last
+
+    @staticmethod
+    def _info(l: Lender) -> dict:
+        return {"connected": l.connected, "since": l.since, "name": l.name, "agent_version": l.agent_version,
+                "codex_version": l.codex_version, "auth_mode": l.auth_mode, "protocol": l.protocol,
+                "capabilities": dict(l.capabilities)}
+
+    def agent_info(self, lender: str | None = None) -> dict:
+        l = self._primary() if lender is None else self._lenders.get(lender)
+        return self._info(l) if l else {"connected": False}
+
+    def lenders(self) -> list[dict]:
+        return [{**self._info(l), "limits": l.limits, "usage": self._usage_of(l),
+                 "current_task_id": l.current_task_id, "last_assigned": l.last_assigned}
+                for l in self._lenders.values()]
+
+    def _own_task(self, lender: Lender, task_id: str) -> TaskRecord | None:
+        """The task, unless it belongs to another lender (a v0.1 record has no lender yet)."""
+        rec = self.tasks.get(task_id)
+        return rec if rec is not None and rec.lender in (None, lender.name) else None
 
     async def on_agent_message(self, link_id: int, m: dict) -> None:
-        if self._link is None or self._link[0] != link_id:
+        lender = self._links.get(link_id)
+        if lender is None:
             return
         t = m["type"]
         if "seq" in m:
-            await self._link[1](protocol.msg("ack", seq=m["seq"]))
-            if m["seq"] in self._seen_seq:
+            await lender.send(protocol.msg("ack", seq=m["seq"]))
+            seen = self._seen_seq.setdefault(lender.name, set())
+            if m["seq"] in seen:
                 return
-            self._seen_seq.add(m["seq"])
+            seen.add(m["seq"])
         if t == "hello":
-            self._agent.update({k: m.get(k) for k in ("agent_version", "codex_version", "auth_mode")})
+            lender.agent_version, lender.codex_version, lender.auth_mode = (
+                m.get("agent_version"), m.get("codex_version"), m.get("auth_mode"))
+            caps = m.get("capabilities")
+            lender.protocol = m.get("protocol") or 1
+            lender.capabilities = {**V1_CAPABILITIES, **caps} if isinstance(caps, dict) else dict(V1_CAPABILITIES)
+            if isinstance(m.get("limits"), dict):
+                lender.limits = m["limits"]
             if "current_task_id" in m:
-                self._reconcile(m.get("current_task_id"))
-            await self._send_settings()
+                self._reconcile(lender, m.get("current_task_id"))
+            await lender.send(self._settings_msg())
             self._changed()
         elif t == "usage":
-            self._usage = {"five_hour": m.get("five_hour"), "weekly": m.get("weekly"), "ts": m.get("ts"),
-                           "friend_limits": m.get("friend_limits")}
+            lender.usage = {"five_hour": m.get("five_hour"), "weekly": m.get("weekly"), "ts": m.get("ts"),
+                            "friend_limits": m.get("friend_limits")}
+            if isinstance(m.get("friend_limits"), dict):
+                lender.limits = m["friend_limits"]
             self._changed()
         elif t == "event":
-            if m["task_id"] in self.tasks:
+            if self._own_task(lender, m["task_id"]):
                 self._append_event(m["task_id"], {"ts": time.time(), "kind": m["kind"], "data": m.get("data")})
         elif t == "task_state":
-            rec = self.tasks.get(m["task_id"])
+            rec = self._own_task(lender, m["task_id"])
             if rec is None:
                 return
+            rec.lender = lender.name
             rec.state = m["state"]
             rec.state_before_offline = None
             rec.thread_id = m.get("thread_id") or rec.thread_id
@@ -159,18 +222,23 @@ class TaskManager:
                 rec.resume_at = m["resume_at"]
             self._save(rec)
         elif t == "reply":
-            fut = self._pending.pop(m.get("req_id"), None)
-            if fut and not fut.done():
+            owner, fut = self._pending.get(m.get("req_id"), (None, None))
+            if owner != lender.name:
+                return
+            del self._pending[m["req_id"]]
+            if not fut.done():
                 if m.get("ok"):
                     fut.set_result(m.get("data"))
                 else:
                     fut.set_exception(ToolError(m.get("error") or "agent でエラーが起きました"))
 
-    def _reconcile(self, agent_task_id: str | None) -> None:
-        """After (re)connect: keep the task the agent still runs, fail the ones it lost (e.g. it restarted)."""
+    def _reconcile(self, lender: Lender, agent_task_id: str | None) -> None:
+        """After (re)connect: keep the task this lender's agent still runs, fail the ones it lost
+        (e.g. it restarted). Other lenders' tasks are left alone."""
         for rec in self.tasks.values():
-            if rec.state not in ACTIVE_STATES:
+            if rec.state not in ACTIVE_STATES or rec.lender not in (None, lender.name):
                 continue
+            rec.lender = lender.name
             if rec.task_id == agent_task_id:
                 rec.state = rec.state_before_offline or "running"
             else:
@@ -180,31 +248,32 @@ class TaskManager:
             rec.state_before_offline = None
             self._save(rec)
 
+    def _settings_msg(self) -> dict:
+        return protocol.msg("settings", thresholds=dict(self.settings["thresholds"]),
+                            log_visibility=self.settings["log_visibility"])
+
     async def _send_settings(self) -> None:
-        if self._link is not None:
-            await self._link[1](protocol.msg("settings", thresholds=dict(self.settings["thresholds"]),
-                                             log_visibility=self.settings["log_visibility"]))
+        for lender in self._connected():
+            try:
+                await lender.send(self._settings_msg())
+            except Exception:
+                pass  # one broken link must not keep the others from hearing; hello sends them again
 
     # ---- usage ---------------------------------------------------------
-    def usage(self) -> dict:
-        out = dict(self._usage)
+    def _usage_of(self, lender: Lender | None) -> dict:
+        out = dict(lender.usage) if lender else {"five_hour": None, "weekly": None, "ts": None}
         out["thresholds"] = dict(self.settings["thresholds"])
         for k in ("five_hour", "weekly"):
             if out.get(k):
                 out[k] = {**out[k], "resets_at_local": iso_local(out[k].get("resets_at"))}
-        blocked = self._blocked_until()
-        out["blocked_until"] = iso_local(blocked)
+        out["blocked_until"] = iso_local(blocked_until(lender, self.settings["thresholds"])) if lender else None
         return out
 
-    def _blocked_until(self) -> float | None:
-        until = None
-        now = time.time()
-        for k in ("five_hour", "weekly"):
-            w = self._usage.get(k)
-            limit = self.settings["thresholds"].get(k)
-            if w and limit is not None and w.get("used_percent", 0) >= limit and (w.get("resets_at") or 0) > now:
-                until = max(until or 0, w["resets_at"])
-        return until
+    def usage(self) -> dict:
+        """Top level: the latest connection (the v0.1 shape). "lenders": the same for each lender by name."""
+        out = self._usage_of(self._primary())
+        out["lenders"] = {l.name: self._usage_of(l) for l in self._lenders.values()}
+        return out
 
     async def set_thresholds(self, five_hour: float | None = None, weekly: float | None = None) -> dict:
         for k, v in (("five_hour", five_hour), ("weekly", weekly)):
@@ -225,11 +294,16 @@ class TaskManager:
         await self._send_settings()
 
     # ---- tasks ---------------------------------------------------------
-    def current_task_id(self) -> str | None:
+    def current_task_id(self, lender: str | None = None) -> str | None:
+        """The named lender's active task; without a name, any active task."""
         for rec in self.tasks.values():
-            if rec.state in ACTIVE_STATES:
+            if rec.state in ACTIVE_STATES and (lender is None or rec.lender == lender):
                 return rec.task_id
         return None
+
+    def is_active(self, task_id: str) -> bool:
+        rec = self.tasks.get(task_id)
+        return rec is not None and rec.state in ACTIVE_STATES
 
     def _get(self, task_id: str) -> TaskRecord:
         rec = self.tasks.get(task_id)
@@ -237,40 +311,82 @@ class TaskManager:
             raise ToolError(f"タスクが見つかりません: {task_id}")
         return rec
 
-    async def start(self, prompt: str, continue_task_id: str | None = None) -> str:
-        if self._link is None:
-            await self._send({})  # raises the "not connected" ToolError
-        cur = self.current_task_id()
-        if cur:
-            raise ToolError(f"作業中のタスクがあります: {cur}（終わるのを待つか cancel_task で止めてください）")
-        blocked = self._blocked_until()
+    def _require_free(self, lender: Lender, now: float, advice: str = "") -> None:
+        if lender.current_task_id:
+            raise ToolError(BUSY.format(lender.current_task_id) + advice)
+        blocked = blocked_until(lender, self.settings["thresholds"], now)
         if blocked:
-            raise ToolError(f"使用量の上限のため受け付けません。再開可能: {iso_local(blocked)}")
+            raise ToolError(QUOTA.format(iso_local(blocked)))
+
+    def _pick(self, now: float) -> Lender:
+        """Automatic routing (design §3.3): the free lender with the most headroom."""
+        online = self._connected()
+        lender = pick_lender(online, self.settings["thresholds"], now)
+        if lender is not None:
+            return lender
+        # nobody is free: everyone idle is over a limit (say when the first comes back), or all are working
+        waits = [t for l in online
+                 if l.current_task_id is None and (t := blocked_until(l, self.settings["thresholds"], now))]
+        if waits:
+            raise ToolError(QUOTA.format(iso_local(min(waits))))
+        raise ToolError(BUSY.format(", ".join(l.current_task_id for l in online if l.current_task_id)))
+
+    def _continue_target(self, prev: TaskRecord, lender: str | None, now: float) -> Lender:
+        """The session lives in one lender's Codex, so a continuation can only go back there."""
+        if prev.lender is None:  # a v0.1 record: there was only one lender then
+            target = self._resolve(lender)
+        else:
+            if lender is not None and lender != prev.lender:
+                raise ToolError(f"このタスクの会話は「{prev.lender}」の Codex にあるため、"
+                                f"「{lender}」には続きを送れません。{RETRY_FRESH}")
+            target = self._lenders.get(prev.lender)
+            if target is None or not target.connected:
+                raise ToolError(f"このタスクの会話を持つ「{prev.lender}」の agent が接続されていません。{RETRY_FRESH}")
+        if not target.capabilities.get("resumable", True):
+            raise ToolError(f"「{target.name}」は使い捨てのセッションで動いているため、会話が残っていません。{RETRY_FRESH}")
+        if not prev.thread_id:
+            raise ToolError(f"このタスクには続けられるセッションがありません: {prev.task_id}")
+        self._require_free(target, now, advice=RETRY_FRESH)
+        return target
+
+    async def start(self, prompt: str, continue_task_id: str | None = None, lender: str | None = None) -> str:
+        if not self._connected():
+            raise ToolError(NOT_CONNECTED)
+        now = time.time()
         thread_id = None
         if continue_task_id:
             prev = self._get(continue_task_id)
-            if not prev.thread_id:
-                raise ToolError(f"このタスクには続けられるセッションがありません: {continue_task_id}")
+            target = self._continue_target(prev, lender, now)
             thread_id = prev.thread_id
+        elif lender is not None:
+            target = self._resolve(lender)
+            self._require_free(target, now)
+        else:
+            target = self._pick(now)
         task_id = time.strftime("t%Y%m%d-%H%M%S") + f"-{next(self._task_ids)}"
-        rec = TaskRecord(task_id=task_id, prompt=prompt, created=time.time(), continue_task_id=continue_task_id)
+        rec = TaskRecord(task_id=task_id, prompt=prompt, created=now, continue_task_id=continue_task_id,
+                         lender=target.name)
         self.tasks[task_id] = rec
         self._events[task_id] = []
-        self._save(rec)
-        await self._send(protocol.msg("task_start", task_id=task_id, prompt=prompt, continue_thread_id=thread_id))
+        target.last_assigned = now
+        self._save(rec)  # also marks the lender as working
+        await target.send(protocol.msg("task_start", task_id=task_id, prompt=prompt, continue_thread_id=thread_id))
         return task_id
+
+    async def _send_for(self, rec: TaskRecord, m: dict) -> None:
+        await self._resolve(rec.lender).send(m)
 
     async def followup(self, task_id: str, text: str) -> None:
         rec = self._get(task_id)
         if rec.state not in ACTIVE_STATES:
             raise ToolError(f"このタスクは作業中ではありません（{rec.state}）。続けるなら send_task の continue_task_id を使ってください")
-        await self._send(protocol.msg("task_followup", task_id=task_id, text=text))
+        await self._send_for(rec, protocol.msg("task_followup", task_id=task_id, text=text))
 
     async def cancel(self, task_id: str) -> None:
         rec = self._get(task_id)
         if rec.state not in ACTIVE_STATES:
             raise ToolError(f"このタスクは作業中ではありません（{rec.state}）")
-        await self._send(protocol.msg("task_cancel", task_id=task_id))
+        await self._send_for(rec, protocol.msg("task_cancel", task_id=task_id))
 
     def events(self, task_id: str) -> list[dict]:
         return list(self._events.get(task_id, []))
@@ -282,41 +398,43 @@ class TaskManager:
                 return {"state": "idle", "agent": self.agent_info()}
         rec = self._get(task_id)
         return {
-            "task_id": rec.task_id, "state": rec.state, "thread_id": rec.thread_id,
+            "task_id": rec.task_id, "state": rec.state, "lender": rec.lender, "thread_id": rec.thread_id,
             "resume_at": iso_local(rec.resume_at), "recent_events": self.events(task_id)[-15:],
-            "agent": self.agent_info(),
+            "agent": self.agent_info(rec.lender if rec.lender in self._lenders else None),
         }
 
     def result(self, task_id: str) -> dict:
         rec = self._get(task_id)
         return {
-            "task_id": rec.task_id, "state": rec.state, "prompt": rec.prompt, "report": rec.report,
-            "thread_id": rec.thread_id, "resume_at": iso_local(rec.resume_at),
+            "task_id": rec.task_id, "state": rec.state, "lender": rec.lender, "prompt": rec.prompt,
+            "report": rec.report, "thread_id": rec.thread_id, "resume_at": iso_local(rec.resume_at),
             "changed_files": self.touched_fn(task_id), "event_count": len(self._events.get(task_id, [])),
         }
 
     def list_tasks(self) -> list[dict]:
-        return [{"task_id": r.task_id, "state": r.state, "prompt": r.prompt[:200], "created": r.created}
+        return [{"task_id": r.task_id, "state": r.state, "lender": r.lender, "prompt": r.prompt[:200],
+                 "created": r.created}
                 for r in sorted(self.tasks.values(), key=lambda r: r.created, reverse=True)]
 
-    # ---- sessions (round trips to the agent) ---------------------------
-    async def _request(self, type_: str, **fields):
+    # ---- sessions (round trips to one lender's agent) ------------------
+    async def _request(self, lender: str | None, type_: str, **fields):
+        target = self._resolve(lender)
         req_id = f"r{next(self._req_ids)}"
         fut = asyncio.get_running_loop().create_future()
-        self._pending[req_id] = fut
+        self._pending[req_id] = (target.name, fut)
         try:
-            await self._send(protocol.msg(type_, req_id=req_id, **fields))
+            await target.send(protocol.msg(type_, req_id=req_id, **fields))
             return await asyncio.wait_for(fut, REQUEST_TIMEOUT)
         except asyncio.TimeoutError:
             raise ToolError("agent から返事がありませんでした") from None
         finally:
             self._pending.pop(req_id, None)
 
-    async def sessions_list(self):
-        return await self._request("session_list")
+    async def sessions_list(self, lender: str | None = None):
+        return await self._request(lender, "session_list")
 
-    async def session_read(self, thread_id: str):
-        return await self._request("session_read", thread_id=thread_id)
+    async def session_read(self, thread_id: str, lender: str | None = None):
+        return await self._request(lender, "session_read", thread_id=thread_id)
 
-    async def session_delete(self, thread_id: str):
-        return await self._request("session_delete", thread_id=thread_id)
+    async def session_delete(self, thread_id: str, lender: str | None = None):
+        return await self._request(lender, "session_delete", thread_id=thread_id)

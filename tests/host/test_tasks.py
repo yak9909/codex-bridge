@@ -11,7 +11,7 @@ class FakeAgent:
         self.mgr = mgr
         self.sent: list[dict] = []
         self.seq = 0
-        self.link = mgr.attach(self.send)
+        self.link = mgr.attach("friend", self.send)
 
     async def send(self, msg: dict) -> None:
         self.sent.append(msg)

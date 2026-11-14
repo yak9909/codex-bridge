@@ -2,29 +2,25 @@
 
 from __future__ import annotations
 
-import hmac
-
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from ..common import protocol
-from .mcp_util import sha256_hex
 from .tasks import TaskManager
 from .tokens import TokenStore
 
 
-def _authorized(ws: WebSocket, tokens: TokenStore) -> bool:
+def _lender_name(ws: WebSocket, tokens: TokenStore) -> str | None:
+    """The invite name of the token in the Authorization header: that is who the lender is."""
     header = ws.headers.get("authorization", "")
     token = header[7:].strip() if header.lower().startswith("bearer ") else ""
-    if not token:
-        return False
-    digest = sha256_hex(token)
-    return any(hmac.compare_digest(digest, h) for h in tokens.hashes())
+    return tokens.match(token)
 
 
 def add_control_route(app: FastAPI, mgr: TaskManager, tokens: TokenStore) -> None:
     @app.websocket("/agent/ws")
     async def agent_ws(ws: WebSocket) -> None:
-        if not _authorized(ws, tokens):
+        name = _lender_name(ws, tokens)
+        if name is None:
             await ws.close(code=1008)
             return
         await ws.accept()
@@ -32,7 +28,7 @@ def add_control_route(app: FastAPI, mgr: TaskManager, tokens: TokenStore) -> Non
         async def send(m: dict) -> None:
             await ws.send_text(protocol.encode(m))
 
-        link = mgr.attach(send)
+        link = mgr.attach(name, send)
         try:
             while True:
                 text = await ws.receive_text()
