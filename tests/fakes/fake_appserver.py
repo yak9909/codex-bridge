@@ -17,6 +17,8 @@ import sys
 DEFAULTS = {
     "initialize": {"userAgent": "fake"},
     "thread/start": {"thread": {"id": "th1"}},
+    "thread/resume": {"thread": {"id": "th1"}},
+    "thread/read": {"thread": {"id": "th1", "turns": []}},
     "turn/start": {"turn": {"id": "u1", "status": "inProgress"}},
     "turn/steer": {"turnId": "u1"},
     "account/read": {"account": {"type": "chatgpt", "email": None, "planType": "plus"}, "requiresOpenaiAuth": True},
