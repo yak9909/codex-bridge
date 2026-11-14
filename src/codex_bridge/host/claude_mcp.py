@@ -15,6 +15,8 @@ from .approvals import Approvals
 from .mcp_util import LoopbackOnly, McpEndpoint, error_result, json_result, make_endpoint
 from .paths import ToolError
 from .policy import EXEC_MODES, PolicyStore
+from .policy_form import form_from_raw
+from .policy_form import set_folder_level as set_folder_level_
 from .snapshots import Snapshots
 from .tasks import ACTIVE_STATES, TaskManager
 from .tokens import TokenStore
@@ -152,11 +154,23 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
             return {"approval_id": approval_id, "status": approvals.get(approval_id).status}
         return await run(f)
 
-    @tool("権限の規則（policy.yaml）の今の内容を返します。")
+    @tool("権限の規則を返します。form はフォルダごとの規則などを整理したもの、text は policy.yaml の全文です。")
     async def get_policy() -> CallToolResult:
         async def f():
             text = policy.path.read_text(encoding="utf-8") if policy.path.exists() else ""
-            return {"text": text, "error": policy.last_error}
+            return {"form": form_from_raw(policy.as_dict()), "text": text, "error": policy.last_error}
+        return await run(f)
+
+    @tool("フォルダ 1 つの権限を変えます。path は共有フォルダからの相対パス、level は "
+          "hidden（見せない）/ read（読むだけ）/ write（書ける）/ inherit（規則を外して上の設定に従う）。"
+          "そのフォルダの中身すべてに効きます。利用者に頼まれたときだけ使ってください。")
+    async def set_folder_level(path: str, level: str) -> CallToolResult:
+        async def f():
+            try:
+                form = set_folder_level_(policy, path, level)
+            except ValueError as e:
+                raise ToolError(str(e)) from e
+            return {"folders": form["folders"], "default": form["default"]}
         return await run(f)
 
     @tool("権限の規則（policy.yaml）を、渡した YAML の全文で置き換えます。書式に誤りがあれば保存しません。"

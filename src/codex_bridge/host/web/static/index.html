@@ -36,13 +36,7 @@
         <dt>知人の接続先</dt><dd id="s-bind"></dd>
         <dt>agent</dt><dd id="s-agent"></dd>
         <dt>作業中のタスク</dt><dd id="s-task"></dd>
-        <dt>コマンド実行</dt><dd>
-          <select id="exec-mode">
-            <option value="off">off（実行しない）</option>
-            <option value="allowlist">allowlist（許可リスト外は確認）</option>
-            <option value="ask">ask（毎回確認）</option>
-            <option value="all">all（すべて自動）</option>
-          </select></dd>
+        <dt>コマンド実行</dt><dd><span id="s-exec"></span> <a href="#perms" class="small">（下の「権限」で変更）</a></dd>
         <dt>知人に見せるログ</dt><dd>
           <select id="log-vis">
             <option value="summary">依頼文と最終報告のみ</option>
@@ -69,13 +63,62 @@
     </div>
   </section>
 
-  <section class="grid2">
-    <div class="card">
-      <h2>権限の規則（policy.yaml）</h2>
-      <p class="note">⚠ コマンド実行は閉じ込めていません。実行されたスクリプトは「見せない」場所や共有フォルダの外も読めます。</p>
-      <textarea id="policy" spellcheck="false"></textarea>
-      <div class="row"><button id="policy-save">保存して反映</button><span id="policy-msg" class="small"></span></div>
+  <section class="card perms" id="perms">
+    <div class="perms-head">
+      <h2>権限</h2>
+      <span class="dirty" id="perm-dirty" hidden>未保存の変更があります</span>
+      <button id="perm-reset" class="ghost" hidden>元に戻す</button>
+      <button id="perm-save">保存して反映</button>
     </div>
+    <div class="legend">
+      <div><span class="lv hidden">見せない</span>Codex からは存在しないように見えます（中のフォルダもすべて）</div>
+      <div><span class="lv read">読むだけ</span>中身を読めますが、変更はできません</div>
+      <div><span class="lv write">書ける</span>作成・変更・移動・削除ができます（削除は下の設定で承認待ちにできます）</div>
+    </div>
+    <div class="perm-grid">
+      <div>
+        <h3>フォルダごとの権限</h3>
+        <div class="row small">何も決めていない場所は
+          <select id="perm-default">
+            <option value="read">読むだけ</option>
+            <option value="write">書ける</option>
+            <option value="hidden">見せない</option>
+          </select>
+          として扱う
+        </div>
+        <ul class="tree" id="tree"></ul>
+        <p class="small">「上と同じ」は、ひとつ上のフォルダの設定に従います。フォルダの設定は、その中のすべてに効きます。</p>
+        <p class="small" id="perm-advanced" hidden></p>
+      </div>
+      <div>
+        <h3>コマンド実行（Codex が共有フォルダでプログラムを動かすこと）</h3>
+        <div class="modes" id="perm-modes">
+          <label><input type="radio" name="mode" value="off"><b>実行しない</b><span>ファイルの読み書きだけを許します。いちばん安全です。</span></label>
+          <label><input type="radio" name="mode" value="allowlist"><b>許可リストだけ自動</b><span>下のリストに合うコマンドは自動で実行し、それ以外は承認待ちにします。（おすすめ）</span></label>
+          <label><input type="radio" name="mode" value="ask"><b>毎回確認する</b><span>すべてのコマンドが承認待ちになります。</span></label>
+          <label><input type="radio" name="mode" value="all"><b>すべて自動</b><span>どんなコマンドでも確認なしで実行します。おすすめしません。</span></label>
+        </div>
+        <div id="perm-allow-box">
+          <h3>自動で実行してよいコマンド（1 行に 1 つ）</h3>
+          <textarea id="perm-allow" spellcheck="false" rows="4"></textarea>
+          <p class="small">例: <code>python scripts/**/*.py *</code> … scripts フォルダの中の .py を、どんな引数でも実行してよい。<br>
+            <code>*</code> = 名前の一部または「任意の引数」、<code>**</code> = 下のフォルダすべて。<code>&amp;&amp;</code> や <code>|</code> を含むコマンドは、リストに合っても承認待ちになります。</p>
+          <label class="check"><input type="checkbox" id="perm-confirm-mod">作業中に Codex が書き換えたスクリプトは、リストに合っても承認待ちにする</label>
+        </div>
+        <h3>削除</h3>
+        <label class="check"><input type="checkbox" id="perm-del">ファイルやフォルダを削除するときは承認待ちにする（おすすめ）</label>
+        <p class="note">⚠ コマンド実行は閉じ込めていません。実行されたスクリプトは「見せない」場所や共有フォルダの外も読めます。</p>
+      </div>
+    </div>
+    <details class="adv">
+      <summary>詳しい設定（policy.yaml を直接編集する）</summary>
+      <p class="small">ワイルドカードを使った細かい規則などは、ここで直接書けます。保存すると上の表示も更新されます。</p>
+      <textarea id="policy" spellcheck="false"></textarea>
+      <div class="row"><button id="policy-save" class="ghost">YAML を保存</button><span id="policy-msg" class="small"></span></div>
+    </details>
+  </section>
+
+  <section class="grid2">
     <div class="card">
       <h2>招待コード</h2>
       <div class="row"><input id="inv-name" placeholder="名前（例: friend）" value="friend"><button id="inv-issue">発行</button></div>

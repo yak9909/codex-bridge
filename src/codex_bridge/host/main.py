@@ -10,6 +10,7 @@ import uvicorn
 
 from .app import build_host, create_local_app, create_public_app
 from .config import load_host_config
+from .policy_form import yaml_from_form
 
 SAMPLE_HOST = """\
 # codex-bridge host settings
@@ -24,23 +25,14 @@ local_port: 8770
 rg_path: "vendor/rg.exe"
 """
 
-SAMPLE_POLICY = """\
-# Permission rules. Saved changes apply immediately.
-# level: hidden (invisible) / read / write. Later rules win, except hidden:
-# a hidden rule always wins, whatever its position, and hides everything inside.
-default: read
-rules:
-  # - {path: "analysis/**", level: write}
-  # - {path: "private", level: hidden}
-exec:
-  # off / allowlist (matching commands run, others wait for approval) / ask / all
-  mode: allowlist
-  allow:
-    - "python scripts/**/*.py *"
-  confirm_modified_scripts: false
-delete_needs_approval: true
-paused: false
-"""
+DEFAULT_POLICY_FORM = {
+    "default": "read",
+    "folders": [],
+    "exec": {"mode": "allowlist", "allow": ["python scripts/**/*.py *"], "confirm_modified_scripts": False},
+    "delete_needs_approval": True,
+    "paused": False,
+}
+SAMPLE_POLICY = yaml_from_form(DEFAULT_POLICY_FORM)
 
 
 def ensure_config(path: Path) -> bool:

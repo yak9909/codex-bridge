@@ -38,7 +38,7 @@ async function refreshOverview() {
   $("s-bind").textContent = "http://" + o.public_bind;
   $("s-agent").textContent = a.connected ? `接続中（agent ${a.agent_version || "?"}・codex ${a.codex_version || "?"}・${a.auth_mode || "?"}）` : "未接続";
   $("s-task").textContent = o.current_task || "なし";
-  if (document.activeElement !== $("exec-mode")) $("exec-mode").value = o.exec_mode;
+  $("s-exec").textContent = MODE_JA[o.exec_mode] || o.exec_mode;
   if (document.activeElement !== $("log-vis")) $("log-vis").value = o.log_visibility;
   const u = o.usage, th = u.thresholds;
   meter($("m-five"), u.five_hour, th.five_hour);
@@ -100,10 +100,110 @@ async function showTask(id) {
   };
 }
 
-async function loadPolicy() {
+// ---- permissions editor ---------------------------------------------------
+const MODE_JA = { off: "実行しない", allowlist: "許可リストだけ自動", ask: "毎回確認する", all: "すべて自動" };
+const LEVEL_JA = { hidden: "見せない", read: "読むだけ", write: "書ける" };
+let permForm = null, permSaved = null;
+const expanded = new Set();
+
+function ruleOf(path) {
+  const f = permForm.folders.find((x) => x.path.toLowerCase() === path.toLowerCase());
+  return f ? f.level : null;
+}
+function setRule(path, level) {
+  permForm.folders = permForm.folders.filter((x) => x.path.toLowerCase() !== path.toLowerCase());
+  if (level !== "inherit") permForm.folders.push({ path, level });
+  markDirty();
+}
+// The level a folder gets from its own rule, else its parent's, else the default (hidden always wins upward).
+function levelFor(path) {
+  const parts = path.split("/");
+  for (let i = 1; i <= parts.length; i++) if (ruleOf(parts.slice(0, i).join("/")) === "hidden") return "hidden";
+  for (let i = parts.length; i >= 1; i--) { const r = ruleOf(parts.slice(0, i).join("/")); if (r) return r; }
+  return permForm.default;
+}
+function markDirty() {
+  const dirty = JSON.stringify(collectForm()) !== permSaved;
+  $("perm-dirty").hidden = $("perm-reset").hidden = !dirty;
+  renderLevels();
+}
+function collectForm() {
+  if (!permForm) return null;
+  const mode = document.querySelector('input[name="mode"]:checked');
+  return { ...permForm, default: $("perm-default").value,
+    exec: { mode: mode ? mode.value : permForm.exec.mode, allow: $("perm-allow").value.split("\n"),
+            confirm_modified_scripts: $("perm-confirm-mod").checked },
+    delete_needs_approval: $("perm-del").checked };
+}
+function renderLevels() {
+  permForm.default = $("perm-default").value;
+  document.querySelectorAll(".tnode").forEach((n) => {
+    const path = n.dataset.path, own = ruleOf(path);
+    const sel = n.querySelector("select");
+    sel.value = own || "inherit";
+    const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : null;
+    sel.options[0].textContent = `上と同じ（${LEVEL_JA[parent ? levelFor(parent) : permForm.default]}）`;
+    const eff = levelFor(path);
+    const badge = n.querySelector(".lv");
+    badge.className = "lv " + eff; badge.textContent = LEVEL_JA[eff];
+  });
+  $("perm-allow-box").style.opacity = (document.querySelector('input[name="mode"]:checked') || {}).value === "allowlist" ? 1 : 0.45;
+}
+async function loadChildren(path, ul) {
+  const r = await api("GET", "/folders" + (path ? "?path=" + encodeURIComponent(path) : ""));
+  ul.innerHTML = r.folders.map((f) => `
+    <li><div class="tnode" data-path="${esc(f.path)}">
+      <button class="tog" ${f.has_children ? "" : "disabled"}>${expanded.has(f.path) ? "▾" : "▸"}</button>
+      <span class="nm">📁 ${esc(f.name)}</span>
+      <span class="lv"></span>
+      <select><option value="inherit"></option><option value="hidden">見せない</option>
+        <option value="read">読むだけ</option><option value="write">書ける</option></select>
+    </div><ul hidden></ul></li>`).join("") || (path ? "" : '<li class="small" style="padding:8px">フォルダがありません</li>');
+  for (const li of ul.children) {
+    const node = li.querySelector(".tnode"); if (!node) continue;
+    if (expanded.has(node.dataset.path)) { const sub = li.querySelector("ul"); sub.hidden = false; await loadChildren(node.dataset.path, sub); }
+  }
+  renderLevels();
+}
+async function loadPermissions() {
+  permForm = await api("GET", "/policy-form");
+  $("perm-default").value = permForm.default;
+  document.querySelectorAll('input[name="mode"]').forEach((r) => r.checked = r.value === permForm.exec.mode);
+  $("perm-allow").value = permForm.exec.allow.join("\n");
+  $("perm-confirm-mod").checked = permForm.exec.confirm_modified_scripts;
+  $("perm-del").checked = permForm.delete_needs_approval;
+  const adv = permForm.advanced_rules || [];
+  $("perm-advanced").hidden = !adv.length;
+  $("perm-advanced").textContent = adv.length ? `ほかに、詳しい設定で書かれた規則が ${adv.length} 件あります（${adv.map((r) => r.path + "=" + LEVEL_JA[r.level]).join("、")}）。` : "";
+  permSaved = JSON.stringify(collectForm());
+  await loadChildren("", $("tree"));
+  markDirty();
   const p = await api("GET", "/policy");
   $("policy").value = p.text;
 }
+const loadPolicy = loadPermissions;
+
+$("tree").addEventListener("change", (ev) => {
+  const node = ev.target.closest(".tnode"); if (!node) return;
+  setRule(node.dataset.path, ev.target.value);
+  node.classList.add("changed");
+});
+$("tree").addEventListener("click", async (ev) => {
+  const tog = ev.target.closest(".tog"); if (!tog || tog.disabled) return;
+  const node = tog.closest(".tnode"), sub = node.parentElement.querySelector("ul"), path = node.dataset.path;
+  if (expanded.has(path)) { expanded.delete(path); sub.hidden = true; tog.textContent = "▸"; return; }
+  expanded.add(path); tog.textContent = "▾"; sub.hidden = false; await loadChildren(path, sub);
+});
+["perm-default", "perm-allow", "perm-confirm-mod", "perm-del"].forEach((id) => $(id).addEventListener("input", markDirty));
+$("perm-modes").addEventListener("change", markDirty);
+$("perm-reset").onclick = loadPermissions;
+$("perm-save").onclick = async () => {
+  try {
+    await api("PUT", "/policy-form", collectForm());
+    $("perm-save").textContent = "保存しました ✓"; setTimeout(() => $("perm-save").textContent = "保存して反映", 1500);
+    await loadPermissions(); refreshOverview();
+  } catch (e) { alert("保存できませんでした: " + e.message); }
+};
 
 async function refreshInvites() {
   const list = await api("GET", "/invites");
@@ -125,7 +225,6 @@ $("pause-btn").onclick = async () => {
   const paused = !$("pause-btn").classList.contains("active");
   await api("POST", "/pause", { paused }); refreshOverview(); loadPolicy();
 };
-$("exec-mode").onchange = async () => { await api("PUT", "/exec-mode", { mode: $("exec-mode").value }); loadPolicy(); };
 $("log-vis").onchange = () => api("PUT", "/log-visibility", { value: $("log-vis").value });
 ["th-five", "th-week"].forEach((id) => $(id).oninput = () => { thresholdsDirty = true; });
 $("th-save").onclick = async () => {

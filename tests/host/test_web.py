@@ -108,3 +108,30 @@ async def test_shutdown_endpoint_sets_event(admin, host):
     assert (await admin.post("/admin/api/shutdown")).status_code == 403  # header required
     assert (await admin.post("/admin/api/shutdown", headers=H)).status_code == 200
     assert host.shutdown.is_set()
+
+
+async def test_policy_form_get_and_put(admin, host):
+    form = (await admin.get("/admin/api/policy-form")).json()
+    assert form["default"] == "read" and "folders" in form
+    form["folders"] = [{"path": "raw", "level": "write"}]
+    form["exec"]["mode"] = "ask"
+    assert (await admin.put("/admin/api/policy-form", json=form, headers=H)).status_code == 200
+    assert host.policy.current().level_for("raw/x") == "write" and host.policy.current().exec_mode == "ask"
+    form["exec"]["mode"] = "nope"
+    assert (await admin.put("/admin/api/policy-form", json=form, headers=H)).status_code == 400
+
+
+async def test_folders_listing_shows_levels(admin, host):
+    (host.config.share_root / "raw" / "sub").mkdir()
+    (host.config.share_root / "private").mkdir()
+    (host.config.share_root / "file.txt").write_text("x", encoding="utf-8")
+    form = (await admin.get("/admin/api/policy-form")).json()
+    form["folders"] = [{"path": "private", "level": "hidden"}]
+    await admin.put("/admin/api/policy-form", json=form, headers=H)
+    top = {f["name"]: f for f in (await admin.get("/admin/api/folders")).json()["folders"]}
+    assert set(top) == {"raw", "private"}  # folders only; the admin sees hidden ones too
+    assert top["private"]["rule"] == "hidden" and top["private"]["effective"] == "hidden"
+    assert top["raw"]["rule"] is None and top["raw"]["effective"] == "read" and top["raw"]["has_children"]
+    sub = (await admin.get("/admin/api/folders", params={"path": "raw"})).json()["folders"]
+    assert [f["path"] for f in sub] == ["raw/sub"]
+    assert (await admin.get("/admin/api/folders", params={"path": "../.."})).status_code == 400

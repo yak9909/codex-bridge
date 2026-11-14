@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import yaml
@@ -12,6 +13,8 @@ from fastapi.staticfiles import StaticFiles
 
 from ...common.invite import make_invite
 from ..paths import ToolError
+from ..policy import OUTPUTS_TOP, normalize_rel
+from ..policy_form import form_from_raw, save_form
 
 STATIC = Path(__file__).parent / "static"
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
@@ -61,6 +64,51 @@ def admin_router(host) -> APIRouter:
             raise HTTPException(400, str(e))
         host.events.notify()
         return {"ok": True}
+
+    @r.get("/api/policy-form")
+    async def get_policy_form():
+        return form_from_raw(host.policy.as_dict())
+
+    @r.put("/api/policy-form")
+    async def put_policy_form(body: dict):
+        try:
+            save_form(host.policy, body)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        host.events.notify()
+        return {"ok": True}
+
+    @r.get("/api/folders")
+    async def folders(path: str = ""):
+        """Sub-folders of a share folder, with the rule set on each and the level that applies.
+
+        This is the owner's view: hidden folders are listed too (so they can be changed)."""
+        rel = normalize_rel(path)
+        if any(part == ".." for part in rel.split("/")):
+            raise HTTPException(400, "不正なパスです")
+        base = (host.config.share_root / rel).resolve()
+        root = host.config.share_root.resolve()
+        if not (base == root or root in base.parents) or not base.is_dir():
+            raise HTTPException(400, "フォルダが見つかりません")
+        policy = host.policy.current()
+        rules = {f["path"].lower(): f["level"] for f in form_from_raw(host.policy.as_dict())["folders"]}
+        out = []
+        try:
+            entries = sorted((e for e in os.scandir(base) if e.is_dir(follow_symlinks=False)),
+                             key=lambda e: e.name.lower())[:500]
+        except OSError as e:
+            raise HTTPException(400, f"フォルダを読めません: {e}")
+        for e in entries:
+            child = f"{rel}/{e.name}" if rel else e.name
+            if child.lower().startswith(OUTPUTS_TOP):
+                continue
+            try:
+                has_children = any(c.is_dir(follow_symlinks=False) for c in os.scandir(e.path))
+            except OSError:
+                has_children = False
+            out.append({"name": e.name, "path": child, "rule": rules.get(child.lower()),
+                        "effective": policy.level_for(child), "has_children": has_children})
+        return {"path": rel, "folders": out, "default": policy.default}
 
     @r.post("/api/pause")
     async def pause(body: dict):

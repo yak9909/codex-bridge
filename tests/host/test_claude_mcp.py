@@ -43,7 +43,8 @@ async def test_tool_names(env):
     assert {t["name"] for t in r.json()["result"]["tools"]} == {
         "send_task", "send_followup", "get_status", "get_result", "cancel_task", "get_usage",
         "set_thresholds", "undo_task", "list_sessions", "read_session", "delete_session",
-        "list_approvals", "decide_approval", "get_policy", "set_policy", "set_exec_mode", "set_paused",
+        "list_approvals", "decide_approval", "get_policy", "set_policy", "set_folder_level", "set_exec_mode",
+        "set_paused",
         "set_log_visibility", "list_tasks", "issue_invite", "revoke_invite", "list_invites", "get_overview"}
 
 
@@ -193,3 +194,12 @@ async def test_get_status_wait_returns_on_new_approval(env, share):
     t0 = time.monotonic()
     s = json.loads((await call(local, "get_status", {"task_id": tid, "wait_sec": 10}))["content"][0]["text"])
     assert s["pending_approvals"] and time.monotonic() - t0 < 5
+
+
+async def test_claude_set_folder_level_and_form(env, share):
+    _, local, _ = env
+    text_of(await call(local, "set_folder_level", {"path": "docs", "level": "write"}))
+    assert share.policy.current().level_for("docs/a.md") == "write"
+    form = text_of(await call(local, "get_policy", {}))["form"]
+    assert {"path": "docs", "level": "write"} in form["folders"]
+    assert (await call(local, "set_folder_level", {"path": "docs", "level": "everything"}))["isError"]
