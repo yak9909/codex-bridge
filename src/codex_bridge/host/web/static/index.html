@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>codex-bridge 管理画面</title>
+<link rel="stylesheet" href="/admin/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">codex-bridge <span class="sub">管理画面</span></div>
+  <div class="conn" id="conn"><span class="dot"></span><span id="conn-text">確認中…</span></div>
+  <button id="pause-btn" class="pause">全体を一時停止</button>
+</header>
+
+<main>
+  <section class="banner" id="paused-banner" hidden>一時停止中です。Codex の道具はすべて「停止中」を返します。</section>
+  <section class="banner warn" id="policy-error" hidden></section>
+
+  <section class="grid2">
+    <div class="card">
+      <h2>使用量（知人の Codex）</h2>
+      <div class="meter" id="m-five"><div class="label">5 時間枠</div><div class="bar"><div class="fill"></div><div class="mark"></div></div><div class="val">—</div></div>
+      <div class="meter" id="m-week"><div class="label">週間枠</div><div class="bar"><div class="fill"></div><div class="mark"></div></div><div class="val">—</div></div>
+      <div class="row small">
+        しきい値: 5 時間枠 <input id="th-five" type="number" min="1" max="100" step="1">%
+        週間枠 <input id="th-week" type="number" min="1" max="100" step="1">%
+        <button id="th-save" class="ghost">保存</button>
+      </div>
+      <p class="hint" id="blocked"></p>
+    </div>
+    <div class="card">
+      <h2>状態</h2>
+      <dl class="kv">
+        <dt>共有フォルダ</dt><dd id="s-root"></dd>
+        <dt>知人の接続先</dt><dd id="s-bind"></dd>
+        <dt>agent</dt><dd id="s-agent"></dd>
+        <dt>作業中のタスク</dt><dd id="s-task"></dd>
+        <dt>コマンド実行</dt><dd>
+          <select id="exec-mode">
+            <option value="off">off（実行しない）</option>
+            <option value="allowlist">allowlist（許可リスト外は確認）</option>
+            <option value="ask">ask（毎回確認）</option>
+            <option value="all">all（すべて自動）</option>
+          </select></dd>
+        <dt>知人に見せるログ</dt><dd>
+          <select id="log-vis">
+            <option value="summary">依頼文と最終報告のみ</option>
+            <option value="files">＋道具の名前と対象パス</option>
+            <option value="all">＋道具の結果の本文</option>
+          </select></dd>
+      </dl>
+    </div>
+  </section>
+
+  <section class="card approvals" id="approvals-card">
+    <h2>確認待ち <span class="count" id="ap-count">0</span></h2>
+    <div id="approvals"><p class="empty">確認待ちはありません。</p></div>
+  </section>
+
+  <section class="grid-tasks">
+    <div class="card">
+      <h2>タスク</h2>
+      <ul class="tasks" id="tasks"></ul>
+    </div>
+    <div class="card" id="task-detail">
+      <h2>タスクの詳細</h2>
+      <p class="empty">左の一覧から選んでください。</p>
+    </div>
+  </section>
+
+  <section class="grid2">
+    <div class="card">
+      <h2>権限の規則（policy.yaml）</h2>
+      <p class="note">⚠ コマンド実行は閉じ込めていません。実行されたスクリプトは「見せない」場所や共有フォルダの外も読めます。</p>
+      <textarea id="policy" spellcheck="false"></textarea>
+      <div class="row"><button id="policy-save">保存して反映</button><span id="policy-msg" class="small"></span></div>
+    </div>
+    <div class="card">
+      <h2>招待コード</h2>
+      <div class="row"><input id="inv-name" placeholder="名前（例: friend）" value="friend"><button id="inv-issue">発行</button></div>
+      <div id="inv-out" hidden>
+        <p class="small">このコードを知人に渡してください（再表示できません）。</p>
+        <div class="code-box"><code id="inv-code"></code><button id="inv-copy" class="ghost">コピー</button></div>
+      </div>
+      <h3>発行済み</h3>
+      <ul class="invites" id="invites"></ul>
+    </div>
+  </section>
+</main>
+<script src="/admin/static/app.js"></script>
+</body>
+</html>
