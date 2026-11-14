@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -26,6 +27,20 @@ INSTRUCTIONS = (
     "パスはすべて共有フォルダからの相対パス（区切りは /）で指定してください。"
     "見つからないパスは存在しないか、見ることを許されていない場所です。"
 )
+
+# Invite name of the lender whose Codex sent the message being handled. Set only while that one
+# message is handled, so two lenders calling at the same time each see their own name.
+current_lender: ContextVar[str | None] = ContextVar("current_lender", default=None)
+
+
+async def _as_lender(ctx, call_next):
+    """MCP server middleware: handle the message as the lender BearerAuth matched its token to."""
+    scope = getattr(ctx.request, "scope", None) or {}
+    token = current_lender.set((scope.get("state") or {}).get("lender"))
+    try:
+        return await call_next(ctx)
+    finally:
+        current_lender.reset(token)
 
 
 @dataclass
@@ -52,8 +67,9 @@ def _summarize(args: dict) -> dict:
     return out
 
 
-def build_codex_mcp(s: HostServices, token_hashes: Callable[[], set[str]]) -> McpEndpoint:
-    server = MCPServer(name="codex-bridge", instructions=INSTRUCTIONS)
+def build_codex_mcp(s: HostServices, match_token: Callable[[str], str | None]) -> McpEndpoint:
+    """match_token(token) is the lender's invite name, or None for a token that is not valid."""
+    server = MCPServer(name="codex-bridge", instructions=INSTRUCTIONS, middleware=[_as_lender])
 
     async def run(name: str, args: dict, fn, *, blocking: bool) -> CallToolResult:
         try:
@@ -128,4 +144,4 @@ def build_codex_mcp(s: HostServices, token_hashes: Callable[[], set[str]]) -> Mc
         return await run("get_command_result", {"job_id": job_id},
                          lambda: s.runner.get_command_result(job_id, wait_sec), blocking=False)
 
-    return make_endpoint(server, lambda app: BearerAuth(app, token_hashes), dns_protection=False)
+    return make_endpoint(server, lambda app: BearerAuth(app, match_token), dns_protection=False)

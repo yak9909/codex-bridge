@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from ..common.audit import AuditLog
 from .approvals import Approvals, make_approve_fn
 from .claude_mcp import build_claude_mcp
-from .codex_mcp import HostServices, build_codex_mcp
+from .codex_mcp import HostServices, build_codex_mcp, current_lender
 from .config import HostConfig
 from .control import add_control_route
 from .share import (add_shared_folder, change_share_root, remove_shared_folder,
@@ -73,7 +73,8 @@ def build_host(config: HostConfig, config_path: Path | None = None) -> Host:
     approvals = Approvals(policy)
     mgr = TaskManager(data, touched_fn=snapshots.touched)
     tokens = TokenStore(data)
-    task_id_fn = mgr.current_task_id
+    # A Codex tool call belongs to the task of the lender whose token it came with, never to another's.
+    task_id_fn = lambda: mgr.current_task_id(current_lender.get())
     write = WriteTools(paths, policy, snapshots, audit, task_id_fn,
                        make_approve_fn(approvals, task_id_fn, wait_sec=30))
     services = HostServices(
@@ -85,7 +86,7 @@ def build_host(config: HostConfig, config_path: Path | None = None) -> Host:
     mgr.on_change.append(events.notify)
     ref: dict = {}  # the agents' tools need the finished Host (share folder can change at runtime)
     host = Host(config=config, policy=policy, audit=audit, paths=paths, snapshots=snapshots, approvals=approvals,
-                mgr=mgr, tokens=tokens, services=services, codex_ep=build_codex_mcp(services, tokens.hashes),
+                mgr=mgr, tokens=tokens, services=services, codex_ep=build_codex_mcp(services, tokens.match),
                 claude_ep=build_claude_mcp(mgr, approvals, snapshots, policy=policy, tokens=tokens,
                                            public_bind=config.public_bind,
                                            share_root=lambda: ref["host"].paths.root,
