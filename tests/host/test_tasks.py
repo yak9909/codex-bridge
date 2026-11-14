@@ -35,8 +35,10 @@ def mgr(tmp_path):
 
 
 @pytest.fixture
-def agent(mgr):
-    return FakeAgent(mgr)
+async def agent(mgr):
+    a = FakeAgent(mgr)  # a real agent says hello first thing; only then does the host give it tasks
+    await a.push("hello", agent_version="0.1.0", codex_version="x", auth_mode="chatgpt")
+    return a
 
 
 def usage(five_hour=None, weekly=None, resets_at=1_800_000_000):

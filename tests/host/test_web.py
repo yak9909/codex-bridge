@@ -181,12 +181,22 @@ async def test_cannot_change_share_root_during_a_task(admin, host, tmp_path):
     assert r.status_code == 409
 
 
+async def join(mgr, name: str, send=None, **hello) -> int:
+    """A lender's agent connects and says hello (only then is it given tasks). Returns the link id."""
+    async def drop(m):
+        pass
+    link = mgr.attach(name, send or drop)
+    await mgr.on_agent_message(link, {"type": "hello", "agent_version": "0.2.0", "codex_version": "x",
+                                      "auth_mode": "chatgpt", **hello})
+    return link
+
+
 async def test_send_followup_and_cancel_from_admin(admin, host):
     sent = []
 
     async def send(m):
         sent.append(m)
-    link = host.mgr.attach("friend", send)
+    link = await join(host.mgr, "friend", send)
     r = await admin.post("/admin/api/tasks", json={"prompt": "hello"}, headers=H)
     assert r.status_code == 200
     tid = r.json()["task_id"]
@@ -202,10 +212,8 @@ async def test_send_followup_and_cancel_from_admin(admin, host):
 
 
 async def test_undo_refused_for_every_task_in_progress(admin, host):
-    async def send(m):
-        pass
-    host.mgr.attach("alice", send)
-    host.mgr.attach("bob", send)
+    await join(host.mgr, "alice")
+    await join(host.mgr, "bob")
     tids = [(await admin.post("/admin/api/tasks", json={"prompt": p}, headers=H)).json()["task_id"]
             for p in ("one", "two")]
     assert {host.mgr.tasks[t].lender for t in tids} == {"alice", "bob"}

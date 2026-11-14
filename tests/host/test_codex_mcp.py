@@ -126,6 +126,8 @@ async def two(share):
     for who in LENDERS:
         token[who] = host.tokens.issue(who)
         link[who] = host.mgr.attach(who, send)
+        await host.mgr.on_agent_message(link[who], {"type": "hello", "agent_version": "0.2.0", "codex_version": "x",
+                                                    "auth_mode": "chatgpt"})
         task[who] = await host.mgr.start(f"work for {who}", lender=who)
     async with running(host.codex_ep):
         transport = httpx.ASGITransport(app=create_public_app(host))

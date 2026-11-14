@@ -24,6 +24,7 @@ BUSY = "作業中のタスクがあります: {}（終わるのを待つか canc
 QUOTA = "使用量の上限のため受け付けません。再開可能: {}"
 # A continuation can only go to the lender whose Codex holds the session (design §3.3).
 RETRY_FRESH = "続きとしては送れないので、前回の報告を添えて新しく依頼してください。"
+NOT_READY = "「{}」の agent は接続したばかりで、まだ準備ができていません。数秒待ってからやり直してください。"
 
 
 def iso_local(ts: float | None) -> str | None:
@@ -115,6 +116,7 @@ class TaskManager:
         link_id = next(self._link_ids)
         self._links[link_id] = self._last = lender
         lender.send, lender.connected, lender.since = send, True, time.time()
+        lender.ready = False  # until this connection's hello
         self._changed()
         return link_id
 
@@ -122,7 +124,7 @@ class TaskManager:
         lender = self._links.pop(link_id, None)
         if lender is None:
             return
-        lender.send, lender.connected = None, False
+        lender.send, lender.connected, lender.ready = None, False, False
         for rec in self.tasks.values():
             if rec.lender == lender.name and rec.state in ("queued", "running"):
                 rec.state_before_offline = rec.state
@@ -152,13 +154,22 @@ class TaskManager:
                             + ", ".join(l.name for l in online))
         return online[0]
 
+    @staticmethod
+    def _ready(lender: Lender) -> Lender:
+        """A task only goes to a lender whose hello has arrived: before it, nothing is known
+        about its sessions (disposable or not) or about the task it may still be running."""
+        if not lender.ready:
+            raise ToolError(NOT_READY.format(lender.name))
+        return lender
+
     def _primary(self) -> Lender | None:
         """For the single-lender views (agent_info, top level of usage): the latest connection."""
         return self._links[max(self._links)] if self._links else self._last
 
     @staticmethod
     def _info(l: Lender) -> dict:
-        return {"connected": l.connected, "since": l.since, "name": l.name, "agent_version": l.agent_version,
+        return {"connected": l.connected, "ready": l.ready, "since": l.since, "name": l.name,
+                "agent_version": l.agent_version,
                 "codex_version": l.codex_version, "auth_mode": l.auth_mode, "protocol": l.protocol,
                 "capabilities": dict(l.capabilities)}
 
@@ -197,6 +208,7 @@ class TaskManager:
                 lender.limits = m["limits"]
             if "current_task_id" in m:
                 self._reconcile(lender, m.get("current_task_id"))
+            lender.ready = True
             await lender.send(self._settings_msg())
             self._changed()
         elif t == "usage":
@@ -324,12 +336,17 @@ class TaskManager:
         lender = pick_lender(online, self.settings["thresholds"], now)
         if lender is not None:
             return lender
-        # nobody is free: everyone idle is over a limit (say when the first comes back), or all are working
-        waits = [t for l in online
+        # nobody is free: everyone idle is over a limit (say when the first comes back), all are working,
+        # or the only ones left have just connected and not said hello yet
+        ready = [l for l in online if l.ready]
+        waits = [t for l in ready
                  if l.current_task_id is None and (t := blocked_until(l, self.settings["thresholds"], now))]
         if waits:
             raise ToolError(QUOTA.format(iso_local(min(waits))))
-        raise ToolError(BUSY.format(", ".join(l.current_task_id for l in online if l.current_task_id)))
+        busy = [l.current_task_id for l in ready if l.current_task_id]
+        if busy:
+            raise ToolError(BUSY.format(", ".join(busy)))
+        raise ToolError(NOT_READY.format("、".join(l.name for l in online)))
 
     def _continue_target(self, prev: TaskRecord, lender: str | None, now: float) -> Lender:
         """The session lives in one lender's Codex, so a continuation can only go back there."""
@@ -342,6 +359,7 @@ class TaskManager:
             target = self._lenders.get(prev.lender)
             if target is None or not target.connected:
                 raise ToolError(f"このタスクの会話を持つ「{prev.lender}」の agent が接続されていません。{RETRY_FRESH}")
+        self._ready(target)  # "resumable" below is only known from the hello of this connection
         if not target.capabilities.get("resumable", True):
             raise ToolError(f"「{target.name}」は使い捨てのセッションで動いているため、会話が残っていません。{RETRY_FRESH}")
         if not prev.thread_id:
@@ -359,7 +377,7 @@ class TaskManager:
             target = self._continue_target(prev, lender, now)
             thread_id = prev.thread_id
         elif lender is not None:
-            target = self._resolve(lender)
+            target = self._ready(self._resolve(lender))
             self._require_free(target, now)
         else:
             target = self._pick(now)

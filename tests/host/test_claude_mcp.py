@@ -38,6 +38,16 @@ async def env(share):
             yield mgr, local, remote
 
 
+async def join(mgr: TaskManager, name: str, send=None, **hello) -> int:
+    """A lender's agent connects and says hello (only then is it given tasks). Returns the link id."""
+    async def drop(m):
+        pass
+    link = mgr.attach(name, send or drop)
+    await mgr.on_agent_message(link, {"type": "hello", "agent_version": "0.2.0", "codex_version": "x",
+                                      "auth_mode": "chatgpt", **hello})
+    return link
+
+
 async def call(client, name: str, args: dict) -> dict:
     r = await client.post("/claude/mcp", headers=ACCEPT, json={
         "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}})
@@ -136,7 +146,7 @@ async def test_send_task_with_agent(env):
 
     async def send(m):
         sent.append(m)
-    mgr.attach("friend", send)
+    await join(mgr, "friend", send)
     res = await call(local, "send_task", {"prompt": "x"})
     tid = json.loads(res["content"][0]["text"])["task_id"]
     assert sent[-1]["type"] == "task_start" and sent[-1]["task_id"] == tid
@@ -145,11 +155,8 @@ async def test_send_task_with_agent(env):
 async def test_undo_refused_for_every_task_in_progress(env, share):
     # Two lenders work at once: neither task may be undone while it runs.
     mgr, local, _ = env
-
-    async def send(m):
-        pass
-    mgr.attach("alice", send)
-    mgr.attach("bob", send)
+    await join(mgr, "alice")
+    await join(mgr, "bob")
     tids = [text_of(await call(local, "send_task", {"prompt": p}))["task_id"] for p in ("one", "two")]
     assert {mgr.tasks[t].lender for t in tids} == {"alice", "bob"}
     for tid in tids:
@@ -212,7 +219,7 @@ async def test_get_status_waits_until_task_finishes(env):
 
     async def send(m):
         sent.append(m)
-    link = mgr.attach("friend", send)
+    link = await join(mgr, "friend", send)
     tid = json.loads((await call(local, "send_task", {"prompt": "x"}))["content"][0]["text"])["task_id"]
 
     async def finish_later():
@@ -228,10 +235,7 @@ async def test_get_status_waits_until_task_finishes(env):
 async def test_get_status_wait_returns_on_new_approval(env, share):
     import asyncio, time
     mgr, local, _ = env
-
-    async def send(m):
-        pass
-    mgr.attach("friend", send)
+    await join(mgr, "friend")
     tid = json.loads((await call(local, "send_task", {"prompt": "x"}))["content"][0]["text"])["task_id"]
     asyncio.get_running_loop().call_later(0.5, lambda: share.approvals.request("command", "python x.py", tid))
     t0 = time.monotonic()

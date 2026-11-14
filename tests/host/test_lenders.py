@@ -9,6 +9,7 @@ from codex_bridge.host.tasks import TaskManager
 
 TH = {"five_hour": 80, "weekly": 80}
 RETRY_ADVICE = "前回の報告を添えて新しく依頼してください"
+NOT_READY = "まだ準備ができていません"
 
 
 def win(percent):
@@ -21,6 +22,7 @@ def usage(five_hour=None, weekly=None):
 
 def lender(name, five_hour=None, weekly=None, **kw):
     kw.setdefault("connected", True)
+    kw.setdefault("ready", True)
     return Lender(name=name, usage=usage(five_hour, weekly), **kw)
 
 
@@ -52,9 +54,10 @@ def test_pick_skips_busy_offline_blocked():
     offline = lender("offline", five_hour=0, connected=False)
     blocked = lender("blocked", five_hour=85)
     blocked_by_own_limit = lender("own", five_hour=50, limits={"five_hour": 40, "weekly": None, "force": False})
+    no_hello_yet = lender("new", five_hour=0, ready=False)
     ok = lender("ok", five_hour=79)
-    assert pick_lender([busy, offline, blocked, blocked_by_own_limit, ok], TH) is ok
-    assert pick_lender([busy, offline, blocked, blocked_by_own_limit], TH) is None
+    assert pick_lender([busy, offline, blocked, blocked_by_own_limit, no_hello_yet, ok], TH) is ok
+    assert pick_lender([busy, offline, blocked, blocked_by_own_limit, no_hello_yet], TH) is None
     assert pick_lender([], TH) is None
 
 
@@ -70,12 +73,22 @@ def test_same_headroom_prefers_least_recently_assigned():
 
 
 # ---- TaskManager with several lenders -----------------------------------
+HELLO = {"agent_version": "0.1.0", "codex_version": "x", "auth_mode": "chatgpt"}
+
+
 class FakeAgent:
     def __init__(self, mgr: TaskManager, name: str):
         self.mgr = mgr
         self.name = name
         self.sent: list[dict] = []
         self.link = mgr.attach(name, self.send)
+
+    @classmethod
+    async def join(cls, mgr: TaskManager, name: str, **hello) -> "FakeAgent":
+        """Connect and say hello, as a real agent does first thing: only then is the lender given tasks."""
+        agent = cls(mgr, name)
+        await agent.push("hello", **{**HELLO, **hello})
+        return agent
 
     async def send(self, msg: dict) -> None:
         self.sent.append(msg)
@@ -101,7 +114,7 @@ def mgr(tmp_path):
 
 
 async def test_two_lenders_work_in_parallel(mgr):
-    alice, bob = FakeAgent(mgr, "alice"), FakeAgent(mgr, "bob")
+    alice, bob = await FakeAgent.join(mgr, "alice"), await FakeAgent.join(mgr, "bob")
     await alice.push("usage", **usage(five_hour=10))
     await bob.push("usage", **usage(five_hour=50))
     t1 = await mgr.start("one")
@@ -128,7 +141,7 @@ async def test_two_lenders_work_in_parallel(mgr):
 
 
 async def test_explicit_lender_is_used(mgr):
-    alice, bob = FakeAgent(mgr, "alice"), FakeAgent(mgr, "bob")
+    alice, bob = await FakeAgent.join(mgr, "alice"), await FakeAgent.join(mgr, "bob")
     await alice.push("usage", **usage(five_hour=10))
     await bob.push("usage", **usage(five_hour=50))
     tid = await mgr.start("one", lender="bob")
@@ -143,7 +156,7 @@ async def test_explicit_lender_is_used(mgr):
 
 
 async def test_explicit_lender_over_its_limit_is_refused(mgr):
-    alice, bob = FakeAgent(mgr, "alice"), FakeAgent(mgr, "bob")
+    alice, bob = await FakeAgent.join(mgr, "alice"), await FakeAgent.join(mgr, "bob")
     await alice.push("usage", **usage(five_hour=10))
     await bob.push("usage", **usage(five_hour=95))
     with pytest.raises(ToolError, match="再開可能"):
@@ -154,8 +167,8 @@ async def test_explicit_lender_over_its_limit_is_refused(mgr):
 
 
 async def test_same_name_reconnect_replaces_the_link(mgr):
-    old = FakeAgent(mgr, "alice")
-    new = FakeAgent(mgr, "alice")
+    old = await FakeAgent.join(mgr, "alice")
+    new = await FakeAgent.join(mgr, "alice")
     tid = await mgr.start("one")
     assert new.last("task_start")["task_id"] == tid and not old.all("task_start")
     mgr.detach(old.link)  # the stale connection closing must not take the new one down
@@ -163,7 +176,7 @@ async def test_same_name_reconnect_replaces_the_link(mgr):
 
 
 async def test_seq_dedupe_is_per_lender(mgr):
-    alice, bob = FakeAgent(mgr, "alice"), FakeAgent(mgr, "bob")
+    alice, bob = await FakeAgent.join(mgr, "alice"), await FakeAgent.join(mgr, "bob")
     t1 = await mgr.start("one", lender="alice")
     t2 = await mgr.start("two", lender="bob")
     await alice.push("event", seq=7, task_id=t1, kind="agent_message", data={"text": "a"})
@@ -175,7 +188,7 @@ async def test_seq_dedupe_is_per_lender(mgr):
 
 
 async def test_messages_about_another_lenders_task_are_ignored(mgr):
-    alice, bob = FakeAgent(mgr, "alice"), FakeAgent(mgr, "bob")
+    alice, bob = await FakeAgent.join(mgr, "alice"), await FakeAgent.join(mgr, "bob")
     t1 = await mgr.start("one", lender="alice")
     await bob.push("event", seq=1, task_id=t1, kind="agent_message", data={"text": "not mine"})
     await bob.push("task_state", seq=2, task_id=t1, state="completed", thread_id="thB", report="hijack")
@@ -183,7 +196,7 @@ async def test_messages_about_another_lenders_task_are_ignored(mgr):
 
 
 async def test_continue_goes_to_same_lender(mgr):
-    alice, bob = FakeAgent(mgr, "alice"), FakeAgent(mgr, "bob")
+    alice, bob = await FakeAgent.join(mgr, "alice"), await FakeAgent.join(mgr, "bob")
     await alice.push("usage", **usage(five_hour=60))
     await bob.push("usage", **usage(five_hour=10))
     t1 = await mgr.start("one", lender="alice")
@@ -242,7 +255,7 @@ async def test_hello_v2_records_capabilities_and_limits(mgr):
 
 async def test_usage_and_lenders_are_per_lender(mgr):
     assert mgr.lenders() == [] and mgr.usage()["lenders"] == {} and mgr.agent_info() == {"connected": False}
-    alice, bob = FakeAgent(mgr, "alice"), FakeAgent(mgr, "bob")
+    alice, bob = await FakeAgent.join(mgr, "alice"), await FakeAgent.join(mgr, "bob")
     await alice.push("usage", **usage(five_hour=10))
     await bob.push("usage", **usage(five_hour=95))
     u = mgr.usage()
@@ -259,7 +272,7 @@ async def test_usage_and_lenders_are_per_lender(mgr):
 
 
 async def test_reconnect_reconciles_only_that_lenders_tasks(mgr):
-    alice, bob = FakeAgent(mgr, "alice"), FakeAgent(mgr, "bob")
+    alice, bob = await FakeAgent.join(mgr, "alice"), await FakeAgent.join(mgr, "bob")
     t1 = await mgr.start("one", lender="alice")
     t2 = await mgr.start("two", lender="bob")
     mgr.detach(bob.link)
@@ -307,7 +320,7 @@ async def test_session_requests_need_a_lender_when_several_are_connected(mgr):
 
 
 async def test_lender_survives_restart_and_old_records_load(tmp_path, mgr):
-    alice = FakeAgent(mgr, "alice")
+    alice = await FakeAgent.join(mgr, "alice")
     tid = await mgr.start("one")
     await alice.finish(tid, seq=1)
     (tmp_path / "data" / "tasks" / "old.json").write_text(
@@ -316,7 +329,56 @@ async def test_lender_survives_restart_and_old_records_load(tmp_path, mgr):
     assert mgr2.tasks[tid].lender == "alice" and mgr2.tasks["old"].lender is None
     rows = {r["task_id"]: r for r in mgr2.list_tasks()}
     assert rows[tid]["lender"] == "alice" and rows["old"]["lender"] is None
-    # a v0.1 record has no lender: its continuation goes to the only connected one
+    # a v0.1 record has no lender: its continuation goes to the only connected one, once that one said hello
     solo = FakeAgent(mgr2, "alice")
+    with pytest.raises(ToolError, match=NOT_READY):
+        await mgr2.start("more", continue_task_id="old")
+    assert not solo.all("task_start") and "old" in mgr2.tasks and len(mgr2.tasks) == 2
+    await solo.push("hello", **HELLO, current_task_id=None)
     await mgr2.start("more", continue_task_id="old")
     assert solo.last("task_start")["continue_thread_id"] == "th0"
+
+
+# ---- a lender that connected but has not said hello yet: what it can do is not known ----
+async def test_no_task_goes_to_a_lender_before_its_hello(mgr):
+    alice = FakeAgent(mgr, "alice")
+    row = mgr.lenders()[0]
+    assert row["connected"] is True and row["ready"] is False
+    with pytest.raises(ToolError, match=NOT_READY):
+        await mgr.start("one")
+    with pytest.raises(ToolError, match=NOT_READY):
+        await mgr.start("one", lender="alice")
+    assert not alice.all("task_start") and mgr.tasks == {}
+    await alice.push("hello", **HELLO, current_task_id=None)
+    assert mgr.lenders()[0]["ready"] is True
+    tid = await mgr.start("one")
+    assert alice.last("task_start")["task_id"] == tid
+
+
+async def test_automatic_routing_skips_a_lender_before_its_hello(mgr):
+    alice = FakeAgent(mgr, "alice")  # has more room, but no hello yet
+    bob = await FakeAgent.join(mgr, "bob")
+    await alice.push("usage", **usage(five_hour=0))
+    await bob.push("usage", **usage(five_hour=70))
+    tid = await mgr.start("one")
+    assert mgr.tasks[tid].lender == "bob" and not alice.all("task_start")
+    with pytest.raises(ToolError, match="作業中"):  # bob works; alice still cannot be chosen
+        await mgr.start("two")
+
+
+async def test_continuation_waits_for_the_hello_of_a_new_connection(mgr):
+    # While away the lender may have switched to disposable sessions: only the new hello tells.
+    alice = await FakeAgent.join(mgr, "alice")
+    t1 = await mgr.start("one")
+    await alice.finish(t1, seq=1, thread_id="thA")
+    mgr.detach(alice.link)
+    again = FakeAgent(mgr, "alice")
+    assert mgr.lenders()[0]["ready"] is False
+    with pytest.raises(ToolError, match=NOT_READY):
+        await mgr.start("more", continue_task_id=t1)
+    assert not again.all("task_start")
+    await again.push("hello", **HELLO, protocol=2, capabilities={"resumable": False, "pre_approval": False},
+                     current_task_id=None)
+    with pytest.raises(ToolError, match=RETRY_ADVICE):
+        await mgr.start("more", continue_task_id=t1)
+    assert not again.all("task_start") and len(mgr.tasks) == 1
