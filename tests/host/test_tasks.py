@@ -191,3 +191,8 @@ async def test_reconnected_agent_with_task_restores_state(mgr, agent):
     agent2 = FakeAgent(mgr)
     await agent2.push("hello", agent_version="x", codex_version="x", auth_mode="chatgpt", current_task_id=tid)
     assert mgr.status(tid)["state"] == "running"
+
+
+async def test_usage_shows_friend_limits(mgr, agent):
+    await agent.push("usage", **usage(five_hour=10), friend_limits={"five_hour": 70, "weekly": None, "force": True})
+    assert mgr.usage()["friend_limits"] == {"five_hour": 70, "weekly": None, "force": True}

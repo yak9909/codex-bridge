@@ -125,3 +125,37 @@ def test_no_suspend_with_zero_resume_time():
     g.on_steer_failed()  # retry flag without any block
     actions = g.on_turn_started("u2")
     assert all(not (isinstance(a, Suspend) and a.resume_at == 0) for a in actions + g.on_turn_completed())
+
+
+def test_friend_limit_lower_than_host_wins():
+    g = guard()                                   # host: 90 / 95
+    g.set_local_limits({"five_hour": 50, "weekly": None}, force=False)
+    g.on_turn_started("u1")
+    assert g.on_usage(snap(five=60)) == [Steer(STOP_TEXT), BlockNew(1000)]
+
+
+def test_friend_limit_higher_than_host_does_not_loosen():
+    g = guard()
+    g.set_local_limits({"five_hour": 99, "weekly": 99}, force=False)
+    assert g.on_usage(snap(five=91)) == [BlockNew(1000)]
+
+
+def test_force_stop_interrupts_at_once():
+    g = guard()
+    g.set_local_limits({"five_hour": 50, "weekly": None}, force=True)
+    g.on_turn_started("u1")
+    assert g.on_usage(snap(five=60)) == [Interrupt(), BlockNew(1000)]
+    assert g.on_turn_completed() == [Suspend(1000)]
+
+
+def test_force_stop_also_applies_at_turn_start_while_blocked():
+    g = guard()
+    g.set_local_limits({"five_hour": 50, "weekly": None}, force=True)
+    g.on_usage(snap(five=60))
+    assert g.on_turn_started("u1") == [Interrupt()]
+
+
+def test_effective_limits_reported():
+    g = guard()
+    g.set_local_limits({"five_hour": 50, "weekly": None}, force=True)
+    assert g.effective_limits() == {"five_hour": 50, "weekly": 95}

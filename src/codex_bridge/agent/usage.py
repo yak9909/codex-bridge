@@ -85,21 +85,36 @@ class QuotaGuard:
         self.steer_at = 0.0
         self.blocked_until: int | None = None
         self._retry_steer = False
+        # Limits set by the friend (the Codex owner) on their own PC; the lower of host/friend applies.
+        self.local: dict = {"five_hour": None, "weekly": None}
+        self.force = False  # friend's choice: interrupt at once instead of asking Codex to wrap up
 
     def set_thresholds(self, thresholds: dict) -> None:
         self.thresholds.update({k: v for k, v in thresholds.items() if v is not None})
+
+    def set_local_limits(self, limits: dict, force: bool) -> None:
+        self.local = {k: limits.get(k) for k in ("five_hour", "weekly")}
+        self.force = bool(force)
+
+    def effective_limits(self) -> dict:
+        out = {}
+        for k in ("five_hour", "weekly"):
+            vals = [v for v in (self.thresholds.get(k), self.local.get(k)) if v is not None]
+            out[k] = min(vals) if vals else None
+        return out
 
     def _start_stopping(self) -> list[Action]:
         self.stopping = True
         self.steer_at = self.clock()
         self._retry_steer = False
-        return [Steer(STOP_TEXT)]
+        return [Interrupt()] if self.force else [Steer(STOP_TEXT)]
 
     def on_usage(self, s: UsageSnapshot) -> list[Action]:
         if not self.enabled:
             return []
+        limits = self.effective_limits()
         over = [w for k, w in (("five_hour", s.five_hour), ("weekly", s.weekly))
-                if w is not None and self.thresholds.get(k) is not None and w.used_percent >= self.thresholds[k]]
+                if w is not None and limits.get(k) is not None and w.used_percent >= limits[k]]
         actions: list[Action] = []
         if over:
             resume_at = max(w.resets_at for w in over)

@@ -140,7 +140,8 @@ class TaskManager:
             await self._send_settings()
             self._changed()
         elif t == "usage":
-            self._usage = {"five_hour": m.get("five_hour"), "weekly": m.get("weekly"), "ts": m.get("ts")}
+            self._usage = {"five_hour": m.get("five_hour"), "weekly": m.get("weekly"), "ts": m.get("ts"),
+                           "friend_limits": m.get("friend_limits")}
             self._changed()
         elif t == "event":
             if m["task_id"] in self.tasks:

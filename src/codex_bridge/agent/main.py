@@ -19,7 +19,7 @@ from .. import __version__
 from ..common.invite import Invite, parse_invite
 from .appserver import AppServer, codex_command
 from .control_client import ControlClient
-from .logview import LogStore, create_logview_app
+from .logview import LimitsStore, LogStore, create_logview_app
 from .runner import AgentRunner
 from .sessions import SessionRegistry
 from .setup import (MIN_CODEX_VERSION, choose_codex, data_root, download_codex, load_invite, make_guard, run_login,
@@ -148,7 +148,9 @@ async def run_agent(invite: Invite, codex: Path, home: Path) -> None:
                                                   "auth_mode": mode},
                            on_status=lambda s: tray.set_status(s))
     tray.run_detached()
-    logview = make_logview_server(store)
+    limits = LimitsStore(home / "limits.json")
+    runner.apply_local_limits(limits.get())
+    logview = make_logview_server(store, limits, runner.apply_local_limits)
 
     async def watchdog() -> None:
         while True:
@@ -180,9 +182,9 @@ def ensure_std_streams() -> None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 
-def make_logview_server(store: LogStore) -> uvicorn.Server:
+def make_logview_server(store: LogStore, limits: LimitsStore | None = None, on_limits=None) -> uvicorn.Server:
     # log_config=None: uvicorn's own logging setup inspects sys.stdout, which a windowed exe lacks.
-    return uvicorn.Server(uvicorn.Config(create_logview_app(store), host="127.0.0.1", port=LOGVIEW_PORT,
+    return uvicorn.Server(uvicorn.Config(create_logview_app(store, limits, on_limits), host="127.0.0.1", port=LOGVIEW_PORT,
                                          log_level="warning", log_config=None))
 
 

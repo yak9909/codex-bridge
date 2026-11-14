@@ -47,3 +47,18 @@ async def test_page_served(client):
 
 def test_store_persists_to_disk(tmp_path, store):
     assert len(LogStore(tmp_path / "logs").entries) == len(store.entries)
+
+
+async def test_limits_api_defaults_save_and_notify(tmp_path):
+    from codex_bridge.agent.logview import LimitsStore
+    seen = []
+    limits = LimitsStore(tmp_path / "limits.json")
+    app = create_logview_app(LogStore(tmp_path / "logs"), limits=limits, on_limits=seen.append)
+    t = httpx.ASGITransport(app=app, client=("127.0.0.1", 1))
+    async with httpx.AsyncClient(transport=t, base_url="http://127.0.0.1:8766") as c:
+        assert (await c.get("/api/limits")).json() == {"five_hour": None, "weekly": None, "force": False}
+        r = await c.put("/api/limits", json={"five_hour": 70, "weekly": None, "force": True})
+        assert r.status_code == 200 and seen[-1] == {"five_hour": 70, "weekly": None, "force": True}
+        assert (await c.put("/api/limits", json={"five_hour": 150})).status_code == 400
+        assert (await c.put("/api/limits", json={"five_hour": 70}, headers={"Host": "evil:1"})).status_code == 403
+    assert LimitsStore(tmp_path / "limits.json").get() == {"five_hour": 70, "weekly": None, "force": True}

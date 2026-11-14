@@ -197,3 +197,12 @@ async def test_task_start_after_app_server_died_reports_failed(env):
     await env.runner.handle({"type": "task_start", "task_id": "t1", "prompt": "do", "continue_thread_id": None})
     await env.wait_state("failed")
     assert env.runner.cur is None
+
+
+@pytest.mark.parametrize("env", [DONE_SCRIPT], indirect=True)
+async def test_friend_limits_are_reported_with_usage(env):
+    env.runner.apply_local_limits({"five_hour": 70, "weekly": None, "force": True})
+    await env.runner.refresh_usage()
+    u = env.of("usage")[-1]
+    assert u["friend_limits"] == {"five_hour": 70, "weekly": None, "force": True}
+    assert env.guard.effective_limits()["five_hour"] == 70 and env.guard.force is True

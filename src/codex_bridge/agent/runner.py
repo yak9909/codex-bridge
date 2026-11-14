@@ -50,6 +50,7 @@ class AgentRunner:
         self.on_log = on_log or (lambda e: None)
         self.cur: Current | None = None
         self.log_visibility = "summary"
+        self.friend_limits = {"five_hour": None, "weekly": None, "force": False}
         self._seq = itertools.count(int(time.time() * 1000))
         self._unacked: dict[int, dict] = {}
         self._tasks: list[asyncio.Task] = []
@@ -287,8 +288,18 @@ class AgentRunner:
             snap = await self.app.rate_limits()
         except Exception:  # app-server restarting, pipe closed, timeout
             return
-        await self._safe_send(protocol.msg("usage", **snap.to_message()))
+        await self._safe_send(protocol.msg("usage", **snap.to_message(), friend_limits=self.friend_limits))
         await self._apply(self.guard.on_usage(snap))
+
+    def apply_local_limits(self, limits: dict) -> None:
+        """The friend changed their own limits on the log page: apply now and tell the host."""
+        self.friend_limits = {"five_hour": limits.get("five_hour"), "weekly": limits.get("weekly"),
+                              "force": bool(limits.get("force"))}
+        self.guard.set_local_limits(self.friend_limits, force=self.friend_limits["force"])
+        try:
+            asyncio.get_running_loop().create_task(self.refresh_usage())
+        except RuntimeError:
+            pass  # not in the loop thread; the next poll reports it
 
     async def _usage_loop(self) -> None:
         while True:
