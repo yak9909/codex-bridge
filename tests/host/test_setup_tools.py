@@ -78,3 +78,22 @@ def test_request_shutdown_uses_header():
     assert st.request_shutdown(8770, post=post) is True
     assert seen["url"] == "http://127.0.0.1:8770/admin/api/shutdown" and seen["headers"]["X-Codex-Bridge"] == "1"
     assert st.request_shutdown(8770, post=lambda *a, **k: (_ for _ in ()).throw(OSError("refused"))) is False
+
+
+def test_friend_kit_copies_bundled_exe_without_building(tmp_path, monkeypatch):
+    # In the released admin zip the agent exe ships next to setup.bat: just copy it.
+    from codex_bridge.host import setup_cli
+    (tmp_path / "codex-bridge-agent.exe").write_bytes(b"exe")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "friend-guide.md").write_text("guide", encoding="utf-8")
+    monkeypatch.setattr(setup_cli.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("built")))
+    kit = setup_cli.build_friend_kit(tmp_path, open_folder=False)
+    assert (kit / "codex-bridge-agent.exe").read_bytes() == b"exe"
+    assert (kit / "使い方.md").read_text(encoding="utf-8") == "guide"
+
+
+def test_update_public_bind_keeps_port(tmp_path):
+    cfg = tmp_path / "host.yaml"
+    cfg.write_text('public_bind: "100.1.1.1:9000"\n', encoding="utf-8")
+    assert st.update_public_bind(cfg, "100.2.2.2") is True
+    assert 'public_bind: "100.2.2.2:9000"' in cfg.read_text(encoding="utf-8")

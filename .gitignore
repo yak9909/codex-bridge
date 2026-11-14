@@ -9,3 +9,4 @@ __pycache__/
 .pytest_cache/
 host.yaml
 friend-kit/
+release/

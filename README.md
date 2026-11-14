@@ -7,6 +7,17 @@
 - こちらの Claude Code から、依頼・追加の指示・状態の確認・中止・使用量の確認・セッションの管理ができます。
 - 知人の Codex の使用量（5 時間枠・週間枠）がしきい値を超えると、作業中の Codex に「区切りで止めて報告して」と指示し、穏やかに中断します。
 
+## 配布物（すぐ使う場合）
+
+GitHub の **Releases** から 2 つの zip を取得します。Python や uv は要りません。
+
+| zip | 誰が使う | 使い方 |
+|---|---|---|
+| `codex-bridge-admin-v*.zip` | 依頼主（あなた） | 展開して `setup.bat` → 以後は `start.bat` / `stop.bat`。中の「はじめにお読みください.txt」を参照 |
+| `codex-bridge-friend-v*.zip` | 知人 | 展開して `codex-bridge-agent.exe` を起動し、招待コードを貼る。中の「使い方.md」を参照 |
+
+リリースの作り方（開発者向け）: `uv run python scripts/build_release.py` で `release/` に 2 つの zip ができます。
+
 設計: [docs/2026-11-14-codex-bridge-design.md](docs/2026-11-14-codex-bridge-design.md)
 知人向けの手順: [docs/friend-guide.md](docs/friend-guide.md)
 運用手順（毎回の流れ・Claude Code への伝え方）: [docs/operation-guide.md](docs/operation-guide.md)

@@ -61,12 +61,15 @@ def write_host_config(path: Path, share_root: Path, data_dir: Path, ip: str,
     Path(path).write_text(text, encoding="utf-8")
 
 
-def update_public_bind(path: Path, ip: str, port: int = PUBLIC_PORT) -> bool:
-    """Point public_bind at ip, keeping the rest of the file. Returns True if it changed."""
+def update_public_bind(path: Path, ip: str, port: int | None = None) -> bool:
+    """Point public_bind at ip (keeping its port and the rest of the file). Returns True if it changed."""
     path = Path(path)
     text = path.read_text(encoding="utf-8")
-    new_line = f'public_bind: "{ip}:{port}"'
     m = re.search(r"^public_bind:.*$", text, flags=re.MULTILINE)
+    if port is None:
+        old = re.search(r":(\d+)\D*$", m.group(0)) if m else None
+        port = int(old.group(1)) if old else PUBLIC_PORT
+    new_line = f'public_bind: "{ip}:{port}"'
     if m and m.group(0).strip() == new_line:
         return False
     text = text[:m.start()] + new_line + text[m.end():] if m else text.rstrip("\n") + "\n" + new_line + "\n"

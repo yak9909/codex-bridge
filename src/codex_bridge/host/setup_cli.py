@@ -143,21 +143,25 @@ def run_setup(config_path: Path) -> None:
         webbrowser.open("https://login.tailscale.com/admin/machines")
 
 
-def build_friend_kit(root: Path) -> None:
-    spec = root / "codex-bridge-agent.spec"
-    r = subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", str(spec)], cwd=root,
-                       capture_output=True, text=True)
-    exe = root / "dist" / "codex-bridge-agent.exe"
-    if r.returncode != 0 or not exe.exists():
-        _say("作れませんでした。詳しくは次の内容を確認してください:")
-        _say((r.stderr or r.stdout)[-2000:])
-        return
+def build_friend_kit(root: Path, open_folder: bool = True) -> Path | None:
+    exe = root / "codex-bridge-agent.exe"  # shipped next to setup.bat in the released admin zip
+    if not exe.exists():
+        spec = root / "codex-bridge-agent.spec"
+        r = subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", str(spec)], cwd=root,
+                           capture_output=True, text=True)
+        exe = root / "dist" / "codex-bridge-agent.exe"
+        if r.returncode != 0 or not exe.exists():
+            _say("作れませんでした。詳しくは次の内容を確認してください:")
+            _say((r.stderr or r.stdout)[-2000:])
+            return None
     kit = root / "friend-kit"
     kit.mkdir(exist_ok=True)
     shutil.copy2(exe, kit / exe.name)
     shutil.copy2(root / "docs" / "friend-guide.md", kit / "使い方.md")
     _say(f"できました: {kit}")
-    os.startfile(kit)
+    if open_folder:
+        os.startfile(kit)
+    return kit
 
 
 # ---- start.bat ---------------------------------------------------------------
