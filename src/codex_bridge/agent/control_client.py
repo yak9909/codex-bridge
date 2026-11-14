@@ -33,6 +33,7 @@ class ControlClient:
         self.initial_backoff = initial_backoff
         self.on_status = on_status or (lambda s: None)
         self.ws = None
+        self.paused = False
         runner.send = self.send
 
     async def send(self, m: dict) -> None:
@@ -48,6 +49,10 @@ class ControlClient:
     async def run_forever(self) -> None:
         backoff = self.initial_backoff
         while True:
+            if self.paused:
+                self.on_status("一時停止中")
+                await asyncio.sleep(1)
+                continue
             try:
                 async with websockets.connect(
                         ws_url(self.invite.url), max_size=None, ping_interval=20, ping_timeout=60,
