@@ -13,7 +13,7 @@ GitHub の **Releases** から 2 つの zip を取得します。Python や uv �
 
 | zip | 誰が使う | 使い方 |
 |---|---|---|
-| `codex-bridge-admin-v*.zip` | 依頼主（あなた） | 展開して `setup.bat` → 以後は `start.bat` / `stop.bat`。中の「はじめにお読みください.txt」を参照 |
+| `codex-bridge-admin-v*.zip` | 依頼主（あなた） | 展開して `setup.bat` → `install-mcp.bat` → 以後は `start.bat` / `stop.bat`。Claude Code か Codex に「codex-bridge で○○を依頼して」と頼むだけで使えます。中の「はじめにお読みください.txt」を参照 |
 | `codex-bridge-friend-v*.zip` | 知人 | 展開して `codex-bridge-agent.exe` を起動し、招待コードを貼る。中の「使い方.md」を参照 |
 
 リリースの作り方（開発者向け）: `uv run python scripts/build_release.py` で `release/` に 2 つの zip ができます。
@@ -94,7 +94,8 @@ paused: false
 | `list_approvals()` / `decide_approval(id, approve)` | 承認待ちの一覧／許可・拒否 |
 | `get_policy()` / `set_policy(text)` | 権限の規則を読む／全文で置き換える（誤りがあれば保存しない） |
 | `set_exec_mode(mode)` / `set_paused(paused)` / `set_log_visibility(value)` | 実行モード・一時停止・知人に見せるログの範囲 |
-| `list_tasks()` / `get_overview()` | タスクの一覧／全体の状態 |
+| `list_tasks()` / `get_overview()` / `get_guide()` | タスクの一覧／全体の状態／エージェント向けの使い方 |
+| `set_folder_level(path, level)` / `set_share_root(path)` | フォルダごとの権限／共有フォルダの変更 |
 | `issue_invite(name)` / `revoke_invite(name)` / `list_invites()` | 招待コード |
 
 使用量の上限で中断したタスク（`suspended_quota`）は、`resume_at` 以降に `send_task(..., continue_task_id=<そのタスク>)` で続けられます。

@@ -117,3 +117,23 @@ def test_register_codex_skips_when_present_or_missing():
 def test_codex_command_wraps_cmd_shims():
     assert st.cli_command("C:/x/codex.cmd") == ["cmd.exe", "/d", "/c", "C:/x/codex.cmd"]
     assert st.cli_command("C:/x/codex.exe") == ["C:/x/codex.exe"]
+
+
+def test_codex_auto_approve_is_added_once(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('model = "x"\n\n[mcp_servers.codex-bridge]\nurl = "http://127.0.0.1:8770/claude/mcp"\n\n'
+                   '[desktop]\nfoo = 1\n', encoding="utf-8")
+    assert st.codex_auto_approve(cfg) is True
+    text = cfg.read_text(encoding="utf-8")
+    assert '[mcp_servers.codex-bridge]\ndefault_tools_approval_mode = "approve"\nurl' in text
+    assert "[desktop]\nfoo = 1" in text
+    assert st.codex_auto_approve(cfg) is False          # already there
+    import tomllib
+    assert tomllib.loads(text)["mcp_servers"]["codex-bridge"]["default_tools_approval_mode"] == "approve"
+
+
+def test_codex_auto_approve_without_entry(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('model = "x"\n', encoding="utf-8")
+    assert st.codex_auto_approve(cfg) is False
+    assert st.codex_auto_approve(tmp_path / "missing.toml") is False

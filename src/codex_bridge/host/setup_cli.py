@@ -144,7 +144,10 @@ def run_install_mcp(config_path: Path) -> None:
     msgs = {"added": "登録しました。", "already": "登録済みです。", "failed": "登録に失敗しました。",
             "missing": "見つかりませんでした（入れていなければ問題ありません。入れたあとでもう一度実行してください）。"}
     _say(f"  Claude Code: {msgs[st.register_claude(local_port=port)]}")
-    _say(f"  Codex      : {msgs[st.register_codex(local_port=port)]}")
+    codex_result = st.register_codex(local_port=port)
+    _say(f"  Codex      : {msgs[codex_result]}")
+    if codex_result in ("added", "already") and st.codex_auto_approve():
+        _say("               （codex-bridge の道具を毎回確認なしで呼べるように設定しました）")
     _say("")
     _say("使い方: start.bat で codex-bridge を起動してから、Claude Code か Codex で新しい会話を始め、")
     _say("  「codex-bridge で、○○の開発を依頼して」のように頼んでください。")

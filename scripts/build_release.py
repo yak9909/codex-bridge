@@ -26,6 +26,7 @@ ADMIN_README = """codex-bridge（依頼主＝管理者用） v{ver}
      ・Windows の「変更を許可しますか？」に「はい」
      ・最後に friend-kit フォルダ（知人に渡すもの）ができる
   3. Tailscale の管理画面で、この PC を知人と共有する（setup.bat の最後に案内が出ます）
+  4. install-mcp.bat をダブルクリック（Claude Code / Codex から使えるようにする）
 
 ■ 毎回
   start.bat … 起動（管理画面がブラウザで開きます）。黒いウィンドウは閉じないでください。
@@ -36,7 +37,11 @@ ADMIN_README = """codex-bridge（依頼主＝管理者用） v{ver}
   ・Tailscale の共有の招待リンク
   ・招待コード（管理画面の「招待コード」→「発行」）
 
-詳しくは docs\\operation-guide.md を見てください（Claude Code への頼み方も書いてあります）。
+■ 頼み方
+  start.bat で起動してから、Claude Code か Codex で「codex-bridge で、○○の開発を依頼して」と頼むだけです。
+  管理画面の「Codex に依頼する」欄から直接頼むこともできます。
+
+詳しくは docs\\operation-guide.md を見てください。
 """
 
 

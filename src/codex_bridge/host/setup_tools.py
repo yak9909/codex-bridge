@@ -167,6 +167,32 @@ def register_codex(run=subprocess.run, codex: str | None = "auto", local_port: i
     return "added" if r.returncode == 0 else "failed"
 
 
+def codex_config_path() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+
+
+def codex_auto_approve(config: Path | None = None) -> bool:
+    """Let the owner's Codex call codex-bridge tools without asking each time (they poll get_status a lot).
+
+    Inserts default_tools_approval_mode = "approve" into [mcp_servers.codex-bridge]. Returns True if changed."""
+    path = Path(config or codex_config_path())
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    header = f"[mcp_servers.{MCP_NAME}]"
+    m = re.search(rf"^{re.escape(header)}[ \t]*$", text, flags=re.MULTILINE)
+    if not m:
+        return False
+    nxt = re.search(r"^\[", text[m.end():], flags=re.MULTILINE)
+    table = text[m.end(): m.end() + nxt.start()] if nxt else text[m.end():]
+    if re.search(r"^\s*default_tools_approval_mode\s*=", table, flags=re.MULTILINE):
+        return False
+    text = text[:m.end()] + '\ndefault_tools_approval_mode = "approve"' + text[m.end():]
+    path.write_text(text, encoding="utf-8")
+    return True
+
+
 # ---- stop ------------------------------------------------------------------
 def _http_post(url: str, headers: dict, timeout: float) -> int:
     import urllib.request
