@@ -93,3 +93,15 @@ async def test_server_requests_are_answered(fake):
 async def test_account_mode(fake):
     await fake.app.start()
     assert await fake.app.auth_mode() == "chatgpt"
+
+
+def test_launch_args_isolate_from_friends_codex_setup():
+    from codex_bridge.agent.appserver import ISOLATED_FEATURES, launch_args
+    argv = launch_args("http://h:1", disabled_mcp=["blender", "my server"])
+    for f in ("shell_tool", "unified_exec", "computer_use", "browser_use", "apps", "plugins", "view_image"):
+        assert f in ISOLATED_FEATURES
+        i = argv.index(f)
+        assert argv[i - 1] == "--disable"
+    assert "mcp_servers.blender.enabled=false" in argv
+    assert 'mcp_servers."my server".enabled=false' in argv
+    assert not any("mcp_servers.bridge.enabled" in a for a in argv)

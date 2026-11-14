@@ -132,3 +132,51 @@ def make_guard(auth_mode: str, thresholds: dict | None = None):
     guard = QuotaGuard(thresholds or {"five_hour": 90, "weekly": 95})
     guard.enabled = auth_mode == "chatgpt"
     return guard
+
+
+# ---- the friend's own Codex setup -------------------------------------------
+MIN_CODEX_VERSION = (0, 167, 0)  # the version this tool was verified against
+
+
+def codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+
+
+def user_mcp_names(home: Path | None = None) -> list[str]:
+    """MCP servers the friend configured in config.toml (to switch them off for our sessions)."""
+    import tomllib
+    p = Path(home or codex_home()) / "config.toml"
+    try:
+        data = tomllib.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    servers = data.get("mcp_servers") or {}
+    return [name for name in servers if name != "bridge"]
+
+
+def parse_version(text: str) -> tuple[int, int, int] | None:
+    import re
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", text or "")
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def version_ok(v: tuple[int, int, int] | None) -> bool:
+    return v is not None and v >= MIN_CODEX_VERSION
+
+
+def codex_version_of(path: Path) -> tuple[int, int, int] | None:
+    from .appserver import codex_command
+    try:
+        out = subprocess.run([*codex_command(path), "--version"], capture_output=True, text=True, timeout=30,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return parse_version(out)
+
+
+def choose_codex(on_path: Path | None, bundled: Path | None, version_of=codex_version_of) -> Path | None:
+    """Prefer the Codex on PATH if new enough, else our own copy; None means: download a new one."""
+    for candidate in (on_path, bundled):
+        if candidate is not None and version_ok(version_of(candidate)):
+            return candidate
+    return None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -21,7 +22,8 @@ from .control_client import ControlClient
 from .logview import LogStore, create_logview_app
 from .runner import AgentRunner
 from .sessions import SessionRegistry
-from .setup import data_root, download_codex, find_codex, load_invite, make_guard, run_login, save_invite
+from .setup import (MIN_CODEX_VERSION, choose_codex, data_root, download_codex, load_invite, make_guard, run_login,
+                    save_invite, user_mcp_names)
 
 LOGVIEW_PORT = 8766
 TITLE = "codex-bridge"
@@ -115,7 +117,8 @@ async def run_agent(invite: Invite, codex: Path, home: Path) -> None:
     cmd = codex_command(codex)
     workdir = home / "workdir"
     workdir.mkdir(exist_ok=True)
-    app = AppServer(cmd, invite.url, invite.token, workdir)
+    # Our sessions use only the bridge tools: the friend's own MCP servers are switched off for them.
+    app = AppServer(cmd, invite.url, invite.token, workdir, disabled_mcp=user_mcp_names())
     await app.start()
     mode = await app.auth_mode()
     if mode == "none":
@@ -209,10 +212,14 @@ def _main(home: Path) -> None:
         if invite is None:
             return
         save_invite(home, invite)
-    codex = find_codex(home / "bin")
+    on_path = shutil.which("codex")
+    bundled = home / "bin" / "codex.exe"
+    codex = choose_codex(Path(on_path) if on_path else None, bundled if bundled.exists() else None)
     if codex is None:
-        if not ask_yes_no("Codex（コマンド版）が見つかりません。公式サイト（GitHub の openai/codex）から"
-                          "ダウンロードしてよいですか？（約 200MB）"):
+        need = ".".join(map(str, MIN_CODEX_VERSION))
+        if not ask_yes_no(f"Codex（コマンド版、{need} 以降）が見つからないか、古い版です。公式サイト"
+                          "（GitHub の openai/codex）から最新版をダウンロードしてよいですか？（約 200MB）\n"
+                          "※ あなたが普段使っている Codex には影響しません。"):
             return
         try:
             codex = download_codex(home / "bin")

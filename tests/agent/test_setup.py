@@ -59,3 +59,33 @@ def test_extract_package_finds_codex_exe(tmp_path):
     exe = setup.extract_package(archive, tmp_path / "bin")
     assert exe.read_bytes() == b"exe" and (exe.parent / "helper.exe").exists()
     assert not (tmp_path / "evil.txt").exists()
+
+
+def test_user_mcp_names_from_codex_config(tmp_path):
+    (tmp_path / "config.toml").write_text(
+        'model = "x"\n[mcp_servers.blender]\ncommand = "b"\n[mcp_servers.node_repl]\ncommand = "n"\n'
+        '[mcp_servers.bridge]\nurl = "u"\n', encoding="utf-8")
+    assert setup.user_mcp_names(tmp_path) == ["blender", "node_repl"]
+    assert setup.user_mcp_names(tmp_path / "missing") == []
+    (tmp_path / "config.toml").write_text("not = [valid", encoding="utf-8")
+    assert setup.user_mcp_names(tmp_path) == []
+
+
+def test_parse_and_compare_codex_version():
+    assert setup.parse_version("codex-cli 0.167.0\n") == (0, 167, 0)
+    assert setup.parse_version("garbage") is None
+    assert setup.version_ok((0, 167, 0)) and setup.version_ok((0, 170, 1)) and setup.version_ok((1, 0, 0))
+    assert not setup.version_ok((0, 120, 9)) and not setup.version_ok(None)
+
+
+def test_choose_codex_prefers_new_enough(tmp_path):
+    path_codex, bundled = tmp_path / "codex.cmd", tmp_path / "bin" / "codex.exe"
+    versions = {path_codex: (0, 100, 0), bundled: (0, 169, 0)}
+    get = lambda p: versions.get(p)
+    assert setup.choose_codex(path_codex, bundled, get) == bundled          # PATH one too old
+    versions[path_codex] = (0, 168, 0)
+    assert setup.choose_codex(path_codex, bundled, get) == path_codex
+    assert setup.choose_codex(None, None, get) is None
+    versions[bundled] = (0, 1, 0)
+    versions[path_codex] = (0, 1, 0)
+    assert setup.choose_codex(path_codex, bundled, get) is None             # nothing usable: download

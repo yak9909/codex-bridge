@@ -6,6 +6,7 @@ import asyncio
 import itertools
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -21,9 +22,31 @@ class AppServerError(Exception):
     pass
 
 
-def launch_args(host_url: str) -> list[str]:
-    return [
-        "app-server", "--disable", "shell_tool",
+# Built-in features that would let Codex act on the friend's PC (commands, screen, browser, local images)
+# or bring in the friend's own add-ons (apps/connectors, plugins, hooks). Verified against codex-cli 0.167.0.
+ISOLATED_FEATURES = (
+    "shell_tool", "unified_exec", "unified_exec_tty", "computer_use", "browser_use", "browser_use_external",
+    "apps", "plugins", "remote_plugin", "code_mode_host", "hooks", "view_image", "skill_mcp_dependency_install",
+)
+_BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _toml_key(name: str) -> str:
+    return name if _BARE_KEY.fullmatch(name) else json.dumps(name)
+
+
+def launch_args(host_url: str, disabled_mcp: list[str] | tuple = ()) -> list[str]:
+    """app-server arguments: only the bridge MCP server, none of the friend's tools or add-ons.
+
+    disabled_mcp must list servers that really exist in the friend's config.toml: naming an unknown
+    server creates an empty entry and makes app-server fail to start."""
+    args = ["app-server"]
+    for feature in ISOLATED_FEATURES:
+        args += ["--disable", feature]
+    for name in disabled_mcp:
+        if name != MCP_NAME:
+            args += ["-c", f"mcp_servers.{_toml_key(name)}.enabled=false"]
+    return args + [
         "-c", f'mcp_servers.{MCP_NAME}.url="{host_url.rstrip("/")}/codex/mcp"',
         "-c", f'mcp_servers.{MCP_NAME}.bearer_token_env_var="{TOKEN_ENV}"',
         "-c", f"mcp_servers.{MCP_NAME}.tool_timeout_sec=120",
@@ -45,8 +68,10 @@ def _text(text: str) -> list[dict]:
 
 
 class AppServer:
-    def __init__(self, codex_cmd: list[str], host_url: str, token: str, workdir: Path) -> None:
+    def __init__(self, codex_cmd: list[str], host_url: str, token: str, workdir: Path,
+                 disabled_mcp: list[str] | tuple = ()) -> None:
         self.codex_cmd = list(codex_cmd)
+        self.disabled_mcp = list(disabled_mcp)
         self.host_url = host_url
         self.token = token
         self.workdir = Path(workdir)
@@ -60,7 +85,7 @@ class AppServer:
     async def start(self) -> None:
         env = {**os.environ, TOKEN_ENV: self.token}
         self.proc = await asyncio.create_subprocess_exec(
-            *self.codex_cmd, *launch_args(self.host_url), cwd=str(self.workdir), env=env,
+            *self.codex_cmd, *launch_args(self.host_url, self.disabled_mcp), cwd=str(self.workdir), env=env,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             limit=64 * 1024 * 1024, creationflags=CREATE_NO_WINDOW)
         self._reader = asyncio.create_task(self._read_loop())
