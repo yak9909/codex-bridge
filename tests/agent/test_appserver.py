@@ -105,3 +105,11 @@ def test_launch_args_isolate_from_friends_codex_setup():
     assert "mcp_servers.blender.enabled=false" in argv
     assert 'mcp_servers."my server".enabled=false' in argv
     assert not any("mcp_servers.bridge.enabled" in a for a in argv)
+
+
+def test_code_mode_host_stays_enabled():
+    # Real E2E (codex 0.167): with code_mode_host disabled, every MCP tool call failed
+    # with "code-mode host is disabled". It must stay on.
+    from codex_bridge.agent.appserver import ISOLATED_FEATURES, launch_args
+    assert "code_mode_host" not in ISOLATED_FEATURES
+    assert "code_mode_host" not in launch_args("http://h:1")

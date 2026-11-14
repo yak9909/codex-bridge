@@ -104,13 +104,22 @@ def extract_package(archive: Path, bin_dir: Path) -> Path:
     return exe
 
 
+def tls_context():
+    """TLS verified by the Windows certificate store (the bundled Python's own CA list can fail)."""
+    import ssl
+
+    import truststore
+    return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+
 def download_codex(bin_dir: Path, progress=lambda done, total: None) -> Path:
-    with urllib.request.urlopen(urllib.request.Request(RELEASE_API, headers=UA), timeout=30) as r:
+    ctx = tls_context()
+    with urllib.request.urlopen(urllib.request.Request(RELEASE_API, headers=UA), timeout=30, context=ctx) as r:
         asset = pick_asset(json.load(r)["assets"])
     with tempfile.TemporaryDirectory() as d:
         archive = Path(d) / asset["name"]
         req = urllib.request.Request(asset["browser_download_url"], headers=UA)
-        with urllib.request.urlopen(req, timeout=60) as r, open(archive, "wb") as f:
+        with urllib.request.urlopen(req, timeout=60, context=ctx) as r, open(archive, "wb") as f:
             total = int(r.headers.get("Content-Length") or 0)
             done = 0
             while chunk := r.read(1 << 20):

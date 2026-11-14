@@ -89,3 +89,9 @@ def test_choose_codex_prefers_new_enough(tmp_path):
     versions[bundled] = (0, 1, 0)
     versions[path_codex] = (0, 1, 0)
     assert setup.choose_codex(path_codex, bundled, get) is None             # nothing usable: download
+
+
+def test_downloads_verify_tls_with_the_windows_store():
+    # The bundled Python's own CA list failed against GitHub on a real PC; use the OS trust store.
+    import truststore
+    assert isinstance(setup.tls_context(), truststore.SSLContext)

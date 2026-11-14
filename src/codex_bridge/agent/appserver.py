@@ -24,9 +24,10 @@ class AppServerError(Exception):
 
 # Built-in features that would let Codex act on the friend's PC (commands, screen, browser, local images)
 # or bring in the friend's own add-ons (apps/connectors, plugins, hooks). Verified against codex-cli 0.167.0.
+# Do NOT add code_mode_host: Codex routes MCP tool calls through it (disabling it broke every bridge call).
 ISOLATED_FEATURES = (
     "shell_tool", "unified_exec", "unified_exec_tty", "computer_use", "browser_use", "browser_use_external",
-    "apps", "plugins", "remote_plugin", "code_mode_host", "hooks", "view_image", "skill_mcp_dependency_install",
+    "apps", "plugins", "remote_plugin", "hooks", "view_image", "skill_mcp_dependency_install",
 )
 _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 
