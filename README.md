@@ -23,6 +23,8 @@
 
 ## こちらの準備
 
+**ふつうは `setup.bat`（最初に 1 回）・`start.bat`（起動）・`stop.bat`（停止）をダブルクリックするだけで済みます。** 詳しくは [docs/operation-guide.md](docs/operation-guide.md)。以下は手作業で行う場合の手順です。
+
 1. 依存関係を入れる: `uv sync`
 2. ripgrep を取得する: `powershell -ExecutionPolicy Bypass -File scripts/fetch_rg.ps1`
 3. Tailscale を入れてログインし、このPCの IP を調べる: `tailscale ip -4`（例: `100.101.102.103`）
