@@ -77,6 +77,15 @@ async def test_denied_approval(share):
     assert (await share.runner.get_command_result(r["job_id"], 5))["status"] == "denied"
 
 
+async def test_job_started_without_a_lender_is_hidden_from_a_named_lender(share):
+    share.set_policy(exec_mode="off")
+    job_id = (await share.runner.run_command(f"{PY} -c 1"))["job_id"]
+    assert (await share.runner.get_command_result(job_id, 1))["status"] == "denied"  # no lender on either side
+    share.runner.lender_fn = lambda: "bob"
+    with pytest.raises(ToolError, match=f"ジョブが見つかりません: {job_id}"):
+        await share.runner.get_command_result(job_id, 1)
+
+
 async def test_unanswered_approval_expires(share):
     share.set_policy(exec_mode="ask", limits={"approval_timeout_sec": 1, "sync_wait_sec": 1})
     r = await share.runner.run_command(f"{PY} -c 1")

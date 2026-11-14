@@ -187,6 +187,18 @@ async def test_command_approvals_name_the_callers_task(two):
     assert {j.command: j.task_id for j in two.host.services.runner.jobs.values()} == expected
 
 
+async def test_command_result_is_visible_only_to_the_lender_that_started_it(two):
+    two.host.policy.update(exec_mode="all")
+    job_id = (await call_as(two, "alice", "run_command", {"command": "echo alice"}))["job_id"]
+    # to bob, alice's job looks exactly like a job that does not exist
+    answers = {jid: await call(two.client, "get_command_result", {"job_id": jid}, token=two.token["bob"])
+               for jid in (job_id, "j999")}
+    for jid, res in answers.items():
+        assert res["isError"] and res["content"][0]["text"] == f"ジョブが見つかりません: {jid}"
+    mine = await call_as(two, "alice", "get_command_result", {"job_id": job_id})
+    assert mine["status"] == "done" and mine["stdout"].strip() == "alice"
+
+
 async def test_lender_without_a_task_does_not_write_into_another_lenders_task(two):
     await two.host.mgr.on_agent_message(
         two.link["bob"], {"type": "task_state", "task_id": two.task["bob"], "state": "completed"})
