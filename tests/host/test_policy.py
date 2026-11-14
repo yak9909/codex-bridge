@@ -88,3 +88,12 @@ def test_missing_policy_file_means_default_read_with_exec_off(tmp_path):
     store = PolicyStore(tmp_path / "nope.yaml")
     p = store.current()
     assert p.level_for("anything") == "read" and p.exec_mode == "off"
+
+
+def test_hidden_wins_over_any_later_rule(tmp_path):
+    # Review I9: a hidden folder stays hidden even if a later broad rule matches.
+    store = write_policy(tmp_path, 'default: read\nrules:\n  - {path: "private", level: hidden}\n'
+                                   '  - {path: "**", level: write}\n')
+    p = store.current()
+    assert p.level_for("private/x.txt") == "hidden" and p.level_for("private") == "hidden"
+    assert p.level_for("other.txt") == "write"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 from .fs_write import WriteTools, read_text_preserving
@@ -138,11 +139,10 @@ def apply_hunks(text: str, hunks: list[Hunk], rel: str) -> str:
     return out + "\n" if ends_nl or not text else out
 
 
-async def apply_patch(write: WriteTools, text: str) -> dict:
-    ops = parse_patch(text)
+def _validate(write: WriteTools, ops: list[PatchOp]) -> list[tuple]:
+    """Phase 1: check everything (paths, permissions, hunks, encodings) before touching any file."""
     paths = write.paths
     planned: list[tuple] = []
-    # Phase 1: validate everything before touching any file.
     for op in ops:
         if isinstance(op, AddFile):
             real = paths.resolve(op.path, "write")
@@ -153,6 +153,7 @@ async def apply_patch(write: WriteTools, text: str) -> dict:
             real = paths.resolve(op.path, "write")
             if not real.exists():
                 raise not_found(op.path)
+            paths.check_subtree_writable(real, "削除")
             planned.append(("delete", op.path))
         else:
             real = paths.resolve(op.path, "write")
@@ -162,18 +163,19 @@ async def apply_patch(write: WriteTools, text: str) -> dict:
                 dst = paths.resolve(op.move_to, "write")
                 if dst.exists():
                     raise ToolError(f"移動先が既にあります: {normalize_rel(op.move_to)}")
-            src_text, _, _ = read_text_preserving(real)
+            src_text, enc, _ = read_text_preserving(real)
             new_text = apply_hunks(src_text, op.hunks, normalize_rel(op.path))
+            try:
+                new_text.encode(enc)
+            except UnicodeEncodeError as e:
+                raise ToolError(f"{normalize_rel(op.path)}: この文字は {enc} で保存できません: "
+                                f"{e.object[e.start:e.end]!r}") from e
             planned.append(("update", op.path, op.move_to, new_text))
-    deletes = [p[1] for p in planned if p[0] == "delete"]
-    if deletes and write.policy.current().delete_needs_approval:
-        decision = await write.approve_fn("delete", "削除（apply_patch）: " + ", ".join(normalize_rel(d) for d in deletes))
-        if decision == "pending":
-            return {"status": "waiting_approval", "changed": [],
-                    "message": "削除を含むため管理者の承認待ちです。しばらくしてから同じパッチを再度適用してください。"}
-        if decision != "approved":
-            raise ToolError("削除を含むパッチは拒否されました")
-    # Phase 2: apply.
+    return planned
+
+
+def _apply(write: WriteTools, planned: list[tuple]) -> list[str]:
+    """Phase 2: write the validated changes."""
     changed: list[str] = []
     for p in planned:
         if p[0] == "add":
@@ -191,4 +193,20 @@ async def apply_patch(write: WriteTools, text: str) -> dict:
             else:
                 write.write_file(path, new_text)
                 changed.append(normalize_rel(path))
+    return changed
+
+
+async def apply_patch(write: WriteTools, text: str) -> dict:
+    ops = parse_patch(text)
+    # File work runs in a thread so big patches do not stall the event loop.
+    planned = await asyncio.to_thread(_validate, write, ops)
+    deletes = [p[1] for p in planned if p[0] == "delete"]
+    if deletes and write.policy.current().delete_needs_approval:
+        decision = await write.approve_fn("delete", "削除（apply_patch）: " + ", ".join(normalize_rel(d) for d in deletes))
+        if decision == "pending":
+            return {"status": "waiting_approval", "changed": [],
+                    "message": "削除を含むため管理者の承認待ちです。しばらくしてから同じパッチを再度適用してください。"}
+        if decision != "approved":
+            raise ToolError("削除を含むパッチは拒否されました")
+    changed = await asyncio.to_thread(_apply, write, planned)
     return {"status": "done", "changed": changed}

@@ -50,7 +50,7 @@
 
 ```yaml
 default: read                 # 規則に当たらない場所の扱い
-rules:                        # 後に書いた・より細かい規則が優先。hidden のフォルダの中は常に hidden
+rules:                        # 後に書いた規則が優先。ただし hidden は順番に関係なく常に優先（中身ごと隠れる）
   - {path: "analysis/**", level: write}
   - {path: "private", level: hidden}
 exec:

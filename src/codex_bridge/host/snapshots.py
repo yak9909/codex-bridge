@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import threading
 from pathlib import Path
 
 NO_TASK = "_no_task"
+SAFE_ID = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,80}")
 
 
 class Snapshots:
@@ -17,7 +19,14 @@ class Snapshots:
         self._lock = threading.Lock()
 
     def _dir(self, task_id: str | None) -> Path:
-        return self.base / (task_id or NO_TASK)
+        """Snapshot folder of a task. Rejects anything that is not a plain id (never leaves self.base)."""
+        name = NO_TASK if task_id is None else task_id
+        if not SAFE_ID.fullmatch(name):
+            raise ValueError(f"不正なタスク ID です: {task_id!r}")
+        d = self.base / name
+        if d.resolve().parent != self.base.resolve():
+            raise ValueError(f"不正なタスク ID です: {task_id!r}")
+        return d
 
     def _manifest(self, d: Path) -> dict:
         m = d / "manifest.json"

@@ -75,6 +75,8 @@ async def test_send_task_with_agent(env):
 
 async def test_undo_task(env, share):
     mgr, local, _ = env
+    from codex_bridge.host.tasks import TaskRecord
+    mgr.tasks["t5"] = TaskRecord(task_id="t5", prompt="p", created=0, state="completed")
     share.task("t5")
     share.write.write_file("out/u.txt", "u")
     res = await call(local, "undo_task", {"task_id": "t5"})
@@ -88,3 +90,13 @@ async def test_get_usage_and_thresholds(env):
     assert json.loads(res["content"][0]["text"])["five_hour"] == 80
     u = json.loads((await call(local, "get_usage", {}))["content"][0]["text"])
     assert u["thresholds"]["five_hour"] == 80 and u["five_hour"] is None
+
+
+async def test_undo_unknown_or_unsafe_task_id_refused(env, share):
+    # Review C3
+    mgr, local, _ = env
+    (share.data_dir / "keep.txt").write_text("k", encoding="utf-8")
+    for bad in ("..", "nope"):
+        res = await call(local, "undo_task", {"task_id": bad})
+        assert res["isError"]
+    assert (share.data_dir / "keep.txt").exists()

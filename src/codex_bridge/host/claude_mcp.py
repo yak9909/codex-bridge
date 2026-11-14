@@ -84,9 +84,13 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
     @tool("タスクがファイル操作の道具で変えたファイルを、すべて元に戻します（コマンド実行による変更は戻りません）。")
     async def undo_task(task_id: str) -> CallToolResult:
         async def f():
+            mgr.result(task_id)  # raises ToolError for unknown ids
             if task_id == mgr.current_task_id():
                 raise ToolError("作業中のタスクは取り消せません。先に cancel_task で止めてください")
-            return {"restored": snapshots.undo(task_id)}
+            try:
+                return {"restored": snapshots.undo(task_id)}
+            except ValueError as e:
+                raise ToolError(str(e)) from e
         return await run(f)
 
     @tool("このツールで作った Codex のセッション（スレッド）の一覧を返します。")

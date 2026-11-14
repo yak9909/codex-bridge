@@ -102,9 +102,14 @@ def admin_router(host) -> APIRouter:
 
     @r.post("/api/tasks/{task_id}/undo")
     async def undo(task_id: str):
+        if task_id not in host.mgr.tasks:
+            raise HTTPException(404, "タスクが見つかりません")
         if task_id == host.mgr.current_task_id():
             raise HTTPException(409, "作業中のタスクは取り消せません")
-        return {"restored": host.snapshots.undo(task_id)}
+        try:
+            return {"restored": host.snapshots.undo(task_id)}
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
     @r.get("/api/usage")
     async def usage():

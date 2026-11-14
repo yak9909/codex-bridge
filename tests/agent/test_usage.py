@@ -106,3 +106,22 @@ def test_threshold_change_applies():
     g = guard()
     g.set_thresholds({"five_hour": 95, "weekly": 95})
     assert g.on_usage(snap(five=91)) == []
+
+
+def test_retry_cleared_when_usage_recovers():
+    # Review I7: a failed steer must not stop the first task after the window resets.
+    g = guard()
+    g.on_turn_started("u1")
+    g.on_usage(snap(five=91))
+    g.on_steer_failed()
+    g.on_turn_completed()
+    assert g.on_usage(snap(five=10, reset=5000)) == [Unblock()]
+    assert g.on_turn_started("u2") == []
+
+
+def test_no_suspend_with_zero_resume_time():
+    g = guard()
+    g.on_turn_started("u1")
+    g.on_steer_failed()  # retry flag without any block
+    actions = g.on_turn_started("u2")
+    assert all(not (isinstance(a, Suspend) and a.resume_at == 0) for a in actions + g.on_turn_completed())

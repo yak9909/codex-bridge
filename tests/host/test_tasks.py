@@ -171,3 +171,23 @@ async def test_hello_triggers_settings(mgr, agent):
     await agent.push("hello", agent_version="0.1.0", codex_version="0.167.0", auth_mode="chatgpt")
     assert agent.last("settings")["log_visibility"] == "summary"
     assert mgr.agent_info()["auth_mode"] == "chatgpt"
+
+
+async def test_restarted_agent_without_task_fails_orphan(mgr, agent):
+    # Review I4: an agent that restarted no longer has the task; the host must not stay stuck.
+    tid = await mgr.start("a")
+    await agent.push("task_state", task_id=tid, state="running", thread_id="th1")
+    mgr.detach(agent.link)
+    agent2 = FakeAgent(mgr)
+    await agent2.push("hello", agent_version="x", codex_version="x", auth_mode="chatgpt", current_task_id=None)
+    assert mgr.status(tid)["state"] == "failed"
+    assert await mgr.start("b")
+
+
+async def test_reconnected_agent_with_task_restores_state(mgr, agent):
+    tid = await mgr.start("a")
+    await agent.push("task_state", task_id=tid, state="running", thread_id="th1")
+    mgr.detach(agent.link)
+    agent2 = FakeAgent(mgr)
+    await agent2.push("hello", agent_version="x", codex_version="x", auth_mode="chatgpt", current_task_id=tid)
+    assert mgr.status(tid)["state"] == "running"

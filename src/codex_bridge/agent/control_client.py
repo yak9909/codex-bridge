@@ -60,14 +60,19 @@ class ControlClient:
                     self.ws = ws
                     backoff = self.initial_backoff
                     self.on_status("接続しました")
-                    await self.send(protocol.msg("hello", **self.hello))
+                    cur = self.runner.cur
+                    await self.send(protocol.msg("hello", **self.hello,
+                                                 current_task_id=cur.task_id if cur else None))
                     await self.runner.resend_unacked()
                     async for text in ws:
                         try:
                             m = protocol.decode(text)
                         except ValueError:
                             continue
-                        await self.runner.handle(m)
+                        try:
+                            await self.runner.handle(m)
+                        except Exception as e:  # keep the connection loop alive whatever happens
+                            self.on_status(f"処理中にエラー: {type(e).__name__}")
             except InvalidStatus as e:
                 self.on_status(f"接続を断られました（{e.response.status_code}）。招待コードが失効していないか確かめてください")
             except (OSError, ConnectionClosed, asyncio.TimeoutError) as e:

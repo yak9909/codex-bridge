@@ -123,3 +123,35 @@ def test_changes_are_audited(share):
     last = json.loads((share.data_dir / "audit.jsonl").read_text(encoding="utf-8").splitlines()[-1])
     assert last["kind"] == "file_change" and last["op"] == "write_file" and last["path"] == "out/x.txt"
     assert last["task_id"] == "t9"
+
+
+def test_move_folder_containing_hidden_is_refused(share):
+    # Review C2: moving a folder must not carry hidden children into a visible place.
+    msg = raises_msg(lambda: share.write.move_path("raw", "out/rawcopy"))
+    assert "secret" not in msg and "移動できません" in msg
+    assert (share.root / "raw/secret/k.txt").exists()
+
+
+async def test_delete_folder_containing_hidden_is_refused(share):
+    share.approve_all()
+    with pytest.raises(ToolError, match="削除できません"):
+        await share.write.delete_path("raw")
+    assert (share.root / "raw/secret/k.txt").exists()
+
+
+async def test_delete_folder_containing_read_only_is_refused(share):
+    share.set_policy(rules=[{"path": "out", "level": "write"}, {"path": "out/keep", "level": "read"}])
+    (share.root / "out/keep").mkdir()
+    (share.root / "out/keep/k.txt").write_text("k", encoding="utf-8")
+    share.approve_all()
+    with pytest.raises(ToolError, match="削除できません"):
+        await share.write.delete_path("out")
+
+
+def test_named_stream_write_refused(share):
+    # Review minor: NTFS alternate data streams on a read-only file.
+    share.set_policy(default="write", rules=[{"path": "docs/readme.md", "level": "read"}])
+    with pytest.raises(ToolError):
+        share.write.write_file("docs/readme.md:x", "y")
+    with pytest.raises(ToolError):
+        share.read.read_file("docs/readme.md::$DATA")

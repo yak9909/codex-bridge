@@ -178,3 +178,22 @@ def test_session_registry_persists(tmp_path):
     assert SessionRegistry(tmp_path / "s.json").owns("th1")
     r.remove("th1")
     assert not SessionRegistry(tmp_path / "s.json").owns("th1")
+
+
+@pytest.mark.parametrize("env", [{"errors": {"turn/steer": {"code": 1, "message": "no turn"},
+                                             "turn/start": {"code": 1, "message": "busy"}}}], indirect=True)
+async def test_handle_never_raises_on_app_server_errors(env):
+    # Review I5: an AppServerError inside handle() used to end the control loop.
+    from codex_bridge.agent.runner import Current
+    env.runner.cur = Current(task_id="t1", thread_id="th1", turn_id="u1")
+    await env.runner.handle({"type": "task_followup", "task_id": "t1", "text": "x"})  # steer fails, start fails
+    assert env.of("task_state")[-1]["state"] == "failed"
+    assert env.runner.cur is None
+
+
+async def test_task_start_after_app_server_died_reports_failed(env):
+    # Review I6
+    await env.fake.app.stop()
+    await env.runner.handle({"type": "task_start", "task_id": "t1", "prompt": "do", "continue_thread_id": None})
+    await env.wait_state("failed")
+    assert env.runner.cur is None

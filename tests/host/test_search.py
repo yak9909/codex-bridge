@@ -54,3 +54,12 @@ def test_grep_bad_regex_message_does_not_leak_paths(share):
 def test_grep_single_file_target(share):
     r = share.search.grep("needle", path="raw/a.txt")
     assert [m["path"] for m in r["matches"]] == ["raw/a.txt"]
+
+
+def test_grep_path_starting_with_dash_is_a_path_not_an_option(share):
+    # Review C1: a top-level folder named like an rg option must be searched as a path.
+    d = share.root / "--files"
+    d.mkdir()
+    (d / "x.txt").write_text("needle in dash dir\n", encoding="utf-8")
+    r = share.search.grep("needle", path="--files")
+    assert [m["path"] for m in r["matches"]] == ["--files/x.txt"]

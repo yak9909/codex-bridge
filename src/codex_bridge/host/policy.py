@@ -101,9 +101,10 @@ class Policy:
         parts = rel.split("/")
         if parts[0].lower() == OUTPUTS_TOP:
             return "read"  # command outputs are always readable, never writable
-        # An explicitly hidden ancestor hides everything below it.
-        for i in range(1, len(parts)):
-            if self._rule_level("/".join(parts[:i])) == "hidden":
+        # A hidden rule always wins: it hides the path and everything below it, whatever rules follow.
+        for i in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:i])
+            if any(r.level == "hidden" and glob_match(r.path, prefix) for r in self.rules):
                 return "hidden"
         level = self._rule_level(rel)
         return level if level is not None else self.default

@@ -109,3 +109,13 @@ async def test_delete_denied_applies_nothing(share):
 async def test_add_existing_file_refused(share):
     with pytest.raises(ToolError, match="既にあります"):
         await apply_patch(share.write, "*** Begin Patch\n*** Add File: raw/a.txt\n+x\n*** End Patch\n")
+
+
+async def test_encoding_failure_in_second_file_applies_nothing(share):
+    # Review I8: encoding errors must be caught before anything is written.
+    (share.root / "raw/sj.txt").write_bytes("日本語\n".encode("cp932"))
+    patch = ("*** Begin Patch\n*** Update File: raw/a.txt\n@@\n-line1\n+LINE1\n"
+             "*** Update File: raw/sj.txt\n@@\n-日本語\n+日本語😀\n*** End Patch\n")
+    with pytest.raises(ToolError):
+        await apply_patch(share.write, patch)
+    assert (share.root / "raw/a.txt").read_text(encoding="utf-8") == ORIGINAL_A

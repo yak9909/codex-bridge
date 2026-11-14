@@ -46,8 +46,9 @@ class SearchTools:
             cmd += ["--glob", glob]
         if encoding:
             cmd += ["--encoding", encoding]
-        cmd.append(target)
-        proc = subprocess.Popen(cmd, cwd=self.paths.root, stdout=subprocess.PIPE,
+        # "--" ends option parsing: a path such as "--pre=cmd.exe" must never become an rg option.
+        cmd += ["--", target]
+        proc = subprocess.Popen(cmd, cwd=self.paths.root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW)
         visible_cache: dict[str, str | None] = {}
         truncated = False

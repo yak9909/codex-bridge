@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -96,6 +97,7 @@ class WriteTools:
             raise not_found(src)
         if real_dst.exists():
             raise ToolError(f"移動先が既にあります: {rd}")
+        self.paths.check_subtree_writable(real_src, "移動")
         self._before(rs, real_src)
         self._before(rd, real_dst)
         real_dst.parent.mkdir(parents=True, exist_ok=True)
@@ -108,6 +110,7 @@ class WriteTools:
         rel = normalize_rel(path)
         if not real.exists():
             raise not_found(path)
+        await asyncio.to_thread(self.paths.check_subtree_writable, real, "削除")
         if self.policy.current().delete_needs_approval:
             decision = await self.approve_fn("delete", f"削除: {rel}")
             if decision == "pending":
@@ -115,8 +118,8 @@ class WriteTools:
                         "message": "削除は管理者の承認待ちです。しばらくしてから同じ delete_path を再度呼んでください。"}
             if decision != "approved":
                 raise ToolError(f"削除は拒否されました: {rel}")
-        # Re-check after a possibly long wait: the policy may have changed.
-        self.delete_now(path)
+        # Re-check after a possibly long wait (the policy may have changed); file work off the event loop.
+        await asyncio.to_thread(self.delete_now, path)
         return {"status": "done", "path": rel}
 
     def delete_now(self, path: str) -> None:
@@ -125,6 +128,7 @@ class WriteTools:
         rel = normalize_rel(path)
         if not real.exists():
             raise not_found(path)
+        self.paths.check_subtree_writable(real, "削除")
         self._before(rel, real)
         if real.is_dir():
             shutil.rmtree(real)

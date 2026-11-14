@@ -135,6 +135,8 @@ class TaskManager:
             self._seen_seq.add(m["seq"])
         if t == "hello":
             self._agent.update({k: m.get(k) for k in ("agent_version", "codex_version", "auth_mode")})
+            if "current_task_id" in m:
+                self._reconcile(m.get("current_task_id"))
             await self._send_settings()
             self._changed()
         elif t == "usage":
@@ -162,6 +164,20 @@ class TaskManager:
                     fut.set_result(m.get("data"))
                 else:
                     fut.set_exception(ToolError(m.get("error") or "agent でエラーが起きました"))
+
+    def _reconcile(self, agent_task_id: str | None) -> None:
+        """After (re)connect: keep the task the agent still runs, fail the ones it lost (e.g. it restarted)."""
+        for rec in self.tasks.values():
+            if rec.state not in ACTIVE_STATES:
+                continue
+            if rec.task_id == agent_task_id:
+                rec.state = rec.state_before_offline or "running"
+            else:
+                rec.state = "failed"
+                rec.report = rec.report or ("知人側の agent が再起動したため、このタスクは中断されました。"
+                                             "続けるなら send_task の continue_task_id を使ってください。")
+            rec.state_before_offline = None
+            self._save(rec)
 
     async def _send_settings(self) -> None:
         if self._link is not None:

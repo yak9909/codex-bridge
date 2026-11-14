@@ -107,7 +107,16 @@ class AgentRunner:
             self.on_log({"type": "settings", "log_visibility": self.log_visibility})
             # Re-check usage now so a lowered threshold takes effect without waiting for the next poll.
             asyncio.create_task(self.refresh_usage())
-        elif t == "task_start":
+        else:
+            try:
+                await self._dispatch(t, m)
+            except Exception as e:  # one bad message must never stop the control loop
+                self.on_log({"type": "error", "text": f"{t}: {type(e).__name__}: {e}"})
+                if "req_id" in m:
+                    await self._reply(m["req_id"], False, error=f"{type(e).__name__}: {e}")
+
+    async def _dispatch(self, t: str, m: dict) -> None:
+        if t == "task_start":
             await self._task_start(m)
         elif t == "task_followup":
             await self._followup(m)
@@ -139,8 +148,8 @@ class AgentRunner:
                 await self._state("running")
                 await self._event("started")
                 self.cur.turn_id = await self.app.turn_start(self.cur.thread_id, m["prompt"])
-            except (AppServerError, asyncio.TimeoutError) as e:
-                await self._state("failed", report=f"開始できませんでした: {e}")
+            except Exception as e:  # app-server gone, pipe broken, timeout...: never keep a stale task
+                await self._state("failed", report=f"開始できませんでした: {type(e).__name__}: {e}")
                 self.cur = None
 
     async def _followup(self, m: dict) -> None:
@@ -152,9 +161,13 @@ class AgentRunner:
             try:
                 await self.app.turn_steer(cur.thread_id, cur.turn_id, m["text"])
                 return
-            except AppServerError:
-                pass
-        cur.turn_id = await self.app.turn_start(cur.thread_id, m["text"])
+            except Exception:
+                pass  # the turn may have just ended: start a new one below
+        try:
+            cur.turn_id = await self.app.turn_start(cur.thread_id, m["text"])
+        except Exception as e:
+            await self._state("failed", report=f"追加の指示を渡せませんでした: {type(e).__name__}: {e}")
+            self.cur = None
 
     async def _cancel(self, m: dict) -> None:
         cur = self.cur
@@ -250,7 +263,7 @@ class AgentRunner:
                     try:
                         await self.app.turn_steer(cur.thread_id, cur.turn_id, a.text)
                         await self._event("status", text="使用量の上限が近いため、区切りで止めるよう指示しました")
-                    except AppServerError:
+                    except Exception:  # includes timeouts: retry at the next turn start
                         self.guard.on_steer_failed()
                 else:
                     self.guard.on_steer_failed()
@@ -258,7 +271,7 @@ class AgentRunner:
                 if cur and cur.turn_id and cur.thread_id:
                     try:
                         await self.app.turn_interrupt(cur.thread_id, cur.turn_id)
-                    except AppServerError:
+                    except Exception:
                         pass
             elif isinstance(a, Suspend):
                 if cur:
@@ -272,17 +285,23 @@ class AgentRunner:
             return
         try:
             snap = await self.app.rate_limits()
-        except (AppServerError, asyncio.TimeoutError):
+        except Exception:  # app-server restarting, pipe closed, timeout
             return
         await self._safe_send(protocol.msg("usage", **snap.to_message()))
         await self._apply(self.guard.on_usage(snap))
 
     async def _usage_loop(self) -> None:
         while True:
-            await self.refresh_usage()
+            try:
+                await self.refresh_usage()
+            except Exception as e:  # the guard must keep running
+                self.on_log({"type": "error", "text": f"usage: {type(e).__name__}: {e}"})
             await asyncio.sleep(self.usage_interval)
 
     async def _tick_loop(self) -> None:
         while True:
             await asyncio.sleep(self.tick_interval)
-            await self._apply(self.guard.tick())
+            try:
+                await self._apply(self.guard.tick())
+            except Exception as e:
+                self.on_log({"type": "error", "text": f"tick: {type(e).__name__}: {e}"})

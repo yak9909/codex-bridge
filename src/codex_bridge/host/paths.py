@@ -45,7 +45,8 @@ class SafePaths:
         if pw.drive or pw.root or rel.startswith(("/", "\\")):
             raise not_found(shown)
         norm = normalize_rel(rel)
-        if any(part == ".." for part in norm.split("/")):
+        # ".." escapes; ":" would address NTFS alternate data streams (file.txt:x, ::$DATA).
+        if any(part == ".." or ":" in part for part in norm.split("/")):
             raise not_found(shown)
         real = (self.root / norm).resolve(strict=False)
         if not self._inside(real):
@@ -58,6 +59,24 @@ class SafePaths:
         if need == "write" and levels != {"write"}:
             raise ToolError(f"書き込みは許可されていません: {norm}")
         return real
+
+    def check_subtree_writable(self, real: Path, action: str) -> None:
+        """Refuse moving/deleting a folder if anything inside is hidden or not writable.
+
+        The message never names the offending entry (it may be hidden)."""
+        if not real.is_dir() or real.is_symlink() or os.path.isjunction(real):
+            return
+        policy = self.policy.current()
+        for dirpath, dirnames, filenames in os.walk(real):
+            d = Path(dirpath)
+            for name in dirnames + filenames:
+                p = d / name
+                rels = {self.to_rel(p)}
+                if not (p.is_symlink() or os.path.isjunction(p)):
+                    rels.add(self.to_rel(p.resolve()))
+                if any(policy.level_for(r) != "write" for r in rels):
+                    raise ToolError(f"{action}できません: フォルダの中に、書き込みが許可されていない場所があります")
+            dirnames[:] = [n for n in dirnames if not os.path.isjunction(d / n) and not (d / n).is_symlink()]
 
     def visible(self, p: Path) -> bool:
         """True if p (an entry found while walking) may be shown to Codex."""

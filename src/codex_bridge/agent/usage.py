@@ -110,12 +110,14 @@ class QuotaGuard:
                 actions.append(BlockNew(resume_at))
         elif self.blocked_until is not None:
             self.blocked_until = None
+            self._retry_steer = False  # the window came back: nothing left to stop
             actions.append(Unblock())
         return actions
 
     def on_turn_started(self, turn_id: str) -> list[Action]:
         self.active_turn = turn_id
-        if self.enabled and (self._retry_steer or (self.blocked_until is not None and not self.stopping)):
+        # Only ask Codex to stop while usage is actually over a threshold.
+        if self.enabled and self.blocked_until is not None and (self._retry_steer or not self.stopping):
             return self._start_stopping()
         return []
 
@@ -127,11 +129,13 @@ class QuotaGuard:
         self.active_turn = None
         if self.stopping:
             self.stopping = False
-            return [Suspend(self.blocked_until or 0)]
+            if self.blocked_until is not None:
+                return [Suspend(self.blocked_until)]
         return []
 
     def tick(self) -> list[Action]:
         if self.stopping and self.clock() - self.steer_at > self.grace_sec:
             self.stopping = False
-            return [Interrupt(), Suspend(self.blocked_until or 0)]
+            if self.blocked_until is not None:
+                return [Interrupt(), Suspend(self.blocked_until)]
         return []
