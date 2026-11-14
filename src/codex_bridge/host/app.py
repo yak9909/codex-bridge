@@ -73,8 +73,13 @@ def build_host(config: HostConfig, config_path: Path | None = None) -> Host:
     approvals = Approvals(policy)
     mgr = TaskManager(data, touched_fn=snapshots.touched)
     tokens = TokenStore(data)
-    # A Codex tool call belongs to the task of the lender whose token it came with, never to another's.
-    task_id_fn = lambda: mgr.current_task_id(current_lender.get())
+
+    def task_id_fn() -> str | None:
+        """A Codex tool call belongs to the task of the lender whose token it came with, never to
+        another's. Without a known lender it belongs to no task (not to "any active task")."""
+        lender = current_lender.get()
+        return mgr.current_task_id(lender) if lender is not None else None
+
     write = WriteTools(paths, policy, snapshots, audit, task_id_fn,
                        make_approve_fn(approvals, task_id_fn, wait_sec=30))
     services = HostServices(

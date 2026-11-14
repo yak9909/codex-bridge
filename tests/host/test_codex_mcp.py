@@ -11,7 +11,7 @@ from starlette.applications import Starlette
 from starlette.routing import Mount
 
 from codex_bridge.host.app import build_host, create_public_app
-from codex_bridge.host.codex_mcp import HostServices, build_codex_mcp
+from codex_bridge.host.codex_mcp import HostServices, build_codex_mcp, current_lender
 from codex_bridge.host.config import HostConfig
 from codex_bridge.host.mcp_util import BearerAuth
 from conftest import RG_PATH
@@ -207,6 +207,17 @@ async def test_lender_without_a_task_does_not_write_into_another_lenders_task(tw
     await call_as(two, "bob", "write_file", {"path": "out/late.txt", "content": "x"})
     assert two.host.snapshots.touched(two.task["alice"]) == []
     assert two.host.snapshots.touched(None) == ["out/late.txt"]
+
+
+async def test_a_call_with_no_known_lender_belongs_to_no_task(two):
+    # Fail closed: should the caller's name ever be missing, the call must not land in "any active task".
+    assert current_lender.get() is None and two.host.mgr.current_task_id() in two.task.values()
+    assert two.host.services.task_id_fn() is None
+    token = current_lender.set("alice")
+    try:
+        assert two.host.services.task_id_fn() == two.task["alice"]
+    finally:
+        current_lender.reset(token)
 
 
 async def test_calls_in_the_2026_envelope_are_tied_to_the_caller_too(two):
