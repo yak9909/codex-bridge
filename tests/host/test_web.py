@@ -102,3 +102,9 @@ def test_first_run_writes_sample_configs(tmp_path):
     data_dir = load_host_config(cfg).data_dir
     assert (data_dir / "policy.yaml").exists()
     assert ensure_config(cfg) is False
+
+
+async def test_shutdown_endpoint_sets_event(admin, host):
+    assert (await admin.post("/admin/api/shutdown")).status_code == 403  # header required
+    assert (await admin.post("/admin/api/shutdown", headers=H)).status_code == 200
+    assert host.shutdown.is_set()

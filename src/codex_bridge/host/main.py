@@ -70,16 +70,40 @@ async def serve(config_path: Path) -> None:
                                            log_level="warning", ws_max_size=64 * 1024 * 1024))
     local = uvicorn.Server(uvicorn.Config(create_local_app(host), host="127.0.0.1", port=cfg.local_port,
                                           log_level="warning"))
-    print(f"codex-bridge host: 管理画面 http://127.0.0.1:{cfg.local_port}/admin/")
-    print(f"  Claude Code: claude mcp add --transport http codex-bridge http://127.0.0.1:{cfg.local_port}/claude/mcp")
+    print("codex-bridge を起動しました。")
+    print(f"  管理画面:           http://127.0.0.1:{cfg.local_port}/admin/")
+    print(f"  共有フォルダ:       {cfg.share_root}")
     print(f"  知人の agent の接続先: http://{cfg.public_bind}")
+    print("  止めるときは stop.bat を実行するか、このウィンドウを閉じてください。")
+
+    async def watch_shutdown() -> None:
+        await host.shutdown.wait()
+        print("停止の依頼を受けたので止めます…")
+        public.should_exit = local.should_exit = True
+
+    watcher = asyncio.create_task(watch_shutdown())
     await asyncio.gather(public.serve(), local.serve())
+    watcher.cancel()
+    print("codex-bridge を止めました。")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="codex-bridge-host")
+    ap.add_argument("command", nargs="?", default="serve", choices=["serve", "setup", "start", "stop"])
     ap.add_argument("--config", default="host.yaml", type=Path)
     args = ap.parse_args()
+    if args.command == "setup":
+        from .setup_cli import run_setup
+        run_setup(args.config)
+        return
+    if args.command == "start":
+        from .setup_cli import run_start
+        run_start(args.config)
+        return
+    if args.command == "stop":
+        from .setup_cli import run_stop
+        run_stop(args.config)
+        return
     if ensure_config(args.config):
         print(f"{args.config} の見本を作りました。share_root と public_bind を書き換えてから、もう一度起動してください。")
         return

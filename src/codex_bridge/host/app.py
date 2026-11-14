@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from fastapi import FastAPI
 
@@ -56,6 +56,7 @@ class Host:
     codex_ep: McpEndpoint
     claude_ep: McpEndpoint
     events: Broadcaster
+    shutdown: asyncio.Event = field(default_factory=asyncio.Event)  # set by stop.bat via /admin/api/shutdown
 
 
 def build_host(config: HostConfig) -> Host:

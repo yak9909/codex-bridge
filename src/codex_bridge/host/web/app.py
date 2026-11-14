@@ -145,6 +145,11 @@ def admin_router(host) -> APIRouter:
         host.tokens.revoke(name)
         return {"ok": True}
 
+    @r.post("/api/shutdown")
+    async def shutdown():
+        host.shutdown.set()
+        return {"ok": True}
+
     @r.get("/api/events")
     async def events():
         q: asyncio.Queue = asyncio.Queue()
