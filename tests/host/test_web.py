@@ -49,6 +49,18 @@ async def test_admin_page_served(admin):
     assert r.status_code == 200 and "codex-bridge" in r.text
 
 
+async def test_shared_ui_parts_are_served_next_to_the_admin_page(admin, public):
+    for name in ("ui.js", "ui.css", "demo.html"):
+        assert (await admin.get(f"/admin/common/{name}")).status_code == 200, name
+    js = (await admin.get("/admin/common/ui.js")).text
+    for part in ("meter", "stateBadge", "approvals", "taskList", "taskDetail", "choiceCards"):
+        assert part in js
+    assert "awaiting_lender" in js and "rejected_by_lender" in js
+    page = (await admin.get("/admin/")).text
+    assert "/admin/common/ui.js" in page and "/admin/common/ui.css" in page
+    assert (await public.get("/admin/common/ui.js")).status_code == 404
+
+
 async def test_mutation_requires_custom_header(admin):
     r = await admin.put("/admin/api/policy", content=VALID_OFF)
     assert r.status_code == 403
@@ -211,6 +223,29 @@ async def test_send_followup_and_cancel_from_admin(admin, host):
                                            "thread_id": "th", "report": "ok"})
     r = await admin.post("/admin/api/tasks", json={"prompt": "next", "continue_task_id": tid}, headers=H)
     assert r.status_code == 200 and sent[-1]["continue_thread_id"] == "th"
+
+
+async def test_task_detail_has_what_the_page_shows(admin, host):
+    # heading of the detail: who did it, when it started and ended (design 5); the record: plan and the rest
+    link = await join(host.mgr, "alice")
+    before = time.time()
+    tid = (await admin.post("/admin/api/tasks", json={"prompt": "hello"}, headers=H)).json()["task_id"]
+    await host.mgr.on_agent_message(link, {"type": "event", "seq": 1, "task_id": tid, "kind": "plan",
+                                           "data": {"steps": [{"step": "read", "status": "completed"}]}})
+    t = (await admin.get(f"/admin/api/tasks/{tid}")).json()
+    assert t["lender"] == "alice" and before <= t["created"] <= time.time() and t["finished"] is None
+    assert t["events"][-1]["kind"] == "plan" and t["events"][-1]["data"]["steps"][0]["step"] == "read"
+    await host.mgr.on_agent_message(link, {"type": "task_state", "seq": 2, "task_id": tid, "state": "completed",
+                                           "thread_id": "th", "report": "ok"})
+    t = (await admin.get(f"/admin/api/tasks/{tid}")).json()
+    assert t["created"] <= t["finished"] <= time.time()
+    ended = t["finished"]
+    await host.mgr.on_agent_message(link, {"type": "task_state", "seq": 3, "task_id": tid, "state": "completed",
+                                           "thread_id": "th", "report": "ok again"})
+    assert (await admin.get(f"/admin/api/tasks/{tid}")).json()["finished"] == ended  # the first end counts
+    from codex_bridge.host.tasks import TaskManager
+    again = TaskManager(host.config.data_dir, touched_fn=lambda t: [])  # kept across a host restart
+    assert again.result(tid)["finished"] == ended and again.result(tid)["created"] == t["created"]
 
 
 def window(percent: int) -> dict:

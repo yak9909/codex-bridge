@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>codex-bridge 管理画面</title>
+<link rel="stylesheet" href="/admin/common/ui.css">
 <link rel="stylesheet" href="/admin/static/style.css">
 </head>
 <body>
@@ -17,72 +18,57 @@
   <section class="banner" id="paused-banner" hidden>一時停止中です。Codex の道具はすべて「停止中」を返します。</section>
   <section class="banner warn" id="policy-error" hidden></section>
 
-  <section class="grid2">
-    <div class="card">
-      <h2>使用量（知人の Codex）</h2>
-      <div class="meter" id="m-five"><div class="label">5 時間枠</div><div class="bar"><div class="fill"></div><div class="mark"></div></div><div class="val">—</div></div>
-      <div class="meter" id="m-week"><div class="label">週間枠</div><div class="bar"><div class="fill"></div><div class="mark"></div></div><div class="val">—</div></div>
-      <div class="row small">
-        しきい値: 5 時間枠 <input id="th-five" type="number" min="1" max="100" step="1">%
-        週間枠 <input id="th-week" type="number" min="1" max="100" step="1">%
-        <button id="th-save" class="ghost">保存</button>
-      </div>
-      <p class="small" id="friend-limits"></p>
-      <p class="hint" id="blocked"></p>
+  <section class="card">
+    <h2>Codex を貸している人</h2>
+    <div class="table-wrap">
+      <table class="lenders">
+        <thead><tr><th>名前</th><th>接続</th><th>使用量</th><th>本人が決めた上限</th><th>作業中のタスク</th>
+          <th>事前承認</th><th>セッション</th></tr></thead>
+        <tbody id="lenders"></tbody>
+      </table>
     </div>
-    <div class="card">
-      <h2>状態</h2>
-      <dl class="kv">
-        <dt>共有フォルダ</dt><dd>
-          <div id="root-view"><span id="s-root"></span> <button id="root-edit" class="ghost mini">変更</button></div>
-          <div id="root-editor" hidden>
-            <input id="root-input" class="wide" placeholder="例: D:/work/project">
-            <div class="row"><button id="root-pick" class="ghost mini">参照…</button><button id="root-save" class="mini">保存</button>
-              <button id="root-cancel" class="ghost mini">取消</button></div>
-            <p class="small">「参照…」を押すと、この PC にフォルダを選ぶ画面が開きます。作業中のタスクがあるときは変えられません。</p>
-          </div></dd>
-        <dt>知人の接続先</dt><dd id="s-bind"></dd>
-        <dt>agent</dt><dd id="s-agent"></dd>
-        <dt>作業中のタスク</dt><dd id="s-task"></dd>
-        <dt>コマンド実行</dt><dd><span id="s-exec"></span> <a href="#perms" class="small">（下の「権限」で変更）</a></dd>
-        <dt>知人に見せるログ</dt><dd>
-          <select id="log-vis">
-            <option value="summary">依頼文と最終報告のみ</option>
-            <option value="files">＋道具の名前と対象パス</option>
-            <option value="all">＋道具の結果の本文</option>
-          </select></dd>
-      </dl>
+    <div class="lender-foot">
+      <div class="row small">
+        依頼主のしきい値: 5 時間枠 <input id="th-five" type="number" min="1" max="100" step="1">%
+        週間枠 <input id="th-week" type="number" min="1" max="100" step="1">%
+        <button id="th-save" class="ghost mini">保存</button>
+        <span>これを超えた人には、新しい依頼を送りません。本人が決めた上限と比べて、低いほうが効きます。</span>
+      </div>
+      <div class="row small">
+        貸している人の画面に見せる道具の記録:
+        <select id="log-vis">
+          <option value="summary">見せない</option>
+          <option value="files">道具の名前と対象パスまで</option>
+          <option value="all">道具の結果の本文まで</option>
+        </select>
+        <span>依頼文・Codex の発言と計画・最終報告は、いつも見せます。</span>
+      </div>
     </div>
   </section>
 
-  <section class="card approvals" id="approvals-card">
-    <h2>確認待ち <span class="count" id="ap-count">0</span></h2>
-    <div id="approvals"><p class="empty">確認待ちはありません。</p></div>
-  </section>
+  <section class="card" id="approvals" data-title="承認待ち"></section>
 
   <section class="card">
     <h2>Codex に依頼する</h2>
-    <textarea id="req-prompt" class="req" placeholder="例: analysis/report.md を読み、要点を 5 行でまとめて analysis/summary.md に書いてください。&#10;パスは共有フォルダからの相対パスで書きます。"></textarea>
+    <textarea id="req-prompt" class="req" placeholder="例: analysis/report.md を読み、要点を 5 行でまとめて analysis/summary.md に書いてください。&#10;メインの共有フォルダの中は相対パスで、ほかの共有フォルダの中はフルパスで書きます。"></textarea>
     <div class="row">
+      <label>送り先 <select id="req-lender"><option value="">自動（使用量に余裕のある人）</option></select></label>
       <label class="check"><input type="checkbox" id="req-continue" disabled><span id="req-continue-label">続きとして依頼する（下のタスク一覧で選んだタスクの会話を続ける）</span></label>
-      <button id="req-send">依頼する</button><span id="req-msg" class="small"></span>
     </div>
+    <div class="row"><button id="req-send">依頼する</button><span id="req-msg" class="small"></span></div>
   </section>
 
   <section class="grid-tasks">
     <div class="card">
       <h2>タスク</h2>
-      <ul class="tasks" id="tasks"></ul>
+      <div id="tasks"></div>
     </div>
-    <div class="card" id="task-detail">
-      <h2>タスクの詳細</h2>
-      <p class="empty">左の一覧から選んでください。</p>
-    </div>
+    <div class="card" id="task-detail"></div>
   </section>
 
   <section class="card perms" id="perms">
     <div class="perms-head">
-      <h2>権限</h2>
+      <h2>共有フォルダと権限</h2>
       <span class="dirty" id="perm-dirty" hidden>未保存の変更があります</span>
       <button id="perm-reset" class="ghost" hidden>元に戻す</button>
       <button id="perm-save">保存して反映</button>
@@ -91,30 +77,29 @@
       <div><span class="lv hidden">見せない</span>Codex からは存在しないように見えます（中のフォルダもすべて）</div>
       <div><span class="lv read">読むだけ</span>中身を読めますが、変更はできません</div>
       <div><span class="lv write">書ける</span>作成・変更・移動・削除ができます（削除は下の設定で承認待ちにできます）</div>
+      <div>ここに並べたフォルダだけが Codex から見えます。一覧にない場所は、存在しないのと同じに見えます。</div>
     </div>
     <div class="perm-grid">
       <div>
-        <h3>フォルダごとの権限</h3>
-        <div class="row small">何も決めていない場所は
-          <select id="perm-default">
-            <option value="read">読むだけ</option>
-            <option value="write">書ける</option>
-            <option value="hidden">見せない</option>
-          </select>
-          として扱う
-        </div>
+        <h3>共有フォルダ</h3>
         <ul class="tree" id="tree"></ul>
-        <p class="small">「上と同じ」は、ひとつ上のフォルダの設定に従います。フォルダの設定は、その中のすべてに効きます。</p>
+        <div class="row">
+          <input id="fd-path" class="grow" placeholder="追加するフォルダのフルパス（例: D:/work/project）">
+          <button id="fd-pick" class="ghost">参照…</button>
+          <select id="fd-level"><option value="read">読むだけ</option><option value="write">書ける</option></select>
+          <button id="fd-add">フォルダを追加</button>
+        </div>
+        <p class="hint" id="fd-msg"></p>
+        <p class="small">「参照…」を押すと、この PC にフォルダを選ぶ画面が開きます。
+          フォルダの追加・削除・メインの切り替えは、すぐに反映されます（作業中のタスクがあるときは変えられません）。<br>
+          「メイン」は、相対パスで書かれた場所の起点になるフォルダです。
+          ▸ を押すと、中のフォルダごとに権限を決められます。「上と同じ」は、ひとつ上のフォルダの設定に従います。
+          権限の変更は、「保存して反映」を押すと反映されます。</p>
         <p class="small" id="perm-advanced" hidden></p>
       </div>
       <div>
         <h3>コマンド実行（Codex が共有フォルダでプログラムを動かすこと）</h3>
-        <div class="modes" id="perm-modes">
-          <label><input type="radio" name="mode" value="off"><b>実行しない</b><span>ファイルの読み書きだけを許します。いちばん安全です。</span></label>
-          <label><input type="radio" name="mode" value="allowlist"><b>許可リストだけ自動</b><span>下のリストに合うコマンドは自動で実行し、それ以外は承認待ちにします。（おすすめ）</span></label>
-          <label><input type="radio" name="mode" value="ask"><b>毎回確認する</b><span>すべてのコマンドが承認待ちになります。</span></label>
-          <label><input type="radio" name="mode" value="all"><b>すべて自動</b><span>どんなコマンドでも確認なしで実行します。おすすめしません。</span></label>
-        </div>
+        <div id="perm-modes"></div>
         <div id="perm-allow-box">
           <h3>自動で実行してよいコマンド（1 行に 1 つ）</h3>
           <textarea id="perm-allow" spellcheck="false" rows="4"></textarea>
@@ -135,19 +120,20 @@
     </details>
   </section>
 
-  <section class="grid2">
-    <div class="card">
-      <h2>招待コード</h2>
-      <div class="row"><input id="inv-name" placeholder="名前（例: friend）" value="friend"><button id="inv-issue">発行</button></div>
-      <div id="inv-out" hidden>
-        <p class="small">このコードを知人に渡してください（再表示できません）。</p>
-        <div class="code-box"><code id="inv-code"></code><button id="inv-copy" class="ghost">コピー</button></div>
-      </div>
-      <h3>発行済み</h3>
-      <ul class="invites" id="invites"></ul>
+  <section class="card">
+    <h2>招待コード</h2>
+    <p class="small">Codex を貸してくれる人ごとに 1 つ発行します。付けた名前が、その人を見分ける名前（送り先）になります。
+      貸してくれる人の接続先: <span id="s-bind"></span></p>
+    <div class="row"><input id="inv-name" placeholder="名前（例: friend）" value="friend"><button id="inv-issue">発行</button></div>
+    <div id="inv-out" hidden>
+      <p class="small">このコードを、Codex を貸してくれる人に渡してください（再表示できません）。</p>
+      <div class="code-box"><code id="inv-code"></code><button id="inv-copy" class="ghost">コピー</button></div>
     </div>
+    <h3>発行済み</h3>
+    <ul class="invites" id="invites"></ul>
   </section>
 </main>
+<script src="/admin/common/ui.js"></script>
 <script src="/admin/static/app.js"></script>
 </body>
 </html>

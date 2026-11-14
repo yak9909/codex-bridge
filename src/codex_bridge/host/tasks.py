@@ -46,6 +46,7 @@ class TaskRecord:
     continue_task_id: str | None = None
     state_before_offline: str | None = None
     lender: str | None = None  # invite name of the lender doing the task (None: a v0.1 record)
+    finished: float | None = None  # when it reached a final state (None: still going, or an older record)
 
 
 class TaskManager:
@@ -82,6 +83,7 @@ class TaskManager:
                 if ev.exists() else []
 
     def _save(self, rec: TaskRecord) -> None:
+        rec.finished = (rec.finished or time.time()) if rec.state in FINAL_STATES else None
         (self.dir / f"{rec.task_id}.json").write_text(json.dumps(asdict(rec), ensure_ascii=False), encoding="utf-8")
         lender = self._lenders.get(rec.lender)
         if lender is not None:
@@ -441,6 +443,7 @@ class TaskManager:
         return {
             "task_id": rec.task_id, "state": rec.state, "lender": rec.lender, "prompt": rec.prompt,
             "report": rec.report, "thread_id": rec.thread_id, "resume_at": iso_local(rec.resume_at),
+            "created": rec.created, "finished": rec.finished,
             "changed_files": self.touched_fn(task_id), "event_count": len(self._events.get(task_id, [])),
         }
 

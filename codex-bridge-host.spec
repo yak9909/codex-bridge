@@ -2,7 +2,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
-datas = [("src/codex_bridge/host/web/static", "codex_bridge/host/web/static")]
+datas = [("src/codex_bridge/host/web/static", "codex_bridge/host/web/static"),
+         ("src/codex_bridge/common/web", "codex_bridge/common/web")]  # UI parts shared with the agent's page
 for pkg in ("mcp", "mcp_types", "fastapi", "starlette", "pydantic", "uvicorn", "websockets"):
     try:
         datas += copy_metadata(pkg)
