@@ -69,7 +69,7 @@ def main() -> None:
 
     for name in ("codex-bridge-host.exe", "codex-bridge-agent.exe"):
         shutil.copy2(ROOT / "dist" / name, admin / name)
-    for name in ("setup.bat", "start.bat", "stop.bat"):
+    for name in ("setup.bat", "start.bat", "stop.bat", "install-mcp.bat"):
         shutil.copy2(ROOT / name, admin / name)
     shutil.copy2(ROOT / "vendor" / "rg.exe", admin / "vendor" / "rg.exe")
     for name in ("operation-guide.md", "friend-guide.md"):

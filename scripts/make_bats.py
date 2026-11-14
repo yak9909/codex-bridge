@@ -26,7 +26,7 @@ pause >nul
 """
 
 root = Path(__file__).resolve().parents[1]
-for cmd in ("setup", "start", "stop"):
+for cmd in ("setup", "start", "stop", "install-mcp"):
     text = TEMPLATE.replace("{cmd}", cmd).replace("\n", "\r\n")
     (root / f"{cmd}.bat").write_bytes(text.encode("utf-8"))
     print("wrote", cmd + ".bat")

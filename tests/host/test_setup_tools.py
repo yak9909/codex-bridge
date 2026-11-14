@@ -97,3 +97,23 @@ def test_update_public_bind_keeps_port(tmp_path):
     cfg.write_text('public_bind: "100.1.1.1:9000"\n', encoding="utf-8")
     assert st.update_public_bind(cfg, "100.2.2.2") is True
     assert 'public_bind: "100.2.2.2:9000"' in cfg.read_text(encoding="utf-8")
+
+
+def test_register_codex_adds_url_server():
+    calls = []
+
+    def run(args, **kw):
+        calls.append(args)
+        return done(1) if args[2] == "get" else done(0)
+    assert st.register_codex(run, codex="codex", local_port=8770) == "added"
+    assert calls[-1] == ["codex", "mcp", "add", "codex-bridge", "--url", "http://127.0.0.1:8770/claude/mcp"]
+
+
+def test_register_codex_skips_when_present_or_missing():
+    assert st.register_codex(lambda *a, **k: done(0), codex="codex", local_port=8770) == "already"
+    assert st.register_codex(lambda *a, **k: done(0), codex=None, local_port=8770) == "missing"
+
+
+def test_codex_command_wraps_cmd_shims():
+    assert st.cli_command("C:/x/codex.cmd") == ["cmd.exe", "/d", "/c", "C:/x/codex.cmd"]
+    assert st.cli_command("C:/x/codex.exe") == ["C:/x/codex.exe"]

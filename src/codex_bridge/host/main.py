@@ -81,7 +81,7 @@ async def serve(config_path: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="codex-bridge-host")
-    ap.add_argument("command", nargs="?", default="serve", choices=["serve", "setup", "start", "stop"])
+    ap.add_argument("command", nargs="?", default="serve", choices=["serve", "setup", "start", "stop", "install-mcp"])
     ap.add_argument("--config", default="host.yaml", type=Path)
     args = ap.parse_args()
     if args.command == "setup":
@@ -91,6 +91,10 @@ def main() -> None:
     if args.command == "start":
         from .setup_cli import run_start
         run_start(args.config)
+        return
+    if args.command == "install-mcp":
+        from .setup_cli import run_install_mcp
+        run_install_mcp(args.config)
         return
     if args.command == "stop":
         from .setup_cli import run_stop

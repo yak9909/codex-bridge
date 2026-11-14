@@ -141,10 +141,29 @@ def register_claude(run=subprocess.run, claude: str | None = "auto", local_port:
         claude = shutil.which("claude")
     if not claude:
         return "missing"
-    if run([claude, "mcp", "get", MCP_NAME], capture_output=True, text=True).returncode == 0:
+    if run([claude, "mcp", "get", MCP_NAME], capture_output=True, text=True, encoding="utf-8", errors="replace").returncode == 0:
         return "already"
     r = run([claude, "mcp", "add", "--scope", "user", "--transport", "http", MCP_NAME,
-             f"http://127.0.0.1:{local_port}/claude/mcp"], capture_output=True, text=True)
+             f"http://127.0.0.1:{local_port}/claude/mcp"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return "added" if r.returncode == 0 else "failed"
+
+
+def cli_command(path: str) -> list[str]:
+    """npm installs CLIs as .cmd shims; run those through cmd.exe."""
+    return ["cmd.exe", "/d", "/c", path] if str(path).lower().endswith((".cmd", ".bat")) else [path]
+
+
+def register_codex(run=subprocess.run, codex: str | None = "auto", local_port: int = 8770) -> str:
+    """Register the same control endpoint in the owner's own Codex CLI. Returns missing / already / added / failed."""
+    if codex == "auto":
+        codex = shutil.which("codex")
+    if not codex:
+        return "missing"
+    base = cli_command(codex)
+    if run([*base, "mcp", "get", MCP_NAME], capture_output=True, text=True, encoding="utf-8", errors="replace").returncode == 0:
+        return "already"
+    r = run([*base, "mcp", "add", MCP_NAME, "--url", f"http://127.0.0.1:{local_port}/claude/mcp"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
     return "added" if r.returncode == 0 else "failed"
 
 

@@ -67,7 +67,7 @@ def _wait_tailscale_ip() -> str:
 def run_setup(config_path: Path) -> None:
     root = Path.cwd()
     config_path = Path(config_path).resolve()
-    total = 7
+    total = 6
     _say("codex-bridge の初期設定を始めます。質問には Enter だけで答えれば、おすすめの設定になります。")
 
     _step(1, total, "Tailscale の確認")
@@ -122,25 +122,33 @@ def run_setup(config_path: Path) -> None:
         _say("設定できました。" if st.add_firewall_rule_elevated() else
              "設定できませんでした。あとで setup.bat をもう一度実行してください。")
 
-    _step(5, total, "Claude Code への登録")
-    result = st.register_claude(local_port=cfg.local_port)
-    _say({"added": "登録しました。新しく始めた Claude Code のセッションから使えます。",
-          "already": "登録済みです。",
-          "missing": "Claude Code（claude コマンド）が見つかりませんでした。入れたあとで setup.bat をもう一度実行してください。",
-          "failed": "登録に失敗しました。あとで setup.bat をもう一度実行してください。"}[result])
-
-    _step(6, total, "知人に渡す一式（friend-kit フォルダ）を作る")
-    if _yes("今、作りますか？（1〜2 分かかります）"):
+    _step(5, total, "知人に渡す一式（friend-kit フォルダ）を作る")
+    if _yes("今、作りますか？"):
         build_friend_kit(root)
 
-    _step(7, total, "完了")
+    _step(6, total, "完了")
     _say("初期設定が終わりました。次にやること:")
-    _say("  1. start.bat をダブルクリックして codex-bridge を起動する（管理画面が開きます）")
-    _say("  2. 管理画面の「招待コード」で発行し、friend-kit フォルダの中身と一緒に知人に渡す")
-    _say("  3. Tailscale の管理画面でこの PC を知人と共有する（この画面を開きます）")
+    _say("  1. install-mcp.bat を実行して、Claude Code / Codex から codex-bridge を使えるようにする")
+    _say("  2. start.bat をダブルクリックして codex-bridge を起動する（管理画面が開きます）")
+    _say("  3. 管理画面の「招待コード」で発行し、friend-kit フォルダの中身と一緒に知人に渡す")
+    _say("  4. Tailscale の管理画面でこの PC を知人と共有する（この画面を開きます）")
     _say("     → この PC の行の「…」→「Share...」→ リンクをコピーして知人に送る")
     if _yes("Tailscale の管理画面を開きますか？"):
         webbrowser.open("https://login.tailscale.com/admin/machines")
+
+
+# ---- install-mcp.bat ---------------------------------------------------------
+def run_install_mcp(config_path: Path) -> None:
+    port = load_host_config(config_path).local_port if Path(config_path).exists() else 8770
+    _say("Claude Code と Codex から codex-bridge を使えるように登録します。")
+    msgs = {"added": "登録しました。", "already": "登録済みです。", "failed": "登録に失敗しました。",
+            "missing": "見つかりませんでした（入れていなければ問題ありません。入れたあとでもう一度実行してください）。"}
+    _say(f"  Claude Code: {msgs[st.register_claude(local_port=port)]}")
+    _say(f"  Codex      : {msgs[st.register_codex(local_port=port)]}")
+    _say("")
+    _say("使い方: start.bat で codex-bridge を起動してから、Claude Code か Codex で新しい会話を始め、")
+    _say("  「codex-bridge で、○○の開発を依頼して」のように頼んでください。")
+    _say("  エージェントが共有フォルダを確かめ、知人の Codex に依頼し、結果を確認して報告します。")
 
 
 def build_friend_kit(root: Path, open_folder: bool = True) -> Path | None:
