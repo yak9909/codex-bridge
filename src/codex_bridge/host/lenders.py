@@ -102,7 +102,8 @@ def headroom(lender: Lender, thresholds: dict) -> float | None:
 
 
 def pick_lender(lenders: Iterable[Lender], thresholds: dict, now: float | None = None) -> Lender | None:
-    """Among connected (hello received), idle, not blocked lenders: most headroom; ties go to the least recently used."""
+    """Among connected (hello received), idle, not blocked lenders: most headroom;
+    ties go to the least recently used."""
     free = [l for l in lenders if l.connected and l.ready and l.current_task_id is None
             and blocked_until(l, thresholds, now) is None]
 

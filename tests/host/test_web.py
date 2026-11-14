@@ -1,3 +1,5 @@
+import time
+
 import httpx
 import pytest
 import yaml
@@ -209,6 +211,62 @@ async def test_send_followup_and_cancel_from_admin(admin, host):
                                            "thread_id": "th", "report": "ok"})
     r = await admin.post("/admin/api/tasks", json={"prompt": "next", "continue_task_id": tid}, headers=H)
     assert r.status_code == 200 and sent[-1]["continue_thread_id"] == "th"
+
+
+def window(percent: int) -> dict:
+    return {"used_percent": percent, "resets_at": int(time.time()) + 3600}
+
+
+async def two_lenders(mgr) -> dict:
+    """alice (little room left) and bob (lots of room, disposable sessions); returns what each was sent."""
+    sent = {"alice": [], "bob": []}
+    for name, used, resumable in (("alice", 60, True), ("bob", 10, False)):
+        async def send(m, name=name):
+            sent[name].append(m)
+        link = await join(mgr, name, send, protocol=2, capabilities={"resumable": resumable, "pre_approval": False},
+                          limits={"five_hour": 70, "weekly": None, "force": True})
+        await mgr.on_agent_message(link, {"type": "usage", "five_hour": window(used), "weekly": None, "ts": 0})
+    return sent
+
+
+async def test_lenders_api_lists_each_lender(admin, host):
+    assert (await admin.get("/admin/api/lenders")).json() == []
+    await two_lenders(host.mgr)
+    tid = (await admin.post("/admin/api/tasks", json={"prompt": "x", "lender": "alice"}, headers=H)).json()["task_id"]
+    rows = (await admin.get("/admin/api/lenders")).json()
+    assert [r["name"] for r in rows] == ["alice", "bob"]
+    a, b = rows
+    # everything the table of lenders shows (design 3.2)
+    assert a["connected"] is True and a["ready"] is True and a["current_task_id"] == tid
+    assert a["usage"]["five_hour"]["used_percent"] == 60 and a["usage"]["weekly"] is None
+    assert a["usage"]["thresholds"] == {"five_hour": 90, "weekly": 95} and a["usage"]["blocked_until"] is None
+    assert a["limits"] == {"five_hour": 70, "weekly": None, "force": True}
+    assert a["capabilities"] == {"resumable": True, "pre_approval": False}
+    assert (a["agent_version"], a["codex_version"], a["auth_mode"]) == ("0.2.0", "x", "chatgpt")
+    assert b["current_task_id"] is None and b["capabilities"]["resumable"] is False
+    assert (await admin.get("/admin/api/lenders", headers={"Host": "evil.example:8770"})).status_code == 403
+
+
+async def test_send_task_to_a_chosen_lender(admin, host):
+    sent = await two_lenders(host.mgr)
+    r = await admin.post("/admin/api/tasks", json={"prompt": "one", "lender": "alice"}, headers=H)  # bob has more room
+    assert r.status_code == 200 and r.json()["lender"] == "alice"
+    assert sent["alice"][-1]["type"] == "task_start" and sent["alice"][-1]["task_id"] == r.json()["task_id"]
+    assert all(m["type"] != "task_start" for m in sent["bob"])
+    r = await admin.post("/admin/api/tasks", json={"prompt": "two", "lender": "alice"}, headers=H)
+    assert r.status_code == 409 and "作業中" in r.json()["detail"]
+    r = await admin.post("/admin/api/tasks", json={"prompt": "two", "lender": "carol"}, headers=H)
+    assert r.status_code == 409 and "接続されていません" in r.json()["detail"]
+    assert (await admin.post("/admin/api/tasks", json={"prompt": "two", "lender": 5}, headers=H)).status_code == 400
+    assert len(host.mgr.tasks) == 1
+
+
+@pytest.mark.parametrize("body", [{}, {"lender": None}, {"lender": ""}])
+async def test_send_task_without_a_lender_is_automatic(admin, host, body):
+    sent = await two_lenders(host.mgr)
+    r = await admin.post("/admin/api/tasks", json={"prompt": "one", **body}, headers=H)
+    assert r.status_code == 200 and r.json()["lender"] == "bob"  # the one with the most room
+    assert sent["bob"][-1]["task_id"] == r.json()["task_id"]
 
 
 async def test_undo_refused_for_every_task_in_progress(admin, host):

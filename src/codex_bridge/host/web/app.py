@@ -187,6 +187,12 @@ def admin_router(host) -> APIRouter:
             raise HTTPException(409, "この承認待ちはもうありません")
         return {"ok": True}
 
+    @r.get("/api/lenders")
+    async def lenders():
+        """One row per lender seen since the host started: connection, versions, usage, own limits,
+        capabilities (disposable sessions, pre-approval) and the task in progress."""
+        return host.mgr.lenders()
+
     @r.get("/api/tasks")
     async def tasks():
         return host.mgr.list_tasks()
@@ -200,13 +206,18 @@ def admin_router(host) -> APIRouter:
 
     @r.post("/api/tasks")
     async def send_task(body: dict):
+        """lender: the invite name of who gets the task; left out (or empty) the host picks by headroom."""
         prompt = str(body.get("prompt") or "").strip()
         if not prompt:
             raise HTTPException(400, "依頼の内容を書いてください")
+        lender = body.get("lender") or None
+        if lender is not None and not isinstance(lender, str):
+            raise HTTPException(400, "送り先は名前で指定してください")
         try:
-            return {"task_id": await host.mgr.start(prompt, body.get("continue_task_id") or None)}
+            task_id = await host.mgr.start(prompt, body.get("continue_task_id") or None, lender)
         except ToolError as e:
             raise HTTPException(409, str(e))
+        return {"task_id": task_id, "lender": host.mgr.tasks[task_id].lender}
 
     @r.post("/api/tasks/{task_id}/followup")
     async def followup(task_id: str, body: dict):

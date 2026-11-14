@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 
 import httpx
@@ -64,7 +65,8 @@ async def test_tool_names(env):
         "list_approvals", "decide_approval", "get_policy", "set_policy", "set_folder_level", "set_exec_mode",
         "set_paused",
         "set_log_visibility", "list_tasks", "issue_invite", "revoke_invite", "list_invites", "get_overview",
-        "set_share_root", "get_guide", "add_shared_folder", "remove_shared_folder", "set_main_folder"}
+        "set_share_root", "get_guide", "add_shared_folder", "remove_shared_folder", "set_main_folder",
+        "list_lenders"}
 
 
 def text_of(res: dict):
@@ -150,6 +152,93 @@ async def test_send_task_with_agent(env):
     res = await call(local, "send_task", {"prompt": "x"})
     tid = json.loads(res["content"][0]["text"])["task_id"]
     assert sent[-1]["type"] == "task_start" and sent[-1]["task_id"] == tid
+
+
+def window(percent: int) -> dict:
+    return {"used_percent": percent, "resets_at": int(time.time()) + 3600}
+
+
+async def two_lenders(mgr) -> tuple[dict, dict]:
+    """alice (little room left, sessions can be continued) and bob (lots of room, disposable sessions)."""
+    sent = {"alice": [], "bob": []}
+    links = {}
+    for name, used, caps in (("alice", 60, {"resumable": True, "pre_approval": True}),
+                             ("bob", 10, {"resumable": False, "pre_approval": False})):
+        async def send(m, name=name):
+            sent[name].append(m)
+        links[name] = await join(mgr, name, send, protocol=2, capabilities=caps,
+                                 limits={"five_hour": 70, "weekly": None, "force": False})
+        await mgr.on_agent_message(links[name], {"type": "usage", "five_hour": window(used), "weekly": None, "ts": 0})
+    return sent, links
+
+
+def starts(sent: list[dict]) -> list[str]:
+    return [m["task_id"] for m in sent if m["type"] == "task_start"]
+
+
+async def test_list_lenders(env):
+    mgr, local, _ = env
+    assert text_of(await call(local, "list_lenders", {})) == []
+    await two_lenders(mgr)
+    tid = text_of(await call(local, "send_task", {"prompt": "x", "lender": "alice"}))["task_id"]
+    rows = {r["name"]: r for r in text_of(await call(local, "list_lenders", {}))}
+    assert list(rows) == ["alice", "bob"]
+    a, b = rows["alice"], rows["bob"]
+    assert a["connected"] is True and a["ready"] is True and a["current_task_id"] == tid
+    assert a["capabilities"] == {"resumable": True, "pre_approval": True}
+    assert a["limits"] == {"five_hour": 70, "weekly": None, "force": False}
+    assert a["usage"]["five_hour"]["used_percent"] == 60 and a["usage"]["blocked_until"] is None
+    assert (a["agent_version"], a["codex_version"], a["auth_mode"]) == ("0.2.0", "x", "chatgpt")
+    assert b["current_task_id"] is None and b["capabilities"]["resumable"] is False
+    assert b["usage"]["five_hour"]["used_percent"] == 10
+
+
+async def test_send_task_goes_to_the_named_lender(env):
+    mgr, local, _ = env
+    sent, _links = await two_lenders(mgr)
+    r = text_of(await call(local, "send_task", {"prompt": "one", "lender": "alice"}))  # bob has more room
+    assert r["lender"] == "alice" and starts(sent["alice"]) == [r["task_id"]] and not starts(sent["bob"])
+    res = await call(local, "send_task", {"prompt": "two", "lender": "alice"})
+    assert res["isError"] and "作業中" in res["content"][0]["text"]
+    res = await call(local, "send_task", {"prompt": "two", "lender": "carol"})
+    assert res["isError"] and "接続されていません" in res["content"][0]["text"]
+    assert not starts(sent["bob"]) and len(mgr.tasks) == 1
+
+
+async def test_send_task_without_a_lender_picks_the_one_with_most_room(env):
+    mgr, local, _ = env
+    sent, _links = await two_lenders(mgr)
+    r = text_of(await call(local, "send_task", {"prompt": "one"}))  # the answer says who got it
+    assert r["lender"] == "bob" and starts(sent["bob"]) == [r["task_id"]] and not starts(sent["alice"])
+
+
+async def test_continuation_can_only_go_back_to_the_same_lender(env):
+    mgr, local, _ = env
+    sent, links = await two_lenders(mgr)
+    done = {}
+    for name in ("alice", "bob"):
+        done[name] = text_of(await call(local, "send_task", {"prompt": "one", "lender": name}))["task_id"]
+        await mgr.on_agent_message(links[name], {"type": "task_state", "seq": 1, "task_id": done[name],
+                                                 "state": "completed", "thread_id": f"th-{name}", "report": "ok"})
+    # alice holds the session: it goes back to her, whoever has more room
+    r = text_of(await call(local, "send_task", {"prompt": "more", "continue_task_id": done["alice"]}))
+    assert r["lender"] == "alice" and sent["alice"][-1]["continue_thread_id"] == "th-alice"
+    # naming someone else, or continuing at a lender with disposable sessions, is refused with advice
+    for args in ({"continue_task_id": done["alice"], "lender": "bob"}, {"continue_task_id": done["bob"]}):
+        res = await call(local, "send_task", {"prompt": "more", **args})
+        assert res["isError"] and "前回の報告を添えて新しく依頼してください" in res["content"][0]["text"]
+    assert len(starts(sent["bob"])) == 1 and len(mgr.tasks) == 3
+
+
+async def test_get_usage_is_per_lender(env):
+    mgr, local, _ = env
+    await two_lenders(mgr)
+    u = text_of(await call(local, "get_usage", {}))
+    assert {n: v["five_hour"]["used_percent"] for n, v in u["lenders"].items()} == {"alice": 60, "bob": 10}
+    assert u["lenders"]["alice"]["blocked_until"] is None and u["thresholds"] == {"five_hour": 90, "weekly": 95}
+    text_of(await call(local, "set_thresholds", {"five_hour": 50}))
+    u = text_of(await call(local, "get_usage", {}))
+    assert u["lenders"]["alice"]["blocked_until"] and u["lenders"]["bob"]["blocked_until"] is None
 
 
 async def test_undo_refused_for_every_task_in_progress(env, share):
@@ -265,6 +354,14 @@ async def test_get_guide_explains_the_workflow(env):
     g = text_of(await call(local, "get_guide", {}))["guide"]
     for word in ("get_overview", "send_task", "wait_sec", "decide_approval", "get_result", "continue_task_id"):
         assert word in g
+
+
+async def test_get_guide_covers_several_lenders(env):
+    _, local, _ = env
+    g = text_of(await call(local, "get_guide", {}))["guide"]
+    for word in ("list_lenders", "lender", "Codex を貸している人", "余裕", "同じ人", "使い捨て",
+                 "前回の報告を添えて", "blocked_until", "ready"):
+        assert word in g, word
 
 
 async def test_server_instructions_tell_agents_how_to_start(env):

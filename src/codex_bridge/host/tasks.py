@@ -170,9 +170,8 @@ class TaskManager:
     @staticmethod
     def _info(l: Lender) -> dict:
         return {"connected": l.connected, "ready": l.ready, "since": l.since, "name": l.name,
-                "agent_version": l.agent_version,
-                "codex_version": l.codex_version, "auth_mode": l.auth_mode, "protocol": l.protocol,
-                "capabilities": dict(l.capabilities)}
+                "agent_version": l.agent_version, "codex_version": l.codex_version, "auth_mode": l.auth_mode,
+                "protocol": l.protocol, "capabilities": dict(l.capabilities)}
 
     def agent_info(self, lender: str | None = None) -> dict:
         """Without a name: the latest connection (the single-lender view). With a name: that lender
@@ -368,7 +367,7 @@ class TaskManager:
             target = self._lenders.get(prev.lender)
             if target is None or not target.connected:
                 raise ToolError(f"このタスクの会話を持つ「{prev.lender}」の agent が接続されていません。{RETRY_FRESH}")
-        self._ready(target)  # "resumable" below is only known from the hello of this connection
+        self._ready(target)
         if not target.capabilities.get("resumable", True):
             raise ToolError(f"「{target.name}」は使い捨てのセッションで動いているため、会話が残っていません。{RETRY_FRESH}")
         if not prev.thread_id:
