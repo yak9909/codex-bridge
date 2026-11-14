@@ -175,8 +175,13 @@ class TaskManager:
                 "capabilities": dict(l.capabilities)}
 
     def agent_info(self, lender: str | None = None) -> dict:
-        l = self._primary() if lender is None else self._lenders.get(lender)
-        return self._info(l) if l else {"connected": False}
+        """Without a name: the latest connection (the single-lender view). With a name: that lender
+        and nobody else, also when it has not connected since the host started."""
+        if lender is None:
+            l = self._primary()
+            return self._info(l) if l else {"connected": False}
+        l = self._lenders.get(lender)
+        return self._info(l) if l else {"connected": False, "name": lender}
 
     def lenders(self) -> list[dict]:
         return [{**self._info(l), "limits": l.limits, "usage": self._usage_of(l),
@@ -422,7 +427,8 @@ class TaskManager:
         return {
             "task_id": rec.task_id, "state": rec.state, "lender": rec.lender, "thread_id": rec.thread_id,
             "resume_at": iso_local(rec.resume_at), "recent_events": self.events(task_id)[-15:],
-            "agent": self.agent_info(rec.lender if rec.lender in self._lenders else None),
+            # the agent of this task's own lender; None for a v0.1 record, which names no lender
+            "agent": self.agent_info(rec.lender) if rec.lender is not None else None,
         }
 
     def result(self, task_id: str) -> dict:

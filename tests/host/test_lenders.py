@@ -341,6 +341,26 @@ async def test_usage_and_lenders_are_per_lender(mgr):
     assert {r["name"]: r["connected"] for r in mgr.lenders()} == {"alice": True, "bob": False}
 
 
+async def test_status_shows_the_agent_of_the_tasks_own_lender_and_no_other(tmp_path, mgr):
+    alice = await FakeAgent.join(mgr, "alice", auth_mode="chatgpt")
+    t1 = await mgr.start("one")
+    await alice.finish(t1, seq=1)
+    await FakeAgent.join(mgr, "bob", auth_mode="apikey")  # the latest connection is now bob's
+    agent = mgr.status(t1)["agent"]
+    assert (agent["name"], agent["auth_mode"], agent["connected"]) == ("alice", "chatgpt", True)
+    assert mgr.status()["agent"]["name"] == "alice"  # no task id: the latest task, which is alice's
+
+    # After a host restart only bob has connected: alice's task must not be shown with bob's agent.
+    (tmp_path / "data" / "tasks" / "old.json").write_text(
+        '{"task_id": "old", "prompt": "p", "created": 1.0, "state": "completed", "thread_id": "th0"}', encoding="utf-8")
+    mgr2 = TaskManager(tmp_path / "data", touched_fn=lambda t: [])
+    await FakeAgent.join(mgr2, "bob", auth_mode="apikey")
+    assert mgr2.status(t1)["agent"] == {"connected": False, "name": "alice"}
+    assert mgr2.agent_info("alice") == {"connected": False, "name": "alice"}
+    # A v0.1 record names no lender, so nobody's agent is shown as its own.
+    assert mgr2.status("old")["lender"] is None and mgr2.status("old")["agent"] is None
+
+
 async def test_reconnect_reconciles_only_that_lenders_tasks(mgr):
     alice, bob = await FakeAgent.join(mgr, "alice"), await FakeAgent.join(mgr, "bob")
     t1 = await mgr.start("one", lender="alice")
