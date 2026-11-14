@@ -1,4 +1,4 @@
-"""Safe conversion between share-relative paths and real paths."""
+"""Safe conversion between the paths Codex gives and real paths (several shared folders)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import os
 from pathlib import Path, PureWindowsPath
 from typing import Literal
 
-from .policy import PolicyStore, normalize_rel
+from .policy import Level, PolicyStore, normalize_rel
 
 
 class ToolError(Exception):
@@ -20,48 +20,101 @@ def not_found(rel: str) -> ToolError:
     return ToolError(f"not found: {rel}")
 
 
+def _nc(p: Path | str) -> str:
+    return os.path.normcase(os.path.abspath(str(p)))
+
+
 class SafePaths:
+    """Paths are absolute (any registered folder) or relative to the main folder."""
+
     def __init__(self, root: Path, policy: PolicyStore) -> None:
         self.policy = policy
         self.set_root(root)
 
     def set_root(self, root: Path) -> None:
-        """Point at another share folder (the admin can change it while the host runs)."""
-        self.root = Path(root).resolve()
-        self._root_nc = os.path.normcase(str(self.root))
+        """Main folder used when the policy has none of its own (v1 policies)."""
+        self._fallback_root = Path(root).resolve()
 
-    def _inside(self, p: Path) -> bool:
-        s = os.path.normcase(str(p))
-        return s == self._root_nc or s.startswith(self._root_nc.rstrip("\\/") + os.sep)
+    @property
+    def root(self) -> Path:
+        pol = self.policy.current()
+        return pol.main if (pol.v2 and pol.main is not None) else self._fallback_root
+
+    # ---- levels ----------------------------------------------------------
+    def _under(self, p: Path, base: Path) -> str | None:
+        np, nb = _nc(p), _nc(base)
+        if np == nb:
+            return ""
+        prefix = nb.rstrip(os.sep) + os.sep
+        return np[len(prefix):].replace(os.sep, "/") if np.startswith(prefix) else None
+
+    def level_of(self, p: Path) -> Level | None:
+        """Level of an absolute path; None if it is in no shared folder."""
+        pol = self.policy.current()
+        if pol.v2:
+            return pol.level_for_abs(p)
+        rel = self._under(p, self._fallback_root)
+        return None if rel is None else pol.level_for(rel)
 
     def check_running(self) -> None:
         if self.policy.current().paused:
             raise ToolError(PAUSED_MSG)
 
-    def to_rel(self, p: Path) -> str:
-        return Path(os.path.relpath(p, self.root)).as_posix() if Path(p) != self.root else ""
+    # ---- display ---------------------------------------------------------
+    def display(self, p: Path) -> str:
+        """Relative inside the main folder, absolute ('/' separated) elsewhere."""
+        rel = self._under(p, self.root)
+        return rel if rel is not None else Path(os.path.abspath(p)).as_posix()
 
-    def resolve(self, rel: str, need: Literal["read", "write"]) -> Path:
-        """Return the real path for a share-relative path, or raise ToolError."""
+    to_rel = display  # older name used throughout the tools
+
+    def roots(self) -> list[dict]:
+        """Registered folders Codex may see (hidden ones are left out)."""
+        pol = self.policy.current()
+        if not pol.v2:
+            return [{"path": self._fallback_root.as_posix(), "level": pol.level_for(""), "main": True}]
+        out, main = [], _nc(pol.main) if pol.main else None
+        for f in pol.folders:
+            if f.level == "hidden" or self.level_of(f.path) in (None, "hidden"):
+                continue
+            out.append({"path": Path(os.path.abspath(f.path)).as_posix(), "level": self.level_of(f.path),
+                        "main": _nc(f.path) == main})
+        return out
+
+    def root_paths(self, need_write: bool = False) -> list[Path]:
+        """Top-level folders to walk/search (nested registered folders are skipped)."""
+        roots = [Path(r["path"]) for r in self.roots() if not need_write or r["level"] == "write"]
+        keep: list[Path] = []
+        for r in sorted(roots, key=lambda x: len(_nc(x))):
+            if not any(self._under(r, k) is not None for k in keep):
+                keep.append(r)
+        return keep
+
+    # ---- resolving --------------------------------------------------------
+    def resolve(self, path: str, need: Literal["read", "write"]) -> Path:
+        """Return the real path for an absolute or main-relative path, or raise ToolError."""
         self.check_running()
-        shown = rel
-        pw = PureWindowsPath(rel)
-        if pw.drive or pw.root or rel.startswith(("/", "\\")):
-            raise not_found(shown)
-        norm = normalize_rel(rel)
+        shown = path
+        raw = str(path).strip()
+        pw = PureWindowsPath(raw)
+        if pw.drive or pw.root:
+            if not pw.drive:
+                raise not_found(shown)  # "/x" or "\x": no drive
+            parts = list(pw.parts[1:])
+            requested_base: Path = Path(pw.anchor)
+        else:
+            parts = [p for p in normalize_rel(raw).split("/") if p]
+            requested_base = self.root
         # ".." escapes; ":" would address NTFS alternate data streams (file.txt:x, ::$DATA).
-        if any(part == ".." or ":" in part for part in norm.split("/")):
+        if any(part == ".." or ":" in part for part in parts):
             raise not_found(shown)
-        real = (self.root / norm).resolve(strict=False)
-        if not self._inside(real):
-            raise not_found(shown)
-        policy = self.policy.current()
-        real_rel = self.to_rel(real)
-        levels = {policy.level_for(norm), policy.level_for(real_rel)}
-        if "hidden" in levels:
+        requested = Path(os.path.abspath(requested_base.joinpath(*parts)))
+        real = requested.resolve(strict=False)
+        levels = {self.level_of(requested), self.level_of(real)}
+        if None in levels or "hidden" in levels:
             raise not_found(shown)
         if need == "write" and levels != {"write"}:
-            raise ToolError(f"書き込みは許可されていません: {norm}")
+            raise ToolError(f"書き込みは許可されていません: {self.display(requested)}")
         return real
 
     def check_subtree_writable(self, real: Path, action: str) -> None:
@@ -70,15 +123,14 @@ class SafePaths:
         The message never names the offending entry (it may be hidden)."""
         if not real.is_dir() or real.is_symlink() or os.path.isjunction(real):
             return
-        policy = self.policy.current()
         for dirpath, dirnames, filenames in os.walk(real):
             d = Path(dirpath)
             for name in dirnames + filenames:
                 p = d / name
-                rels = {self.to_rel(p)}
+                levels = {self.level_of(p)}
                 if not (p.is_symlink() or os.path.isjunction(p)):
-                    rels.add(self.to_rel(p.resolve()))
-                if any(policy.level_for(r) != "write" for r in rels):
+                    levels.add(self.level_of(p.resolve()))
+                if any(lv != "write" for lv in levels):
                     raise ToolError(f"{action}できません: フォルダの中に、書き込みが許可されていない場所があります")
             dirnames[:] = [n for n in dirnames if not os.path.isjunction(d / n) and not (d / n).is_symlink()]
 
@@ -88,8 +140,4 @@ class SafePaths:
             real = Path(p).resolve(strict=False)
         except OSError:
             return False
-        if not self._inside(real):
-            return False
-        policy = self.policy.current()
-        return (policy.level_for(self.to_rel(Path(p))) != "hidden"
-                and policy.level_for(self.to_rel(real)) != "hidden")
+        return all(self.level_of(x) not in (None, "hidden") for x in (Path(p), real))

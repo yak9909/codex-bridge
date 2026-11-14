@@ -172,22 +172,22 @@ class CommandRunner:
                              exit_code=job.exit_code, changed_files=job.changed_files, task_id=job.task_id)
 
     def _write_area_state(self) -> dict[str, tuple[int, int]]:
+        """(mtime, size) of every writable file in every shared folder."""
         state: dict[str, tuple[int, int]] = {}
-        root = self.paths.root
-        policy = self.policy.current()
-        for dirpath, dirnames, filenames in os.walk(root):
-            d = Path(dirpath)
-            dirnames[:] = [n for n in dirnames if self.paths.visible(d / n)
-                           and not (d == root and n.lower() == OUTPUTS_TOP)]
-            for name in filenames:
-                fp = d / name
-                rel = self.paths.to_rel(fp)
-                if policy.level_for(rel) == "write" and self.paths.visible(fp):
-                    try:
-                        st = fp.stat()
-                    except OSError:
-                        continue
-                    state[rel] = (st.st_mtime_ns, st.st_size)
+        main = self.paths.root
+        for root in self.paths.root_paths():
+            for dirpath, dirnames, filenames in os.walk(root):
+                d = Path(dirpath)
+                dirnames[:] = [n for n in dirnames if self.paths.visible(d / n)
+                               and not (d == main and n.lower() == OUTPUTS_TOP)]
+                for name in filenames:
+                    fp = d / name
+                    if self.paths.level_of(fp) == "write" and self.paths.visible(fp):
+                        try:
+                            st = fp.stat()
+                        except OSError:
+                            continue
+                        state[self.paths.to_rel(fp)] = (st.st_mtime_ns, st.st_size)
         return state
 
     async def _execute(self, job: Job, real_cwd: Path, timeout: int) -> None:
