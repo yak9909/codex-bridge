@@ -16,6 +16,7 @@ Level = Literal["hidden", "read", "write"]
 ExecMode = Literal["off", "allowlist", "ask", "all"]
 LEVELS = ("hidden", "read", "write")
 EXEC_MODES = ("off", "allowlist", "ask", "all")
+OUTPUTS_TOP = ".codex-bridge"
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,8 @@ class Policy:
         if rel == "":
             return self.default if self.default != "hidden" else "read"
         parts = rel.split("/")
+        if parts[0].lower() == OUTPUTS_TOP:
+            return "read"  # command outputs are always readable, never writable
         # An explicitly hidden ancestor hides everything below it.
         for i in range(1, len(parts)):
             if self._rule_level("/".join(parts[:i])) == "hidden":

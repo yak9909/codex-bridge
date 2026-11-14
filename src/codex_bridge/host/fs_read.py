@@ -106,18 +106,31 @@ class ReadTools:
         lines: list[str] = []
         used = 0
         truncated = False
+        line_truncated = False
         next_line = None
         with open(real, "r", encoding=enc, errors="replace", newline="") as f:
             for lineno, line in enumerate(f, start=1):
                 if lineno < offset_line:
                     continue
                 size = len(line.encode("utf-8"))
+                if not lines and size > cap:
+                    # A single line longer than the cap: return its beginning.
+                    lines.append(line.encode("utf-8")[:cap].decode("utf-8", errors="ignore"))
+                    truncated = line_truncated = True
+                    next_line = lineno + 1
+                    break
                 if len(lines) >= max_lines or used + size > cap:
                     truncated = True
                     next_line = lineno
                     break
                 lines.append(line)
                 used += size
+        if line_truncated:
+            return {
+                "path": rel, "encoding": "utf-8" if enc == "utf-8-sig" else enc, "start_line": offset_line,
+                "text": "".join(lines), "truncated": True, "line_truncated": True, "next_offset_line": next_line,
+                "message": f"{offset_line} 行目が長すぎるため先頭だけを返しました。続きは byte_offset を指定して読んでください。",
+            }
         return {
             "path": rel,
             "encoding": "utf-8" if enc == "utf-8-sig" else enc,

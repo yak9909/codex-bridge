@@ -59,6 +59,14 @@ def test_read_text_capped_by_bytes(share):
     assert r["next_offset_line"] == r["text"].count("\n") + 1
 
 
+def test_read_single_overlong_line_returns_a_piece(share):
+    (share.root / "raw/long.txt").write_text("y" * (300 * 1024) + "\nnext\n", encoding="utf-8", newline="\n")
+    r = share.read.read_file("raw/long.txt", max_lines=1)
+    assert r["text"].startswith("yyy") and len(r["text"].encode()) <= 256 * 1024
+    assert r["truncated"] and r["line_truncated"] and r["next_offset_line"] == 2
+    assert "byte_offset" in r["message"]
+
+
 def test_read_shift_jis(share):
     r = share.read.read_file("raw/sjis.txt")
     assert r["encoding"] == "cp932" and "日本語" in r["text"]

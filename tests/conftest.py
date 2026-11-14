@@ -15,6 +15,8 @@ from codex_bridge.host.policy import PolicyStore
 from codex_bridge.host.search import SearchTools
 from codex_bridge.host.snapshots import Snapshots
 from codex_bridge.host.fs_write import WriteTools
+from codex_bridge.host.approvals import Approvals
+from codex_bridge.host.runner import CommandRunner
 
 RG_PATH = Path(__file__).resolve().parents[1] / "vendor" / "rg.exe"
 
@@ -97,6 +99,8 @@ def build_share(tmp_path: Path) -> Share:
         return share.decision
 
     share.write = WriteTools(paths, policy, share.snapshots, audit, lambda: share.task_id, approve_fn)
+    share.approvals = Approvals(policy)
+    share.runner = CommandRunner(paths, policy, share.approvals, share.snapshots, audit, lambda: share.task_id)
     return share
 
 
