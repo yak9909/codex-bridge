@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from mcp.server.mcpserver import MCPServer
 from mcp_types import CallToolResult
 
@@ -9,7 +11,9 @@ from .approvals import Approvals
 from .mcp_util import LoopbackOnly, McpEndpoint, error_result, json_result, make_endpoint
 from .paths import ToolError
 from .snapshots import Snapshots
-from .tasks import TaskManager
+from .tasks import ACTIVE_STATES, TaskManager
+
+MAX_WAIT_SEC = 50  # keep each call well under MCP client timeouts
 
 INSTRUCTIONS = (
     "知人の PC で動く Codex に、こちらの共有フォルダでの作業を依頼する道具です。"
@@ -45,9 +49,17 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
             return {"ok": True}
         return await run(f)
 
-    @tool("タスクの状態と最近の出来事、承認待ちの一覧を返します。task_id を省くと作業中（なければ最新）のタスク。")
-    async def get_status(task_id: str | None = None) -> CallToolResult:
+    @tool("タスクの状態と最近の出来事、承認待ちの一覧を返します。task_id を省くと作業中（なければ最新）のタスク。"
+          "wait_sec（最大 50）を渡すと、タスクが終わるか承認待ちが出るまで、その秒数だけ待ってから返します。"
+          "作業の完了を待つときは、sleep などを使わずに get_status(wait_sec=50) を繰り返し呼んでください。")
+    async def get_status(task_id: str | None = None, wait_sec: int = 0) -> CallToolResult:
         async def f():
+            deadline = asyncio.get_running_loop().time() + max(0, min(int(wait_sec), MAX_WAIT_SEC))
+            while asyncio.get_running_loop().time() < deadline:
+                st = mgr.status(task_id)
+                if st.get("state") not in ACTIVE_STATES or approvals.pending():
+                    break
+                await asyncio.sleep(0.5)
             s = mgr.status(task_id)
             pend = [a.to_dict() for a in approvals.pending()]
             s["pending_approvals"] = pend

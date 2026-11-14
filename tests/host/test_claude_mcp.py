@@ -100,3 +100,38 @@ async def test_undo_unknown_or_unsafe_task_id_refused(env, share):
         res = await call(local, "undo_task", {"task_id": bad})
         assert res["isError"]
     assert (share.data_dir / "keep.txt").exists()
+
+
+async def test_get_status_waits_until_task_finishes(env):
+    # Claude Code cannot sleep; get_status(wait_sec) lets it wait for progress.
+    import asyncio, time
+    mgr, local, _ = env
+    sent = []
+
+    async def send(m):
+        sent.append(m)
+    link = mgr.attach(send)
+    tid = json.loads((await call(local, "send_task", {"prompt": "x"}))["content"][0]["text"])["task_id"]
+
+    async def finish_later():
+        await asyncio.sleep(0.5)
+        await mgr.on_agent_message(link, {"type": "task_state", "seq": 1, "task_id": tid, "state": "completed",
+                                          "thread_id": "th", "report": "ok"})
+    asyncio.create_task(finish_later())
+    t0 = time.monotonic()
+    s = json.loads((await call(local, "get_status", {"task_id": tid, "wait_sec": 10}))["content"][0]["text"])
+    assert s["state"] == "completed" and 0.3 < time.monotonic() - t0 < 5
+
+
+async def test_get_status_wait_returns_on_new_approval(env, share):
+    import asyncio, time
+    mgr, local, _ = env
+
+    async def send(m):
+        pass
+    mgr.attach(send)
+    tid = json.loads((await call(local, "send_task", {"prompt": "x"}))["content"][0]["text"])["task_id"]
+    asyncio.get_running_loop().call_later(0.5, lambda: share.approvals.request("command", "python x.py", tid))
+    t0 = time.monotonic()
+    s = json.loads((await call(local, "get_status", {"task_id": tid, "wait_sec": 10}))["content"][0]["text"])
+    assert s["pending_approvals"] and time.monotonic() - t0 < 5
