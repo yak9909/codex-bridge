@@ -13,6 +13,8 @@ from codex_bridge.host.fs_read import ReadTools
 from codex_bridge.host.paths import SafePaths
 from codex_bridge.host.policy import PolicyStore
 from codex_bridge.host.search import SearchTools
+from codex_bridge.host.snapshots import Snapshots
+from codex_bridge.host.fs_write import WriteTools
 
 RG_PATH = Path(__file__).resolve().parents[1] / "vendor" / "rg.exe"
 
@@ -59,6 +61,12 @@ class Share:
     def task(self, task_id: str | None) -> None:
         self.task_id = task_id
 
+    def approve_all(self) -> None:
+        self.decision = "approved"
+
+    def deny_all(self) -> None:
+        self.decision = "denied"
+
 
 def build_share(tmp_path: Path) -> Share:
     root = tmp_path / "share"
@@ -82,6 +90,13 @@ def build_share(tmp_path: Path) -> Share:
     share = Share(root=root, outside=outside, data_dir=data_dir, policy=policy, audit=audit,
                   paths=paths, read=ReadTools(paths, policy))
     share.search = SearchTools(paths, policy, RG_PATH)
+    share.snapshots = Snapshots(data_dir)
+    share.decision = "approved"
+
+    async def approve_fn(kind: str, summary: str) -> str:
+        return share.decision
+
+    share.write = WriteTools(paths, policy, share.snapshots, audit, lambda: share.task_id, approve_fn)
     return share
 
 
