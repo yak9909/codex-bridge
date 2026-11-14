@@ -193,6 +193,18 @@ async def test_list_lenders(env):
     assert b["usage"]["five_hour"]["used_percent"] == 10
 
 
+async def test_list_lenders_includes_invited_names_that_have_not_connected(env, share):
+    mgr, local, _ = env
+    for name in ("carol", "alice"):
+        text_of(await call(local, "issue_invite", {"name": name}))
+    await two_lenders(mgr)
+    rows = text_of(await call(local, "list_lenders", {}))
+    assert [r["name"] for r in rows] == ["alice", "bob", "carol"]
+    assert rows[2]["connected"] is False and rows[2]["ready"] is False and rows[2]["usage"]["five_hour"] is None
+    res = await call(local, "send_task", {"prompt": "x", "lender": "carol"})
+    assert res["isError"] and "接続されていません" in res["content"][0]["text"]
+
+
 async def test_send_task_goes_to_the_named_lender(env):
     mgr, local, _ = env
     sent, _links = await two_lenders(mgr)

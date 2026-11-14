@@ -9,12 +9,12 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 from ..common import protocol
 from ..common.protocol import FINAL_STATES, LOG_VISIBILITY
-from .lenders import (V1_CAPABILITIES, Lender, SendFn, blocked_until, normalize_limits, normalize_window,
-                      pick_lender)
+from .lenders import (Lender, SendFn, as_protocol, as_text, blocked_until, normalize_capabilities,
+                      normalize_limits, normalize_window, number, pick_lender)
 from .paths import ToolError
 
 ACTIVE_STATES = ("queued", "running", "agent_offline")
@@ -182,10 +182,15 @@ class TaskManager:
         l = self._lenders.get(lender)
         return self._info(l) if l else {"connected": False, "name": lender}
 
-    def lenders(self) -> list[dict]:
-        return [{**self._info(l), "limits": l.limits, "usage": self._usage_of(l),
-                 "current_task_id": l.current_task_id, "last_assigned": l.last_assigned}
-                for l in self._lenders.values()]
+    def lenders(self, invited: Iterable[str] = ()) -> list[dict]:
+        """One row per lender seen since the host started, then one per invited name that has not
+        connected since: not connected, no usage, and what it can do is not known (capabilities None)."""
+        def row(l: Lender) -> dict:
+            return {**self._info(l), "limits": l.limits, "usage": self._usage_of(l),
+                    "current_task_id": l.current_task_id, "last_assigned": l.last_assigned}
+        never = [{**row(Lender(name=n, current_task_id=self.current_task_id(n))), "capabilities": None}
+                 for n in dict.fromkeys(invited) if n not in self._lenders]
+        return [row(l) for l in self._lenders.values()] + never
 
     def _own_task(self, lender: Lender, task_id: str) -> TaskRecord | None:
         """The task, unless it belongs to another lender (a v0.1 record has no lender yet)."""
@@ -204,11 +209,11 @@ class TaskManager:
                 return
             seen.add(m["seq"])
         if t == "hello":
+            # everything from the other PC is checked here: it is stored, computed with and shown as JSON
             lender.agent_version, lender.codex_version, lender.auth_mode = (
-                m.get("agent_version"), m.get("codex_version"), m.get("auth_mode"))
-            caps = m.get("capabilities")
-            lender.protocol = m.get("protocol") or 1
-            lender.capabilities = {**V1_CAPABILITIES, **caps} if isinstance(caps, dict) else dict(V1_CAPABILITIES)
+                as_text(m.get(k)) for k in ("agent_version", "codex_version", "auth_mode"))
+            lender.protocol = as_protocol(m.get("protocol"))
+            lender.capabilities = normalize_capabilities(m.get("capabilities"))
             limits = normalize_limits(m.get("limits"))
             if limits is not None:
                 lender.limits = limits
@@ -221,7 +226,8 @@ class TaskManager:
             # numbers from the other PC are checked here, so that nothing computed from them later can fail
             limits = normalize_limits(m.get("friend_limits"))
             lender.usage = {"five_hour": normalize_window(m.get("five_hour")),
-                            "weekly": normalize_window(m.get("weekly")), "ts": m.get("ts"), "friend_limits": limits}
+                            "weekly": normalize_window(m.get("weekly")), "ts": number(m.get("ts")),
+                            "friend_limits": limits}
             if limits is not None:
                 lender.limits = limits
             self._changed()

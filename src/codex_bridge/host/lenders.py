@@ -36,7 +36,7 @@ class Lender:
     since: float | None = None  # when the current (or last) connection was made
 
 
-def _number(v) -> float | None:
+def number(v) -> float | None:
     """A finite number, or None for anything else (text, bool, NaN, ...)."""
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
@@ -51,25 +51,44 @@ def normalize_limits(raw) -> dict | None:
     (0, 100] or None (no limit of its own). None when `raw` is not an object at all."""
     if not isinstance(raw, dict):
         return None
-    out: dict = {k: v if (v := _number(raw.get(k))) is not None and 0 < v <= 100 else None for k in WINDOWS}
+    out: dict = {k: v if (v := number(raw.get(k))) is not None and 0 < v <= 100 else None for k in WINDOWS}
     out["force"] = raw.get("force") is True
     return out
+
+
+def as_text(v) -> str | None:
+    """A version or login name as an agent sent it: text, or None for anything else."""
+    return v if isinstance(v, str) else None
+
+
+def as_protocol(v) -> int:
+    """The protocol number of a hello; 1 (v0.1) when it is missing or not a positive whole number."""
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else 1
+
+
+def normalize_capabilities(raw) -> dict:
+    """What a lender's agent said it can do: the known flags only, each a real true/false.
+    Anything else (a v0.1 agent sends none at all) counts as v0.1."""
+    raw = raw if isinstance(raw, dict) else {}
+    return {k: raw[k] if isinstance(raw.get(k), bool) else default for k, default in V1_CAPABILITIES.items()}
 
 
 def _moment(v) -> float | None:
     """Seconds since the epoch, if a clock can show that moment; else None."""
     try:
-        datetime.fromtimestamp(_number(v), timezone.utc).astimezone()
+        datetime.fromtimestamp(number(v), timezone.utc).astimezone()
     except (TypeError, ValueError, OverflowError, OSError):
         return None
     return v
 
 
 def normalize_window(raw) -> dict | None:
-    """One usage window as an agent reported it, or None when its numbers cannot be used."""
-    if not isinstance(raw, dict) or (used := _number(raw.get("used_percent"))) is None:
+    """One usage window as an agent reported it, or None when its numbers cannot be used.
+    Only the two known values are kept; the percent must be one (0..100), so that a made-up
+    value cannot make a lender look like the one with the most room."""
+    if not isinstance(raw, dict) or (used := number(raw.get("used_percent"))) is None or not 0 <= used <= 100:
         return None
-    return {**raw, "used_percent": used, "resets_at": _moment(raw.get("resets_at"))}
+    return {"used_percent": used, "resets_at": _moment(raw.get("resets_at"))}
 
 
 def effective_limits(lender: Lender, thresholds: dict) -> dict:

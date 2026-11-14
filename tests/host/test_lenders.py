@@ -1,9 +1,11 @@
 import asyncio
+import json
 import time
 
 import pytest
 
-from codex_bridge.host.lenders import Lender, normalize_limits, normalize_window, pick_lender
+from codex_bridge.host.lenders import (Lender, normalize_capabilities, normalize_limits, normalize_window,
+                                       pick_lender)
 from codex_bridge.host.paths import ToolError
 from codex_bridge.host.tasks import TaskManager
 
@@ -100,18 +102,39 @@ def test_normalize_limits_of_something_else_is_none(raw):
 @pytest.mark.parametrize("raw, expected", [
     ({"used_percent": 12.5, "resets_at": 1_800_000_000}, {"used_percent": 12.5, "resets_at": 1_800_000_000}),
     ({"used_percent": 0, "resets_at": None}, {"used_percent": 0, "resets_at": None}),
-    ({"used_percent": 30, "resets_at": "soon", "window_minutes": 300},
-     {"used_percent": 30, "resets_at": None, "window_minutes": 300}),
+    ({"used_percent": 100, "resets_at": 1}, {"used_percent": 100, "resets_at": 1}),
+    ({"used_percent": 30, "resets_at": "soon"}, {"used_percent": 30, "resets_at": None}),
     ({"used_percent": 99, "resets_at": 1e300}, {"used_percent": 99, "resets_at": None}),  # no such moment
     ({"used_percent": 99, "resets_at": True}, {"used_percent": 99, "resets_at": None}),
+    ({"used_percent": 99, "resets_at": float("inf")}, {"used_percent": 99, "resets_at": None}),
+    # only the two known keys are kept: whatever else was sent never reaches a page or a tool answer
+    ({"used_percent": 30, "resets_at": 1, "window_minutes": 300, "note": float("nan"), "more": {"x": float("inf")}},
+     {"used_percent": 30, "resets_at": 1}),
     ({"used_percent": "30", "resets_at": 1}, None),
     ({"used_percent": True, "resets_at": 1}, None),
     ({"used_percent": 10 ** 400, "resets_at": 1}, None),
+    ({"used_percent": float("nan"), "resets_at": 1}, None),
+    ({"used_percent": -1, "resets_at": 1}, None),      # a percent is 0..100: anything else is not usable
+    ({"used_percent": -0.5, "resets_at": 1}, None),
+    ({"used_percent": 100.5, "resets_at": 1}, None),
+    ({"used_percent": 1000, "resets_at": 1}, None),
     ({"resets_at": 1}, None),
     (None, None), ("12", None), (12, None), ([12], None),
 ])
 def test_normalize_window(raw, expected):
     assert normalize_window(raw) == expected
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ({"resumable": False, "pre_approval": True}, {"resumable": False, "pre_approval": True}),
+    ({"resumable": False}, {"resumable": False, "pre_approval": False}),
+    ({"resumable": "no", "pre_approval": 1, "extra": float("nan")}, {"resumable": True, "pre_approval": False}),
+    ({}, {"resumable": True, "pre_approval": False}),
+    (None, {"resumable": True, "pre_approval": False}),   # a v0.1 agent sends none
+    ("all", {"resumable": True, "pre_approval": False}),
+])
+def test_normalize_capabilities_keeps_the_two_known_flags(raw, expected):
+    assert normalize_capabilities(raw) == expected
 
 
 # ---- TaskManager with several lenders -----------------------------------
@@ -313,6 +336,57 @@ async def test_bad_numbers_from_one_lender_do_not_break_the_host(mgr):
     u = mgr.usage()["lenders"]["alice"]
     assert u["five_hour"]["resets_at_local"] is None and u["blocked_until"] is None
     assert mgr.tasks[await mgr.start("one")].lender == "alice"
+
+
+NAN, INF = float("nan"), float("inf")
+
+
+async def test_nothing_a_lender_sends_keeps_the_lists_from_being_json(mgr):
+    # NaN and Infinity are not JSON: one of them in a list would turn the whole admin page into an error.
+    alice = FakeAgent(mgr, "alice")
+    await alice.push("hello", agent_version=NAN, codex_version=INF, auth_mode={"x": NAN}, protocol=NAN,
+                     capabilities={"resumable": NAN, "pre_approval": INF, "extra": NAN},
+                     limits={"five_hour": NAN, "weekly": INF, "force": NAN}, current_task_id=None)
+    await alice.push("usage", five_hour={"used_percent": 10, "resets_at": NAN, "extra": NAN},
+                     weekly={"used_percent": 20, "resets_at": int(time.time()) + 60, "more": [INF]},
+                     ts=NAN, friend_limits={"five_hour": INF, "weekly": NAN, "force": NAN}, extra=NAN)
+    row = json.loads(json.dumps(mgr.lenders(), allow_nan=False))[0]
+    assert (row["agent_version"], row["codex_version"], row["auth_mode"], row["protocol"]) == (None, None, None, 1)
+    assert row["capabilities"] == {"resumable": True, "pre_approval": False} and row["limits"] == NO_LIMITS
+    assert row["usage"]["five_hour"] == {"used_percent": 10, "resets_at": None, "resets_at_local": None}
+    assert set(row["usage"]["weekly"]) == {"used_percent", "resets_at", "resets_at_local"}
+    assert row["usage"]["ts"] is None
+    json.dumps(mgr.usage(), allow_nan=False)
+    json.dumps(mgr.agent_info(), allow_nan=False)
+    await alice.push("usage", five_hour=None, weekly=None, ts=INF)
+    assert mgr.usage()["ts"] is None
+    await alice.push("usage", five_hour=None, weekly=None, ts=1_800_000_000)
+    assert mgr.usage()["ts"] == 1_800_000_000
+
+
+async def test_a_bogus_percent_does_not_put_a_lender_first(mgr):
+    alice, bob = await FakeAgent.join(mgr, "alice"), await FakeAgent.join(mgr, "bob")
+    await alice.push("usage", five_hour={"used_percent": -500, "resets_at": int(time.time()) + 60}, weekly=None, ts=0)
+    await bob.push("usage", **usage(five_hour=70))
+    assert mgr.usage()["lenders"]["alice"]["five_hour"] is None
+    assert mgr.tasks[await mgr.start("one")].lender == "bob"  # unknown usage goes last (design 3.3)
+
+
+async def test_invited_names_are_listed_even_before_they_connect(mgr):
+    alice = await FakeAgent.join(mgr, "alice")
+    await alice.push("usage", **usage(five_hour=10))
+    rows = mgr.lenders(["carol", "alice", "dave"])
+    assert [r["name"] for r in rows] == ["alice", "carol", "dave"]  # seen first, then the invited, each once
+    assert set(rows[1]) == set(rows[0])  # the same columns for everyone
+    carol = rows[1]
+    assert carol["connected"] is False and carol["ready"] is False and carol["since"] is None
+    assert carol["capabilities"] is None and carol["limits"] is None and carol["current_task_id"] is None
+    assert carol["usage"]["five_hour"] is None and carol["usage"]["weekly"] is None
+    assert carol["usage"]["blocked_until"] is None and carol["usage"]["thresholds"] == TH
+    assert [r["name"] for r in mgr.lenders()] == ["alice"]  # without the invite list: as before
+    with pytest.raises(ToolError, match="接続されていません"):  # being listed does not make one reachable
+        await mgr.start("one", lender="carol")
+    assert mgr.usage()["lenders"].keys() == {"alice"}
 
 
 async def test_limits_that_are_not_an_object_leave_the_known_ones_in_place(mgr):

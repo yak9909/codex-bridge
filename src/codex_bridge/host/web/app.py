@@ -189,9 +189,9 @@ def admin_router(host) -> APIRouter:
 
     @r.get("/api/lenders")
     async def lenders():
-        """One row per lender seen since the host started: connection, versions, usage, own limits,
-        capabilities (disposable sessions, pre-approval) and the task in progress."""
-        return host.mgr.lenders()
+        """One row per lender: connection, versions, usage, own limits, capabilities (disposable sessions,
+        pre-approval) and the task in progress. Invited names that have not connected are listed too."""
+        return host.mgr.lenders(i["name"] for i in host.tokens.list())
 
     @r.get("/api/tasks")
     async def tasks():
@@ -210,11 +210,11 @@ def admin_router(host) -> APIRouter:
         prompt = str(body.get("prompt") or "").strip()
         if not prompt:
             raise HTTPException(400, "依頼の内容を書いてください")
-        lender = body.get("lender") or None
-        if lender is not None and not isinstance(lender, str):
+        lender = body.get("lender")
+        if lender is not None and not isinstance(lender, str):  # 0, false, [] ... are not "automatic"
             raise HTTPException(400, "送り先は名前で指定してください")
         try:
-            task_id = await host.mgr.start(prompt, body.get("continue_task_id") or None, lender)
+            task_id = await host.mgr.start(prompt, body.get("continue_task_id") or None, lender or None)
         except ToolError as e:
             raise HTTPException(409, str(e))
         return {"task_id": task_id, "lender": host.mgr.tasks[task_id].lender}

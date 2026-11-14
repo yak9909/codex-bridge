@@ -127,14 +127,15 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
             return {"task_id": task_id, "lender": mgr.tasks[task_id].lender}
         return await run(f)
 
-    @tool("Codex を貸している人の一覧を返します（この host が起動してから接続したことのある人）。各行の主な項目: "
+    @tool("Codex を貸している人の一覧を返します（招待コードを発行した人。まだ接続していない人は connected が false で、"
+          "usage や capabilities は分かりません）。各行の主な項目: "
           "name（send_task などの lender に渡す名前）、connected（接続中か）、ready（依頼を受けられる準備ができたか。接続の直後だけ false）、"
           "usage（5 時間枠・週間枠の使用率、blocked_until＝新しい依頼を受けられるようになる時刻）、limits（その人が決めた上限）、"
           "capabilities（resumable が false なら使い捨てのセッションで、続きの依頼ができません。"
           "pre_approval が true なら、依頼のたびにその人の承認が要ります）、current_task_id（作業中のタスク）。")
     async def list_lenders() -> CallToolResult:
         async def f():
-            return mgr.lenders()
+            return mgr.lenders(i["name"] for i in tokens.list())
         return await run(f)
 
     @tool("作業中のタスクに追加の指示を送ります。")

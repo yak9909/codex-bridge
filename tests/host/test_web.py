@@ -247,6 +247,36 @@ async def test_lenders_api_lists_each_lender(admin, host):
     assert (await admin.get("/admin/api/lenders", headers={"Host": "evil.example:8770"})).status_code == 403
 
 
+async def test_lenders_api_lists_invited_names_that_have_not_connected(admin, host):
+    for name in ("alice", "carol"):
+        await admin.post("/admin/api/invites", json={"name": name}, headers=H)
+    await two_lenders(host.mgr)  # alice and bob connect; carol has only been invited
+    rows = (await admin.get("/admin/api/lenders")).json()
+    assert [r["name"] for r in rows] == ["alice", "bob", "carol"]
+    carol = rows[2]
+    assert carol["connected"] is False and carol["usage"]["five_hour"] is None and carol["current_task_id"] is None
+    assert carol["capabilities"] is None and set(carol) == set(rows[0])
+    await admin.delete("/admin/api/invites/carol", headers=H)
+    assert [r["name"] for r in (await admin.get("/admin/api/lenders")).json()] == ["alice", "bob"]
+
+
+async def test_lenders_api_survives_numbers_that_are_not_json(admin, host):
+    nan, inf = float("nan"), float("inf")
+    link = await join(host.mgr, "alice", agent_version=nan, protocol=inf, capabilities={"resumable": nan, "x": inf},
+                      limits={"five_hour": nan, "weekly": inf, "force": nan})
+    await host.mgr.on_agent_message(link, {
+        "type": "usage", "ts": nan, "friend_limits": {"five_hour": inf},
+        "five_hour": {"used_percent": 10, "resets_at": inf, "extra": nan},
+        "weekly": {"used_percent": 20, "resets_at": int(time.time()) + 60, "more": [nan]}})
+    r = await admin.get("/admin/api/lenders")
+    assert r.status_code == 200
+    row = r.json()[0]
+    assert row["usage"]["ts"] is None and row["usage"]["five_hour"]["used_percent"] == 10
+    assert set(row["usage"]["weekly"]) == {"used_percent", "resets_at", "resets_at_local"}
+    assert (await admin.get("/admin/api/overview")).status_code == 200
+    assert (await admin.get("/admin/api/usage")).status_code == 200
+
+
 async def test_send_task_to_a_chosen_lender(admin, host):
     sent = await two_lenders(host.mgr)
     r = await admin.post("/admin/api/tasks", json={"prompt": "one", "lender": "alice"}, headers=H)  # bob has more room
@@ -259,6 +289,15 @@ async def test_send_task_to_a_chosen_lender(admin, host):
     assert r.status_code == 409 and "接続されていません" in r.json()["detail"]
     assert (await admin.post("/admin/api/tasks", json={"prompt": "two", "lender": 5}, headers=H)).status_code == 400
     assert len(host.mgr.tasks) == 1
+
+
+@pytest.mark.parametrize("lender", [0, False, [], {}, 0.0, True, ["bob"]])
+async def test_send_task_with_a_lender_that_is_not_a_name_is_refused(admin, host, lender):
+    # "empty" values of another type must not be read as "automatic": only a missing, null or "" lender is
+    sent = await two_lenders(host.mgr)
+    r = await admin.post("/admin/api/tasks", json={"prompt": "one", "lender": lender}, headers=H)
+    assert r.status_code == 400 and "送り先" in r.json()["detail"]
+    assert host.mgr.tasks == {} and all(m["type"] != "task_start" for m in sent["alice"] + sent["bob"])
 
 
 @pytest.mark.parametrize("body", [{}, {"lender": None}, {"lender": ""}])
