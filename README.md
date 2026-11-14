@@ -9,6 +9,7 @@
 
 設計: [docs/2026-11-14-codex-bridge-design.md](docs/2026-11-14-codex-bridge-design.md)
 知人向けの手順: [docs/friend-guide.md](docs/friend-guide.md)
+運用手順（毎回の流れ・Claude Code への伝え方）: [docs/operation-guide.md](docs/operation-guide.md)
 
 ## しくみ
 
