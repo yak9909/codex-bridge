@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
+import sys
 import threading
+import time
+import traceback
 import webbrowser
 from pathlib import Path
 
@@ -141,8 +145,7 @@ async def run_agent(invite: Invite, codex: Path, home: Path) -> None:
                                                   "auth_mode": mode},
                            on_status=lambda s: tray.set_status(s))
     tray.run_detached()
-    logview = uvicorn.Server(uvicorn.Config(create_logview_app(store), host="127.0.0.1", port=LOGVIEW_PORT,
-                                            log_level="warning"))
+    logview = make_logview_server(store)
 
     async def watchdog() -> None:
         while True:
@@ -166,8 +169,40 @@ async def run_agent(invite: Invite, codex: Path, home: Path) -> None:
     tray.icon.stop()
 
 
+def ensure_std_streams() -> None:
+    """The windowed exe has no console (sys.stdout/stderr are None); give libraries somewhere to write."""
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+
+def make_logview_server(store: LogStore) -> uvicorn.Server:
+    # log_config=None: uvicorn's own logging setup inspects sys.stdout, which a windowed exe lacks.
+    return uvicorn.Server(uvicorn.Config(create_logview_app(store), host="127.0.0.1", port=LOGVIEW_PORT,
+                                         log_level="warning", log_config=None))
+
+
+def run_guarded(fn, home: Path) -> None:
+    """Run fn; on an unexpected error write logs/crash.log and tell the user in Japanese."""
+    try:
+        fn()
+    except Exception:
+        log = Path(home) / "logs" / "crash.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} (agent {__version__})\n{traceback.format_exc()}\n")
+        show_info("codex-bridge が予期しないエラーで止まりました。\n"
+                  f"お手数ですが、次のファイルを依頼主に送ってください:\n{log}", error=True)
+
+
 def main() -> None:
+    ensure_std_streams()
     home = data_root()
+    run_guarded(lambda: _main(home), home)
+
+
+def _main(home: Path) -> None:
     invite = load_invite(home)
     if invite is None:
         invite = ask_invite()
