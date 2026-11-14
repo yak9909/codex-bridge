@@ -116,11 +116,18 @@ class WriteTools:
             if decision != "approved":
                 raise ToolError(f"削除は拒否されました: {rel}")
         # Re-check after a possibly long wait: the policy may have changed.
+        self.delete_now(path)
+        return {"status": "done", "path": rel}
+
+    def delete_now(self, path: str) -> None:
+        """Delete without asking (callers handle approval)."""
         real = self.paths.resolve(path, "write")
+        rel = normalize_rel(path)
+        if not real.exists():
+            raise not_found(path)
         self._before(rel, real)
         if real.is_dir():
             shutil.rmtree(real)
         else:
             real.unlink()
         self._log("delete_path", rel)
-        return {"status": "done", "path": rel}
