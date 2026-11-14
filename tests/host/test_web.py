@@ -20,7 +20,7 @@ def host(tmp_path):
                                    "public_bind": "100.64.0.1:8765", "local_port": 8770,
                                    "rg_path": str(tmp_path / "rg.exe")}), encoding="utf-8")
     ensure_config(cfg)
-    return build_host(load_host_config(cfg))
+    return build_host(load_host_config(cfg), config_path=cfg)
 
 
 @pytest.fixture
@@ -135,3 +135,30 @@ async def test_folders_listing_shows_levels(admin, host):
     sub = (await admin.get("/admin/api/folders", params={"path": "raw"})).json()["folders"]
     assert [f["path"] for f in sub] == ["raw/sub"]
     assert (await admin.get("/admin/api/folders", params={"path": "../.."})).status_code == 400
+
+
+async def test_change_share_root(admin, host, tmp_path):
+    new = tmp_path / "other-share"
+    (new / "sub").mkdir(parents=True)
+    r = await admin.put("/admin/api/share-root", json={"path": str(new)}, headers=H)
+    assert r.status_code == 200, r.text
+    assert host.paths.root == new.resolve() and host.config.share_root == new.resolve()
+    assert new.as_posix() in (tmp_path / "host.yaml").read_text(encoding="utf-8")
+    assert [f["name"] for f in (await admin.get("/admin/api/folders")).json()["folders"]] == ["sub"]
+    assert (await admin.get("/admin/api/overview")).json()["share_root"] == str(new.resolve())
+
+
+async def test_change_share_root_rejects_bad_paths(admin, host, tmp_path):
+    assert (await admin.put("/admin/api/share-root", json={"path": str(tmp_path / "nope")}, headers=H)).status_code == 400
+    # the data folder must stay outside the share
+    assert (await admin.put("/admin/api/share-root", json={"path": str(tmp_path)}, headers=H)).status_code == 400
+    assert (await admin.put("/admin/api/share-root", json={"path": "relative/dir"}, headers=H)).status_code == 400
+
+
+async def test_cannot_change_share_root_during_a_task(admin, host, tmp_path):
+    from codex_bridge.host.tasks import TaskRecord
+    host.mgr.tasks["t1"] = TaskRecord(task_id="t1", prompt="p", created=0, state="running")
+    new = tmp_path / "x"
+    new.mkdir()
+    r = await admin.put("/admin/api/share-root", json={"path": str(new)}, headers=H)
+    assert r.status_code == 409

@@ -22,8 +22,12 @@ def not_found(rel: str) -> ToolError:
 
 class SafePaths:
     def __init__(self, root: Path, policy: PolicyStore) -> None:
-        self.root = Path(root).resolve()
         self.policy = policy
+        self.set_root(root)
+
+    def set_root(self, root: Path) -> None:
+        """Point at another share folder (the admin can change it while the host runs)."""
+        self.root = Path(root).resolve()
         self._root_nc = os.path.normcase(str(self.root))
 
     def _inside(self, p: Path) -> bool:

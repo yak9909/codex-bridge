@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from fastapi import FastAPI
 
@@ -18,6 +19,7 @@ from .claude_mcp import build_claude_mcp
 from .codex_mcp import HostServices, build_codex_mcp
 from .config import HostConfig
 from .control import add_control_route
+from .share import change_share_root
 from .fs_read import ReadTools
 from .fs_write import WriteTools
 from .mcp_util import LoopbackOnly, McpEndpoint
@@ -57,9 +59,10 @@ class Host:
     claude_ep: McpEndpoint
     events: Broadcaster
     shutdown: asyncio.Event = field(default_factory=asyncio.Event)  # set by stop.bat via /admin/api/shutdown
+    config_path: Path | None = None  # host.yaml, updated when settings change from the admin page
 
 
-def build_host(config: HostConfig) -> Host:
+def build_host(config: HostConfig, config_path: Path | None = None) -> Host:
     data = config.data_dir
     data.mkdir(parents=True, exist_ok=True)
     policy = PolicyStore(data / "policy.yaml")
@@ -79,11 +82,16 @@ def build_host(config: HostConfig) -> Host:
     events = Broadcaster()
     approvals.on_change.append(events.notify)
     mgr.on_change.append(events.notify)
-    return Host(config=config, policy=policy, audit=audit, paths=paths, snapshots=snapshots, approvals=approvals,
+    ref: dict = {}  # the agents' tools need the finished Host (share folder can change at runtime)
+    host = Host(config=config, policy=policy, audit=audit, paths=paths, snapshots=snapshots, approvals=approvals,
                 mgr=mgr, tokens=tokens, services=services, codex_ep=build_codex_mcp(services, tokens.hashes),
                 claude_ep=build_claude_mcp(mgr, approvals, snapshots, policy=policy, tokens=tokens,
-                                           public_bind=config.public_bind, share_root=config.share_root),
-                events=events)
+                                           public_bind=config.public_bind,
+                                           share_root=lambda: ref["host"].config.share_root,
+                                           change_share=lambda p: change_share_root(ref["host"], p)),
+                events=events, config_path=Path(config_path) if config_path else None)
+    ref["host"] = host
+    return host
 
 
 def create_public_app(host: Host) -> FastAPI:

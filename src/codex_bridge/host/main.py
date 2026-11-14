@@ -56,7 +56,7 @@ async def serve(config_path: Path) -> None:
         raise SystemExit(f"share_root がありません: {cfg.share_root}")
     if cfg.data_dir.resolve().is_relative_to(cfg.share_root.resolve()):
         raise SystemExit("data_dir は share_root の外に置いてください")
-    host = build_host(cfg)
+    host = build_host(cfg, config_path=config_path)
     pub_host, pub_port = cfg.public_bind.rsplit(":", 1)
     public = uvicorn.Server(uvicorn.Config(create_public_app(host), host=pub_host, port=int(pub_port),
                                            log_level="warning", ws_max_size=64 * 1024 * 1024))

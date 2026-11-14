@@ -19,7 +19,8 @@ async def env(share):
     mgr = TaskManager(share.data_dir, touched_fn=share.snapshots.touched)
     share.tokens = TokenStore(share.data_dir)
     ep = build_claude_mcp(mgr, share.approvals, share.snapshots, policy=share.policy, tokens=share.tokens,
-                          public_bind="100.1.2.3:8765", share_root=share.root)
+                          public_bind="100.1.2.3:8765", share_root=lambda: share.root,
+                          change_share=lambda p: share.paths.set_root(p) or share.paths.root)
     app = Starlette(routes=[Mount("/claude", app=ep.asgi)])
     async with running(ep):
         local = httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 5000)),
@@ -45,7 +46,8 @@ async def test_tool_names(env):
         "set_thresholds", "undo_task", "list_sessions", "read_session", "delete_session",
         "list_approvals", "decide_approval", "get_policy", "set_policy", "set_folder_level", "set_exec_mode",
         "set_paused",
-        "set_log_visibility", "list_tasks", "issue_invite", "revoke_invite", "list_invites", "get_overview"}
+        "set_log_visibility", "list_tasks", "issue_invite", "revoke_invite", "list_invites", "get_overview",
+        "set_share_root", "get_guide"}
 
 
 def text_of(res: dict):
@@ -203,3 +205,27 @@ async def test_claude_set_folder_level_and_form(env, share):
     form = text_of(await call(local, "get_policy", {}))["form"]
     assert {"path": "docs", "level": "write"} in form["folders"]
     assert (await call(local, "set_folder_level", {"path": "docs", "level": "everything"}))["isError"]
+
+
+async def test_claude_can_change_share_root(env, share, tmp_path):
+    _, local, _ = env
+    new = tmp_path / "elsewhere"
+    new.mkdir()
+    r = text_of(await call(local, "set_share_root", {"path": str(new)}))
+    assert r["share_root"] == str(new.resolve()) and share.paths.root == new.resolve()
+
+
+async def test_get_guide_explains_the_workflow(env):
+    _, local, _ = env
+    g = text_of(await call(local, "get_guide", {}))["guide"]
+    for word in ("get_overview", "send_task", "wait_sec", "decide_approval", "get_result", "continue_task_id"):
+        assert word in g
+
+
+async def test_server_instructions_tell_agents_how_to_start(env):
+    _, local, _ = env
+    r = await local.post("/claude/mcp", headers=ACCEPT, json={
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}})
+    ins = r.json()["result"]["instructions"]
+    assert "codex-bridge" in ins and "get_guide" in ins and "send_task" in ins

@@ -15,6 +15,7 @@ from ...common.invite import make_invite
 from ..paths import ToolError
 from ..policy import OUTPUTS_TOP, normalize_rel
 from ..policy_form import form_from_raw, save_form
+from ..share import ShareBusy, change_share_root, pick_folder_dialog
 
 STATIC = Path(__file__).parent / "static"
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
@@ -109,6 +110,22 @@ def admin_router(host) -> APIRouter:
             out.append({"name": e.name, "path": child, "rule": rules.get(child.lower()),
                         "effective": policy.level_for(child), "has_children": has_children})
         return {"path": rel, "folders": out, "default": policy.default}
+
+    @r.put("/api/share-root")
+    async def put_share_root(body: dict):
+        try:
+            p = change_share_root(host, body.get("path"))
+        except ShareBusy as e:
+            raise HTTPException(409, str(e))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"share_root": str(p)}
+
+    @r.post("/api/pick-folder")
+    async def pick_folder():
+        """Open the folder picker on this PC and return the chosen path (null if cancelled)."""
+        chosen = await asyncio.to_thread(pick_folder_dialog, host.config.share_root)
+        return {"path": chosen}
 
     @r.post("/api/pause")
     async def pause(body: dict):

@@ -77,6 +77,16 @@ def update_public_bind(path: Path, ip: str, port: int | None = None) -> bool:
     return True
 
 
+def set_yaml_value(path: Path, key: str, value: str) -> None:
+    """Replace (or append) a top-level 'key: "value"' line, keeping comments and other lines."""
+    path = Path(path)
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    line = f"{key}: {json.dumps(value, ensure_ascii=False)}"
+    m = re.search(rf"^{re.escape(key)}:.*$", text, flags=re.MULTILINE)
+    text = text[:m.start()] + line + text[m.end():] if m else text.rstrip("\n") + "\n" + line + "\n"
+    path.write_text(text, encoding="utf-8")
+
+
 def inside(child: Path, parent: Path) -> bool:
     try:
         Path(child).resolve().relative_to(Path(parent).resolve())
