@@ -66,7 +66,7 @@ paused: false
 
 - 「見せない（hidden）」場所は、一覧・検索・エラー文のどれにも出ません。
 - **コマンド実行は閉じ込めていません。** 実行されたスクリプトは、hidden の場所や共有フォルダの外も読めます（相手を信頼する前提の割り切り）。
-- 確認待ち（コマンド実行・削除）は、管理画面で人が許可／拒否します。30 分返事がなければ拒否になります。Claude Code は承認できません。
+- 確認待ち（コマンド実行・削除）は、Claude Code（`decide_approval`）か管理画面で許可／拒否します。30 分返事がなければ拒否になります。
 - 長い出力は共有フォルダの `.codex-bridge/outputs/` に保存され、Codex は read_file で読めます。
 
 ## Claude Code から使う道具
@@ -75,11 +75,16 @@ paused: false
 |---|---|
 | `send_task(prompt, continue_task_id?)` | 依頼する。続きなら前のタスクの ID を渡す |
 | `send_followup(task_id, text)` | 作業中の Codex に追加の指示 |
-| `get_status(task_id?)` / `get_result(task_id)` | 状態・最近の出来事・承認待ち／最終報告・変更ファイル |
+| `get_status(task_id?, wait_sec?)` / `get_result(task_id)` | 状態・最近の出来事・承認待ち（wait_sec で最大 50 秒待つ）／最終報告・変更ファイル |
 | `cancel_task(task_id)` | 中止 |
 | `get_usage()` / `set_thresholds(five_hour?, weekly?)` | 使用量としきい値 |
 | `undo_task(task_id)` | ファイル操作の道具による変更を元に戻す（コマンド実行による変更は戻らない） |
 | `list_sessions()` / `read_session(id)` / `delete_session(id)` | このツールで作ったセッションのみ |
+| `list_approvals()` / `decide_approval(id, approve)` | 承認待ちの一覧／許可・拒否 |
+| `get_policy()` / `set_policy(text)` | 権限の規則を読む／全文で置き換える（誤りがあれば保存しない） |
+| `set_exec_mode(mode)` / `set_paused(paused)` / `set_log_visibility(value)` | 実行モード・一時停止・知人に見せるログの範囲 |
+| `list_tasks()` / `get_overview()` | タスクの一覧／全体の状態 |
+| `issue_invite(name)` / `revoke_invite(name)` / `list_invites()` | 招待コード |
 
 使用量の上限で中断したタスク（`suspended_quota`）は、`resume_at` 以降に `send_task(..., continue_task_id=<そのタスク>)` で続けられます。
 

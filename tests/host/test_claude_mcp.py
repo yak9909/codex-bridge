@@ -7,6 +7,8 @@ from starlette.routing import Mount
 
 from codex_bridge.host.claude_mcp import build_claude_mcp
 from codex_bridge.host.tasks import TaskManager
+from codex_bridge.host.tokens import TokenStore
+from codex_bridge.common.invite import parse_invite
 from mcp_helpers import running
 
 ACCEPT = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
@@ -15,7 +17,9 @@ ACCEPT = {"Accept": "application/json, text/event-stream", "Content-Type": "appl
 @pytest.fixture
 async def env(share):
     mgr = TaskManager(share.data_dir, touched_fn=share.snapshots.touched)
-    ep = build_claude_mcp(mgr, share.approvals, share.snapshots)
+    share.tokens = TokenStore(share.data_dir)
+    ep = build_claude_mcp(mgr, share.approvals, share.snapshots, policy=share.policy, tokens=share.tokens,
+                          public_bind="100.1.2.3:8765", share_root=share.root)
     app = Starlette(routes=[Mount("/claude", app=ep.asgi)])
     async with running(ep):
         local = httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 5000)),
@@ -38,7 +42,61 @@ async def test_tool_names(env):
     r = await local.post("/claude/mcp", headers=ACCEPT, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     assert {t["name"] for t in r.json()["result"]["tools"]} == {
         "send_task", "send_followup", "get_status", "get_result", "cancel_task", "get_usage",
-        "set_thresholds", "undo_task", "list_sessions", "read_session", "delete_session"}
+        "set_thresholds", "undo_task", "list_sessions", "read_session", "delete_session",
+        "list_approvals", "decide_approval", "get_policy", "set_policy", "set_exec_mode", "set_paused",
+        "set_log_visibility", "list_tasks", "issue_invite", "revoke_invite", "list_invites", "get_overview"}
+
+
+def text_of(res: dict):
+    assert not res.get("isError"), res
+    return json.loads(res["content"][0]["text"])
+
+
+async def test_claude_can_decide_approvals(env, share):
+    _, local, _ = env
+    a = share.approvals.request("command", "python x.py", task_id="t1")
+    listed = text_of(await call(local, "list_approvals", {}))
+    assert listed[0]["id"] == a.id and listed[0]["summary"] == "python x.py"
+    assert text_of(await call(local, "decide_approval", {"approval_id": a.id, "approve": True}))["status"] == "approved"
+    assert share.approvals.get(a.id).status == "approved"
+    res = await call(local, "decide_approval", {"approval_id": a.id, "approve": False})
+    assert res["isError"] and "もうありません" in res["content"][0]["text"]
+
+
+async def test_claude_can_read_and_change_policy(env, share):
+    _, local, _ = env
+    assert "default" in text_of(await call(local, "get_policy", {}))["text"]
+    bad = await call(local, "set_policy", {"text": "rules: ["})
+    assert bad["isError"] and share.policy.current().exec_mode == "allowlist"
+    text_of(await call(local, "set_policy", {"text": "default: write\nexec: {mode: ask}\n"}))
+    assert share.policy.current().default == "write" and share.policy.current().exec_mode == "ask"
+
+
+async def test_claude_can_switch_exec_mode_pause_and_visibility(env, share):
+    mgr, local, _ = env
+    text_of(await call(local, "set_exec_mode", {"mode": "off"}))
+    assert share.policy.current().exec_mode == "off"
+    assert (await call(local, "set_exec_mode", {"mode": "weird"}))["isError"]
+    text_of(await call(local, "set_paused", {"paused": True}))
+    assert share.policy.current().paused is True
+    text_of(await call(local, "set_log_visibility", {"value": "all"}))
+    assert mgr.settings["log_visibility"] == "all"
+
+
+async def test_claude_can_manage_invites(env, share):
+    _, local, _ = env
+    code = text_of(await call(local, "issue_invite", {"name": "friend"}))["code"]
+    assert parse_invite(code).url == "http://100.1.2.3:8765"
+    assert [i["name"] for i in text_of(await call(local, "list_invites", {}))] == ["friend"]
+    text_of(await call(local, "revoke_invite", {"name": "friend"}))
+    assert share.tokens.hashes() == set()
+
+
+async def test_overview_and_task_list(env, share):
+    _, local, _ = env
+    o = text_of(await call(local, "get_overview", {}))
+    assert o["agent"]["connected"] is False and o["share_root"] == str(share.root) and "usage" in o
+    assert text_of(await call(local, "list_tasks", {})) == []
 
 
 async def test_non_loopback_rejected(env):
@@ -52,7 +110,7 @@ async def test_status_shows_pending_approval(env, share):
     share.approvals.request("command", "python x.py", task_id="t1")
     res = await call(local, "get_status", {})
     s = json.loads(res["content"][0]["text"])
-    assert s["pending_approvals"][0]["summary"] == "python x.py" and "Web 画面" in s["note"]
+    assert s["pending_approvals"][0]["summary"] == "python x.py" and "decide_approval" in s["note"]
 
 
 async def test_send_task_without_agent_is_error(env):

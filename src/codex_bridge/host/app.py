@@ -81,7 +81,9 @@ def build_host(config: HostConfig) -> Host:
     mgr.on_change.append(events.notify)
     return Host(config=config, policy=policy, audit=audit, paths=paths, snapshots=snapshots, approvals=approvals,
                 mgr=mgr, tokens=tokens, services=services, codex_ep=build_codex_mcp(services, tokens.hashes),
-                claude_ep=build_claude_mcp(mgr, approvals, snapshots), events=events)
+                claude_ep=build_claude_mcp(mgr, approvals, snapshots, policy=policy, tokens=tokens,
+                                           public_bind=config.public_bind, share_root=config.share_root),
+                events=events)
 
 
 def create_public_app(host: Host) -> FastAPI:
