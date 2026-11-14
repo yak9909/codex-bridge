@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Awaitable, Callable, Iterable
 
 SendFn = Callable[[dict], Awaitable[None]]
@@ -27,11 +29,47 @@ class Lender:
     auth_mode: str | None = None
     protocol: int = 1
     capabilities: dict = field(default_factory=lambda: dict(V1_CAPABILITIES))
-    limits: dict | None = None  # the lender's own limits: {five_hour, weekly, force}
+    limits: dict | None = None  # the lender's own limits: {five_hour, weekly, force}, via normalize_limits
     usage: dict = field(default_factory=_no_usage)
     current_task_id: str | None = None
     last_assigned: float = 0.0
     since: float | None = None  # when the current (or last) connection was made
+
+
+def _number(v) -> float | None:
+    """A finite number, or None for anything else (text, bool, NaN, ...)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    try:
+        return v if math.isfinite(v) else None
+    except OverflowError:  # an integer too large for a float
+        return None
+
+
+def normalize_limits(raw) -> dict | None:
+    """The limits a lender's agent sent, made safe to compute with: each window is a percent in
+    (0, 100] or None (no limit of its own). None when `raw` is not an object at all."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict = {k: v if (v := _number(raw.get(k))) is not None and 0 < v <= 100 else None for k in WINDOWS}
+    out["force"] = raw.get("force") is True
+    return out
+
+
+def _moment(v) -> float | None:
+    """Seconds since the epoch, if a clock can show that moment; else None."""
+    try:
+        datetime.fromtimestamp(_number(v), timezone.utc).astimezone()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+    return v
+
+
+def normalize_window(raw) -> dict | None:
+    """One usage window as an agent reported it, or None when its numbers cannot be used."""
+    if not isinstance(raw, dict) or (used := _number(raw.get("used_percent"))) is None:
+        return None
+    return {**raw, "used_percent": used, "resets_at": _moment(raw.get("resets_at"))}
 
 
 def effective_limits(lender: Lender, thresholds: dict) -> dict:

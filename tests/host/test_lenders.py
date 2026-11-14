@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from codex_bridge.host.lenders import Lender, pick_lender
+from codex_bridge.host.lenders import Lender, normalize_limits, normalize_window, pick_lender
 from codex_bridge.host.paths import ToolError
 from codex_bridge.host.tasks import TaskManager
 
@@ -72,8 +72,50 @@ def test_same_headroom_prefers_least_recently_assigned():
     assert pick_lender([a, b], TH) is b
 
 
+# ---- what a lender sends is checked on receipt ---------------------------
+NO_LIMITS = {"five_hour": None, "weekly": None, "force": False}
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ({"five_hour": 50, "weekly": 60.5, "force": True}, {"five_hour": 50, "weekly": 60.5, "force": True}),
+    ({"five_hour": 100, "weekly": None, "force": False}, {"five_hour": 100, "weekly": None, "force": False}),
+    ({"five_hour": 70}, {"five_hour": 70, "weekly": None, "force": False}),
+    ({"five_hour": "50", "weekly": -5, "force": "yes"}, NO_LIMITS),   # text, negative, not a real flag
+    ({"five_hour": True, "weekly": 0, "force": 1}, NO_LIMITS),        # a bool is not a percent; 0 is out of range
+    ({"five_hour": 100.5, "weekly": float("nan")}, NO_LIMITS),
+    ({"five_hour": float("inf"), "weekly": [80]}, NO_LIMITS),
+    ({"five_hour": 10 ** 400, "weekly": -(10 ** 400)}, NO_LIMITS),
+    ({"five_hour": {"v": 80}, "weekly": "x"}, NO_LIMITS),
+    ({}, NO_LIMITS),
+])
+def test_normalize_limits_keeps_only_percents(raw, expected):
+    assert normalize_limits(raw) == expected
+
+
+@pytest.mark.parametrize("raw", [None, "80", 80, True, [80, 80]])
+def test_normalize_limits_of_something_else_is_none(raw):
+    assert normalize_limits(raw) is None
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ({"used_percent": 12.5, "resets_at": 1_800_000_000}, {"used_percent": 12.5, "resets_at": 1_800_000_000}),
+    ({"used_percent": 0, "resets_at": None}, {"used_percent": 0, "resets_at": None}),
+    ({"used_percent": 30, "resets_at": "soon", "window_minutes": 300},
+     {"used_percent": 30, "resets_at": None, "window_minutes": 300}),
+    ({"used_percent": 99, "resets_at": 1e300}, {"used_percent": 99, "resets_at": None}),  # no such moment
+    ({"used_percent": 99, "resets_at": True}, {"used_percent": 99, "resets_at": None}),
+    ({"used_percent": "30", "resets_at": 1}, None),
+    ({"used_percent": True, "resets_at": 1}, None),
+    ({"used_percent": 10 ** 400, "resets_at": 1}, None),
+    ({"resets_at": 1}, None),
+    (None, None), ("12", None), (12, None), ([12], None),
+])
+def test_normalize_window(raw, expected):
+    assert normalize_window(raw) == expected
+
+
 # ---- TaskManager with several lenders -----------------------------------
-HELLO = {"agent_version": "0.1.0", "codex_version": "x", "auth_mode": "chatgpt"}
+HELLO ={"agent_version": "0.1.0", "codex_version": "x", "auth_mode": "chatgpt"}
 
 
 class FakeAgent:
@@ -250,6 +292,34 @@ async def test_hello_v2_records_capabilities_and_limits(mgr):
     assert info["limits"] == {"five_hour": 50, "weekly": 60, "force": False}
     await alice.push("usage", **usage(five_hour=55))  # over alice's own limit, under the host's
     with pytest.raises(ToolError, match="再開可能"):
+        await mgr.start("one")
+
+
+async def test_bad_numbers_from_one_lender_do_not_break_the_host(mgr):
+    # Whatever one agent sends, the lists, the usage and the routing for everyone keep working.
+    alice = FakeAgent(mgr, "alice")
+    await alice.push("hello", **HELLO, limits={"five_hour": "50", "weekly": -1, "force": "no"}, current_task_id=None)
+    await alice.push("usage", **usage(five_hour=10, weekly=10))
+    assert mgr.lenders()[0]["limits"] == NO_LIMITS
+    assert mgr.usage()["lenders"]["alice"]["blocked_until"] is None
+
+    await alice.push("usage", **usage(five_hour=10, weekly=10), friend_limits={"five_hour": True, "weekly": "x"})
+    assert mgr.usage()["friend_limits"] == NO_LIMITS and mgr.lenders()[0]["limits"] == NO_LIMITS
+
+    await alice.push("usage", five_hour={"used_percent": "99", "resets_at": "x"}, weekly="full", ts=0)
+    u = mgr.usage()["lenders"]["alice"]
+    assert u["five_hour"] is None and u["weekly"] is None and u["blocked_until"] is None
+    await alice.push("usage", five_hour={"used_percent": 99, "resets_at": 1e300}, weekly=None, ts=0)
+    u = mgr.usage()["lenders"]["alice"]
+    assert u["five_hour"]["resets_at_local"] is None and u["blocked_until"] is None
+    assert mgr.tasks[await mgr.start("one")].lender == "alice"
+
+
+async def test_limits_that_are_not_an_object_leave_the_known_ones_in_place(mgr):
+    alice = await FakeAgent.join(mgr, "alice", limits={"five_hour": 50, "weekly": 60, "force": True})
+    await alice.push("usage", **usage(five_hour=55), friend_limits="none")
+    assert mgr.lenders()[0]["limits"] == {"five_hour": 50, "weekly": 60, "force": True}
+    with pytest.raises(ToolError, match="再開可能"):  # alice's own 50% still counts
         await mgr.start("one")
 
 

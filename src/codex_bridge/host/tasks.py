@@ -13,7 +13,8 @@ from typing import Callable
 
 from ..common import protocol
 from ..common.protocol import FINAL_STATES, LOG_VISIBILITY
-from .lenders import V1_CAPABILITIES, Lender, SendFn, blocked_until, pick_lender
+from .lenders import (V1_CAPABILITIES, Lender, SendFn, blocked_until, normalize_limits, normalize_window,
+                      pick_lender)
 from .paths import ToolError
 
 ACTIVE_STATES = ("queued", "running", "agent_offline")
@@ -204,18 +205,21 @@ class TaskManager:
             caps = m.get("capabilities")
             lender.protocol = m.get("protocol") or 1
             lender.capabilities = {**V1_CAPABILITIES, **caps} if isinstance(caps, dict) else dict(V1_CAPABILITIES)
-            if isinstance(m.get("limits"), dict):
-                lender.limits = m["limits"]
+            limits = normalize_limits(m.get("limits"))
+            if limits is not None:
+                lender.limits = limits
             if "current_task_id" in m:
                 self._reconcile(lender, m.get("current_task_id"))
             lender.ready = True
             await lender.send(self._settings_msg())
             self._changed()
         elif t == "usage":
-            lender.usage = {"five_hour": m.get("five_hour"), "weekly": m.get("weekly"), "ts": m.get("ts"),
-                            "friend_limits": m.get("friend_limits")}
-            if isinstance(m.get("friend_limits"), dict):
-                lender.limits = m["friend_limits"]
+            # numbers from the other PC are checked here, so that nothing computed from them later can fail
+            limits = normalize_limits(m.get("friend_limits"))
+            lender.usage = {"five_hour": normalize_window(m.get("five_hour")),
+                            "weekly": normalize_window(m.get("weekly")), "ts": m.get("ts"), "friend_limits": limits}
+            if limits is not None:
+                lender.limits = limits
             self._changed()
         elif t == "event":
             if self._own_task(lender, m["task_id"]):
