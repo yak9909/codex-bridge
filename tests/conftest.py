@@ -12,6 +12,9 @@ from codex_bridge.common.audit import AuditLog
 from codex_bridge.host.fs_read import ReadTools
 from codex_bridge.host.paths import SafePaths
 from codex_bridge.host.policy import PolicyStore
+from codex_bridge.host.search import SearchTools
+
+RG_PATH = Path(__file__).resolve().parents[1] / "vendor" / "rg.exe"
 
 POLICY = """
 default: read
@@ -78,6 +81,7 @@ def build_share(tmp_path: Path) -> Share:
     paths = SafePaths(root, policy)
     share = Share(root=root, outside=outside, data_dir=data_dir, policy=policy, audit=audit,
                   paths=paths, read=ReadTools(paths, policy))
+    share.search = SearchTools(paths, policy, RG_PATH)
     return share
 
 
