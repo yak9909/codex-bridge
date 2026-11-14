@@ -26,8 +26,8 @@ rg_path: "vendor/rg.exe"
 
 SAMPLE_POLICY = """\
 # Permission rules. Saved changes apply immediately.
-# level: hidden (invisible) / read / write. Later and more specific rules win;
-# a hidden folder hides everything inside it.
+# level: hidden (invisible) / read / write. Later rules win, except hidden:
+# a hidden rule always wins, whatever its position, and hides everything inside.
 default: read
 rules:
   # - {path: "analysis/**", level: write}
