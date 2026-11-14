@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import yaml
 from fastapi import APIRouter, FastAPI, HTTPException, Request
@@ -15,7 +15,12 @@ from ...common.invite import make_invite
 from ..paths import ToolError
 from ..policy import OUTPUTS_TOP, normalize_rel
 from ..policy_form import form_from_raw, save_form
-from ..share import ShareBusy, change_share_root, pick_folder_dialog
+
+
+def _key(p) -> str:
+    return os.path.normcase(os.path.abspath(str(p)))
+from ..share import (ShareBusy, add_shared_folder, change_share_root, pick_folder_dialog,
+                     remove_shared_folder, set_main_shared_folder)
 
 STATIC = Path(__file__).parent / "static"
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
@@ -43,7 +48,7 @@ def admin_router(host) -> APIRouter:
     async def overview():
         p = host.policy.current()
         return {
-            "share_root": str(host.config.share_root), "public_bind": host.config.public_bind,
+            "share_root": str(host.paths.root), "folders": host.paths.roots(), "public_bind": host.config.public_bind,
             "paused": p.paused, "exec_mode": p.exec_mode, "policy_error": host.policy.last_error,
             "agent": host.mgr.agent_info(), "current_task": host.mgr.current_task_id(),
             "pending_approvals": len(host.approvals.pending()), "usage": host.mgr.usage(),
@@ -81,35 +86,63 @@ def admin_router(host) -> APIRouter:
 
     @r.get("/api/folders")
     async def folders(path: str = ""):
-        """Sub-folders of a share folder, with the rule set on each and the level that applies.
+        """Without a path: the registered shared folders. With an absolute path: its sub-folders.
 
         This is the owner's view: hidden folders are listed too (so they can be changed)."""
-        rel = normalize_rel(path)
-        if any(part == ".." for part in rel.split("/")):
-            raise HTTPException(400, "不正なパスです")
-        base = (host.config.share_root / rel).resolve()
-        root = host.config.share_root.resolve()
-        if not (base == root or root in base.parents) or not base.is_dir():
-            raise HTTPException(400, "フォルダが見つかりません")
-        policy = host.policy.current()
-        rules = {f["path"].lower(): f["level"] for f in form_from_raw(host.policy.as_dict())["folders"]}
-        out = []
+        form = form_from_raw(host.policy.as_dict())
+        rules = {_key(f["path"]): f["level"] for f in form["folders"]}
+        main_key = _key(form["main"]) if form["main"] else None
+
+        def has_children(p: str) -> bool:
+            try:
+                return any(c.is_dir(follow_symlinks=False) for c in os.scandir(p))
+            except OSError:
+                return False
+
+        def row(p: Path, name: str) -> dict:
+            return {"name": name, "path": p.as_posix(), "rule": rules.get(_key(p)),
+                    "effective": host.paths.level_of(p), "has_children": has_children(str(p)),
+                    "main": _key(p) == main_key, "exists": p.is_dir()}
+
+        if not path:
+            top = [f for f in form["folders"]
+                   if not any(_key(f["path"]) != _key(o["path"]) and _key(f["path"]).startswith(_key(o["path"]) + os.sep)
+                              for o in form["folders"])]
+            return {"path": "", "folders": [row(Path(f["path"]), f["path"]) for f in top], "main": form["main"]}
+        if not PureWindowsPath(path).drive or ".." in Path(path).parts:
+            raise HTTPException(400, "フォルダはフルパスで指定してください")
+        base = Path(os.path.abspath(path))
+        if host.paths.level_of(base) is None or not base.is_dir():
+            raise HTTPException(400, "共有フォルダの中ではありません")
         try:
             entries = sorted((e for e in os.scandir(base) if e.is_dir(follow_symlinks=False)),
                              key=lambda e: e.name.lower())[:500]
         except OSError as e:
             raise HTTPException(400, f"フォルダを読めません: {e}")
-        for e in entries:
-            child = f"{rel}/{e.name}" if rel else e.name
-            if child.lower().startswith(OUTPUTS_TOP):
-                continue
-            try:
-                has_children = any(c.is_dir(follow_symlinks=False) for c in os.scandir(e.path))
-            except OSError:
-                has_children = False
-            out.append({"name": e.name, "path": child, "rule": rules.get(child.lower()),
-                        "effective": policy.level_for(child), "has_children": has_children})
-        return {"path": rel, "folders": out, "default": policy.default}
+        out = [row(base / e.name, e.name) for e in entries
+               if not (form["main"] and _key(base) == _key(form["main"]) and e.name.lower() == OUTPUTS_TOP)]
+        return {"path": base.as_posix(), "folders": out, "main": form["main"]}
+
+    @r.post("/api/folders/add")
+    async def folders_add(body: dict):
+        return _folder_op(lambda: add_shared_folder(host, body.get("path"), body.get("level", "read")))
+
+    @r.post("/api/folders/remove")
+    async def folders_remove(body: dict):
+        return _folder_op(lambda: remove_shared_folder(host, body.get("path")))
+
+    @r.post("/api/folders/main")
+    async def folders_main(body: dict):
+        return _folder_op(lambda: set_main_shared_folder(host, body.get("path")))
+
+    def _folder_op(fn):
+        try:
+            fn()
+        except ShareBusy as e:
+            raise HTTPException(409, str(e))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True, "folders": host.paths.roots(), "main": host.paths.root.as_posix()}
 
     @r.put("/api/share-root")
     async def put_share_root(body: dict):

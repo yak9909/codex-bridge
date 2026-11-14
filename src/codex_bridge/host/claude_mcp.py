@@ -84,7 +84,7 @@ APPROVAL_NOTE = ("承認待ちがあります。内容が依頼に沿ってい�
 
 def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshots, *, policy: PolicyStore,
                      tokens: TokenStore, public_bind: str, share_root: Callable[[], Path],
-                     change_share: Callable[[str], Path] | None = None) -> McpEndpoint:
+                     folder_ops: dict | None = None, roots: Callable[[], list] = lambda: []) -> McpEndpoint:
     server = MCPServer(name="codex-bridge", instructions=INSTRUCTIONS)
 
     async def run(fn) -> CallToolResult:
@@ -207,7 +207,7 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
             return {"form": form_from_raw(policy.as_dict()), "text": text, "error": policy.last_error}
         return await run(f)
 
-    @tool("フォルダ 1 つの権限を変えます。path は共有フォルダからの相対パス、level は "
+    @tool("フォルダ 1 つの権限を変えます。path はフルパス、またはメインのフォルダからの相対パス。level は "
           "hidden（見せない）/ read（読むだけ）/ write（書ける）/ inherit（規則を外して上の設定に従う）。"
           "そのフォルダの中身すべてに効きます。利用者に頼まれたときだけ使ってください。")
     async def set_folder_level(path: str, level: str) -> CallToolResult:
@@ -216,11 +216,11 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
                 form = set_folder_level_(policy, path, level)
             except ValueError as e:
                 raise ToolError(str(e)) from e
-            return {"folders": form["folders"], "default": form["default"]}
+            return {"folders": form["folders"], "main": form["main"]}
         return await run(f)
 
     @tool("権限の規則（policy.yaml）を、渡した YAML の全文で置き換えます。書式に誤りがあれば保存しません。"
-          "書式: default（read/write/hidden）、rules（{path, level} の並び。hidden は常に優先）、"
+          "書式: main（メインのフォルダのフルパス）、folders（{path: フルパス, level} の並び。深いほうが優先、hidden は常に優先）、"
           "exec（mode: off/allowlist/ask/all、allow: コマンドの型の並び、confirm_modified_scripts）、"
           "delete_needs_approval、paused。まず get_policy で今の内容を読み、必要な所だけ変えてください。")
     async def set_policy(text: str) -> CallToolResult:
@@ -289,26 +289,45 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
             return {"guide": GUIDE, "share_root": str(share_root())}
         return await run(f)
 
-    @tool("共有フォルダ（Codex に触らせるフォルダ）を変えます。path はフルパス（例: D:/work/project）。"
+    async def _folder_call(name: str, *args):
+        fn = (folder_ops or {}).get(name)
+        if fn is None:
+            raise ToolError("この環境では共有フォルダを変えられません")
+        try:
+            p = fn(*args)
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+        except Exception as e:  # ShareBusy
+            raise ToolError(str(e)) from e
+        return {"path": str(p), "main": str(share_root())}
+
+    @tool("共有フォルダを追加します。path はフルパス（例: D:/tools/lib）、level は read（読むだけ）か write（書ける）。"
+          "利用者に頼まれたときだけ使ってください。")
+    async def add_shared_folder(path: str, level: str = "read") -> CallToolResult:
+        return await run(lambda: _folder_call("add", path, level))
+
+    @tool("共有フォルダを一覧から外します（path はフルパス）。利用者に頼まれたときだけ使ってください。")
+    async def remove_shared_folder(path: str) -> CallToolResult:
+        return await run(lambda: _folder_call("remove", path))
+
+    @tool("メインのフォルダ（相対パスの起点）を変えます。path は登録済みの共有フォルダのフルパス。")
+    async def set_main_folder(path: str) -> CallToolResult:
+        return await run(lambda: _folder_call("main", path))
+
+    @tool("（旧名）このフォルダを書ける共有フォルダにしてメインにします。path はフルパス。"
           "作業中のタスクがあるときは変えられません。利用者に頼まれたときだけ使ってください。")
     async def set_share_root(path: str) -> CallToolResult:
         async def f():
-            if change_share is None:
-                raise ToolError("この環境では共有フォルダを変えられません")
-            try:
-                p = change_share(path)
-            except ValueError as e:
-                raise ToolError(str(e)) from e
-            except Exception as e:  # ShareBusy
-                raise ToolError(str(e)) from e
-            return {"share_root": str(p)}
+            r = await _folder_call("share_root", path)
+            return {"share_root": r["path"]}
         return await run(f)
 
     @tool("全体の状態（知人の agent の接続・共有フォルダ・実行モード・一時停止・承認待ちの数・使用量）を返します。")
     async def get_overview() -> CallToolResult:
         async def f():
             p = policy.current()
-            return {"share_root": str(share_root()), "public_bind": public_bind, "agent": mgr.agent_info(),
+            return {"share_root": str(share_root()), "folders": roots(), "public_bind": public_bind,
+                    "agent": mgr.agent_info(),
                     "paused": p.paused, "exec_mode": p.exec_mode, "policy_error": policy.last_error,
                     "current_task": mgr.current_task_id(), "pending_approvals": len(approvals.pending()),
                     "usage": mgr.usage(), "log_visibility": mgr.settings["log_visibility"]}

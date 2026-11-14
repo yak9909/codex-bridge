@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -6,6 +7,7 @@ from starlette.applications import Starlette
 from starlette.routing import Mount
 
 from codex_bridge.host.claude_mcp import build_claude_mcp
+from codex_bridge.host.policy_form import add_folder, remove_folder, set_main_folder
 from codex_bridge.host.tasks import TaskManager
 from codex_bridge.host.tokens import TokenStore
 from codex_bridge.common.invite import parse_invite
@@ -19,8 +21,13 @@ async def env(share):
     mgr = TaskManager(share.data_dir, touched_fn=share.snapshots.touched)
     share.tokens = TokenStore(share.data_dir)
     ep = build_claude_mcp(mgr, share.approvals, share.snapshots, policy=share.policy, tokens=share.tokens,
-                          public_bind="100.1.2.3:8765", share_root=lambda: share.root,
-                          change_share=lambda p: share.paths.set_root(p) or share.paths.root)
+                          public_bind="100.1.2.3:8765", share_root=lambda: share.paths.root,
+                          folder_ops={"add": lambda p, lv: add_folder(share.policy, p, lv),
+                                      "remove": lambda p: remove_folder(share.policy, p),
+                                      "main": lambda p: set_main_folder(share.policy, p),
+                                      "share_root": lambda p: (add_folder(share.policy, p, "write"),
+                                                               set_main_folder(share.policy, p)) and Path(p).resolve()},
+                          roots=lambda: share.paths.roots())
     app = Starlette(routes=[Mount("/claude", app=ep.asgi)])
     async with running(ep):
         local = httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 5000)),
@@ -47,7 +54,7 @@ async def test_tool_names(env):
         "list_approvals", "decide_approval", "get_policy", "set_policy", "set_folder_level", "set_exec_mode",
         "set_paused",
         "set_log_visibility", "list_tasks", "issue_invite", "revoke_invite", "list_invites", "get_overview",
-        "set_share_root", "get_guide"}
+        "set_share_root", "get_guide", "add_shared_folder", "remove_shared_folder", "set_main_folder"}
 
 
 def text_of(res: dict):
@@ -71,8 +78,9 @@ async def test_claude_can_read_and_change_policy(env, share):
     assert "default" in text_of(await call(local, "get_policy", {}))["text"]
     bad = await call(local, "set_policy", {"text": "rules: ["})
     assert bad["isError"] and share.policy.current().exec_mode == "allowlist"
-    text_of(await call(local, "set_policy", {"text": "default: write\nexec: {mode: ask}\n"}))
-    assert share.policy.current().default == "write" and share.policy.current().exec_mode == "ask"
+    v2_text = f'folders:\n  - {{path: "{share.root.as_posix()}", level: write}}\nexec: {{mode: ask}}\n'
+    text_of(await call(local, "set_policy", {"text": v2_text}))
+    assert share.policy.current().level_for("x.txt") == "write" and share.policy.current().exec_mode == "ask"
 
 
 async def test_claude_can_switch_exec_mode_pause_and_visibility(env, share):
@@ -203,7 +211,7 @@ async def test_claude_set_folder_level_and_form(env, share):
     text_of(await call(local, "set_folder_level", {"path": "docs", "level": "write"}))
     assert share.policy.current().level_for("docs/a.md") == "write"
     form = text_of(await call(local, "get_policy", {}))["form"]
-    assert {"path": "docs", "level": "write"} in form["folders"]
+    assert {"path": (share.root / "docs").as_posix(), "level": "write"} in form["folders"]
     assert (await call(local, "set_folder_level", {"path": "docs", "level": "everything"}))["isError"]
 
 
@@ -229,3 +237,18 @@ async def test_server_instructions_tell_agents_how_to_start(env):
         "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}})
     ins = r.json()["result"]["instructions"]
     assert "codex-bridge" in ins and "get_guide" in ins and "send_task" in ins
+
+
+async def test_claude_adds_removes_and_switches_folders(env, share, tmp_path):
+    _, local, _ = env
+    extra = tmp_path / "extra-folder"
+    extra.mkdir()
+    (extra / "note.txt").write_text("hi", encoding="utf-8")
+    text_of(await call(local, "add_shared_folder", {"path": str(extra), "level": "read"}))
+    assert share.policy.current().level_for_abs(extra / "note.txt") == "read"
+    o = text_of(await call(local, "get_overview", {}))
+    assert extra.as_posix() in {f["path"] for f in o["folders"]}
+    text_of(await call(local, "set_main_folder", {"path": str(extra)}))
+    assert share.paths.root == extra.resolve()
+    text_of(await call(local, "remove_shared_folder", {"path": str(extra)}))
+    assert share.policy.current().level_for_abs(extra / "note.txt") is None

@@ -25,14 +25,16 @@ local_port: 8770
 rg_path: "vendor/rg.exe"
 """
 
-DEFAULT_POLICY_FORM = {
-    "default": "read",
-    "folders": [],
-    "exec": {"mode": "allowlist", "allow": ["python scripts/**/*.py *"], "confirm_modified_scripts": False},
-    "delete_needs_approval": True,
-    "paused": False,
-}
-SAMPLE_POLICY = yaml_from_form(DEFAULT_POLICY_FORM)
+def sample_policy(share_root: Path) -> str:
+    """First policy: the chosen folder, read-only, as the main folder."""
+    share = Path(share_root).as_posix()
+    return yaml_from_form({
+        "main": share,
+        "folders": [{"path": share, "level": "read"}],
+        "exec": {"mode": "allowlist", "allow": ["python scripts/**/*.py *"], "confirm_modified_scripts": False},
+        "delete_needs_approval": True,
+        "paused": False,
+    })
 
 
 def ensure_config(path: Path) -> bool:
@@ -46,7 +48,7 @@ def ensure_config(path: Path) -> bool:
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     policy = cfg.data_dir / "policy.yaml"
     if not policy.exists():
-        policy.write_text(SAMPLE_POLICY, encoding="utf-8")
+        policy.write_text(sample_policy(cfg.share_root), encoding="utf-8")
     return created
 
 

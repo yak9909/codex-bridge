@@ -1,37 +1,62 @@
-"""Change the shared folder while the host runs (admin page and agents)."""
+"""Shared folders: add, remove, choose the main one (admin page and agents)."""
 
 from __future__ import annotations
 
-import dataclasses
 from pathlib import Path
 
-from .setup_tools import inside, set_yaml_value
+from .policy_form import _abs, add_folder, remove_folder, set_main_folder
+from .setup_tools import inside
 
 
 class ShareBusy(Exception):
     pass
 
 
-def change_share_root(host, new_path: str) -> Path:
-    """Validate and switch the share folder; persists it to host.yaml. Raises ValueError / ShareBusy."""
-    raw = str(new_path or "").strip().strip('"')
-    p = Path(raw)
-    if not raw or not p.is_absolute():
-        raise ValueError("フォルダはフルパスで指定してください（例: D:/data/analysis）")
-    p = p.resolve()
-    if not p.is_dir():
-        raise ValueError(f"フォルダが見つかりません: {p}")
+def _guard(host, path: str, *, busy_check: bool = True) -> Path:
+    p = Path(_abs(path))
     if inside(host.config.data_dir, p):
         raise ValueError("codex-bridge のデータフォルダ（記録や合言葉の置き場）を含むフォルダは共有できません")
-    if host.mgr.current_task_id():
+    if busy_check and host.mgr.current_task_id():
         raise ShareBusy("作業中のタスクがあるため、共有フォルダは変えられません。終わってから変えてください")
-    host.paths.set_root(p)
-    host.config = dataclasses.replace(host.config, share_root=p)
-    if host.config_path:
-        set_yaml_value(host.config_path, "share_root", p.as_posix())
-    host.audit.write("share_root_changed", share_root=str(p))
-    host.events.notify()
     return p
+
+
+def _done(host, what: str, p: Path) -> None:
+    host.audit.write("shared_folders_changed", action=what, path=str(p))
+    host.events.notify()
+
+
+def add_shared_folder(host, path: str, level: str = "read") -> Path:
+    p = _guard(host, path)
+    add_folder(host.policy, p.as_posix(), level)
+    _done(host, f"add:{level}", p)
+    return p
+
+
+def remove_shared_folder(host, path: str) -> Path:
+    p = _guard(host, path)
+    remove_folder(host.policy, p.as_posix())
+    _done(host, "remove", p)
+    return p
+
+
+def set_main_shared_folder(host, path: str) -> Path:
+    p = _guard(host, path)
+    set_main_folder(host.policy, p.as_posix())
+    _done(host, "main", p)
+    return p
+
+
+def change_share_root(host, new_path: str) -> Path:
+    """v0.1 name: share this folder (writable) and make it the main folder."""
+    p = _guard(host, new_path)
+    if not p.is_dir():
+        raise ValueError(f"フォルダが見つかりません: {p}")
+    if host.policy.current().level_for_abs(p) != "write":
+        add_folder(host.policy, p.as_posix(), "write")
+    set_main_folder(host.policy, p.as_posix())
+    _done(host, "main", p)
+    return p.resolve()
 
 
 def pick_folder_dialog(initial: Path | None = None) -> str | None:

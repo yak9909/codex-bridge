@@ -112,8 +112,9 @@ async def test_shutdown_endpoint_sets_event(admin, host):
 
 async def test_policy_form_get_and_put(admin, host):
     form = (await admin.get("/admin/api/policy-form")).json()
-    assert form["default"] == "read" and "folders" in form
-    form["folders"] = [{"path": "raw", "level": "write"}]
+    root = host.config.share_root
+    assert form["main"] == root.as_posix() and form["folders"] == [{"path": root.as_posix(), "level": "read"}]
+    form["folders"].append({"path": (root / "raw").as_posix(), "level": "write"})
     form["exec"]["mode"] = "ask"
     assert (await admin.put("/admin/api/policy-form", json=form, headers=H)).status_code == 200
     assert host.policy.current().level_for("raw/x") == "write" and host.policy.current().exec_mode == "ask"
@@ -125,16 +126,20 @@ async def test_folders_listing_shows_levels(admin, host):
     (host.config.share_root / "raw" / "sub").mkdir()
     (host.config.share_root / "private").mkdir()
     (host.config.share_root / "file.txt").write_text("x", encoding="utf-8")
+    root = host.config.share_root
     form = (await admin.get("/admin/api/policy-form")).json()
-    form["folders"] = [{"path": "private", "level": "hidden"}]
-    await admin.put("/admin/api/policy-form", json=form, headers=H)
-    top = {f["name"]: f for f in (await admin.get("/admin/api/folders")).json()["folders"]}
+    form["folders"].append({"path": (root / "private").as_posix(), "level": "hidden"})
+    assert (await admin.put("/admin/api/policy-form", json=form, headers=H)).status_code == 200
+    registered = (await admin.get("/admin/api/folders")).json()
+    assert [f["path"] for f in registered["folders"]] == [root.as_posix()] and registered["folders"][0]["main"]
+    top = {f["name"]: f for f in (await admin.get("/admin/api/folders", params={"path": root.as_posix()})).json()["folders"]}
     assert set(top) == {"raw", "private"}  # folders only; the admin sees hidden ones too
     assert top["private"]["rule"] == "hidden" and top["private"]["effective"] == "hidden"
     assert top["raw"]["rule"] is None and top["raw"]["effective"] == "read" and top["raw"]["has_children"]
-    sub = (await admin.get("/admin/api/folders", params={"path": "raw"})).json()["folders"]
-    assert [f["path"] for f in sub] == ["raw/sub"]
-    assert (await admin.get("/admin/api/folders", params={"path": "../.."})).status_code == 400
+    sub = (await admin.get("/admin/api/folders", params={"path": (root / "raw").as_posix()})).json()["folders"]
+    assert [f["path"] for f in sub] == [(root / "raw" / "sub").as_posix()]
+    assert (await admin.get("/admin/api/folders", params={"path": "raw"})).status_code == 400
+    assert (await admin.get("/admin/api/folders", params={"path": "C:/Windows"})).status_code == 400
 
 
 async def test_change_share_root(admin, host, tmp_path):
@@ -142,10 +147,22 @@ async def test_change_share_root(admin, host, tmp_path):
     (new / "sub").mkdir(parents=True)
     r = await admin.put("/admin/api/share-root", json={"path": str(new)}, headers=H)
     assert r.status_code == 200, r.text
-    assert host.paths.root == new.resolve() and host.config.share_root == new.resolve()
-    assert new.as_posix() in (tmp_path / "host.yaml").read_text(encoding="utf-8")
-    assert [f["name"] for f in (await admin.get("/admin/api/folders")).json()["folders"]] == ["sub"]
+    assert host.paths.root == new.resolve()
+    assert host.policy.current().level_for_abs(new / "sub") == "write"
     assert (await admin.get("/admin/api/overview")).json()["share_root"] == str(new.resolve())
+
+
+async def test_folder_add_remove_main_api(admin, host, tmp_path):
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    r = await admin.post("/admin/api/folders/add", json={"path": str(extra), "level": "read"}, headers=H)
+    assert r.status_code == 200 and extra.as_posix() in {f["path"] for f in r.json()["folders"]}
+    assert (await admin.post("/admin/api/folders/main", json={"path": str(extra)}, headers=H)).status_code == 200
+    assert host.paths.root == extra.resolve()
+    assert (await admin.post("/admin/api/folders/remove", json={"path": str(extra)}, headers=H)).status_code == 200
+    assert host.policy.current().level_for_abs(extra / "x") is None
+    assert (await admin.post("/admin/api/folders/add", json={"path": "rel/x", "level": "read"}, headers=H)).status_code == 400
+    assert (await admin.post("/admin/api/folders/add", json={"path": str(tmp_path), "level": "read"}, headers=H)).status_code == 400
 
 
 async def test_change_share_root_rejects_bad_paths(admin, host, tmp_path):

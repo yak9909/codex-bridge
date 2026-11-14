@@ -19,7 +19,8 @@ from .claude_mcp import build_claude_mcp
 from .codex_mcp import HostServices, build_codex_mcp
 from .config import HostConfig
 from .control import add_control_route
-from .share import change_share_root
+from .share import (add_shared_folder, change_share_root, remove_shared_folder,
+                    set_main_shared_folder)
 from .fs_read import ReadTools
 from .fs_write import WriteTools
 from .mcp_util import LoopbackOnly, McpEndpoint
@@ -65,7 +66,7 @@ class Host:
 def build_host(config: HostConfig, config_path: Path | None = None) -> Host:
     data = config.data_dir
     data.mkdir(parents=True, exist_ok=True)
-    policy = PolicyStore(data / "policy.yaml")
+    policy = PolicyStore(data / "policy.yaml", share_root=config.share_root)  # converts a v0.1 file
     audit = AuditLog(data / "audit.jsonl")
     paths = SafePaths(config.share_root, policy)
     snapshots = Snapshots(data)
@@ -87,8 +88,13 @@ def build_host(config: HostConfig, config_path: Path | None = None) -> Host:
                 mgr=mgr, tokens=tokens, services=services, codex_ep=build_codex_mcp(services, tokens.hashes),
                 claude_ep=build_claude_mcp(mgr, approvals, snapshots, policy=policy, tokens=tokens,
                                            public_bind=config.public_bind,
-                                           share_root=lambda: ref["host"].config.share_root,
-                                           change_share=lambda p: change_share_root(ref["host"], p)),
+                                           share_root=lambda: ref["host"].paths.root,
+                                           folder_ops={
+                                               "add": lambda p, lv: add_shared_folder(ref["host"], p, lv),
+                                               "remove": lambda p: remove_shared_folder(ref["host"], p),
+                                               "main": lambda p: set_main_shared_folder(ref["host"], p),
+                                               "share_root": lambda p: change_share_root(ref["host"], p)},
+                                           roots=lambda: ref["host"].paths.roots()),
                 events=events, config_path=Path(config_path) if config_path else None)
     ref["host"] = host
     return host
