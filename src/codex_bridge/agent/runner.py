@@ -14,7 +14,9 @@ from .sessions import SessionRegistry
 from .usage import BlockNew, Interrupt, QuotaGuard, Steer, Suspend, Unblock
 
 PREAMBLE = ("ファイルの一覧・検索・読み書き・コマンド実行は、MCP サーバー bridge の道具だけを使ってください。"
-            "パスは共有フォルダからの相対パスです。作業フォルダ（cwd）は空で、使いません。")
+            "パスは共有フォルダからの相対パスです。作業フォルダ（cwd）は空で、使いません。"
+            "run_command や delete_path が承認待ち（waiting_approval）を返したら、作業を終えずに "
+            "get_command_result（削除は同じ呼び出しのやり直し）で結果を待ってください。承認には数分かかることがあります。")
 NOT_OWNED = "このツールで作ったセッションではありません"
 SendFn = Callable[[dict], Awaitable[None]]
 
@@ -103,6 +105,8 @@ class AgentRunner:
             self.guard.set_thresholds(m.get("thresholds") or {})
             self.log_visibility = m.get("log_visibility", self.log_visibility)
             self.on_log({"type": "settings", "log_visibility": self.log_visibility})
+            # Re-check usage now so a lowered threshold takes effect without waiting for the next poll.
+            asyncio.create_task(self.refresh_usage())
         elif t == "task_start":
             await self._task_start(m)
         elif t == "task_followup":

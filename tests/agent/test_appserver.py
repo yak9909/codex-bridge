@@ -23,6 +23,8 @@ async def test_launch_args_env_and_thread_params(fake):
     assert 'mcp_servers.bridge.url="http://100.64.0.1:8765/codex/mcp"' in argv
     assert 'mcp_servers.bridge.bearer_token_env_var="CODEX_BRIDGE_TOKEN"' in argv
     assert "mcp_servers.bridge.tool_timeout_sec=120" in argv
+    # Codex must not ask its own user before calling bridge tools: the host does the approving.
+    assert 'mcp_servers.bridge.default_tools_approval_mode="approve"' in argv
     assert "SECRET-TOKEN-XYZ" not in " ".join(argv)
     assert fake.env["CODEX_BRIDGE_TOKEN"] == "SECRET-TOKEN-XYZ"
     p = fake.received("thread/start")

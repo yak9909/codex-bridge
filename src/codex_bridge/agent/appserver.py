@@ -27,6 +27,8 @@ def launch_args(host_url: str) -> list[str]:
         "-c", f'mcp_servers.{MCP_NAME}.url="{host_url.rstrip("/")}/codex/mcp"',
         "-c", f'mcp_servers.{MCP_NAME}.bearer_token_env_var="{TOKEN_ENV}"',
         "-c", f"mcp_servers.{MCP_NAME}.tool_timeout_sec=120",
+        # The host approves risky actions itself; Codex must not wait for its own user.
+        "-c", f'mcp_servers.{MCP_NAME}.default_tools_approval_mode="approve"',
     ]
 
 

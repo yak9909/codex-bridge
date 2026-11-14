@@ -158,6 +158,20 @@ async def test_unacked_messages_are_resent(env):
     assert [m["seq"] for m in env.sent] == [m["seq"] for m in first[1:]]
 
 
+@pytest.mark.parametrize("env", [QUOTA_SCRIPT], indirect=True)
+async def test_lowering_threshold_takes_effect_immediately(env):
+    env.guard.set_thresholds({"five_hour": 99})
+    await env.runner.handle({"type": "task_start", "task_id": "t1", "prompt": "do", "continue_thread_id": None})
+    await env.wait_state("running")
+    await asyncio.sleep(0.2)
+    assert env.fake.received("turn/steer") is None
+    await env.runner.handle({"type": "settings", "thresholds": {"five_hour": 50, "weekly": 95},
+                             "log_visibility": "summary"})
+    steer = await env.fake.wait_for(lambda: env.fake.received("turn/steer"))
+    assert steer["input"][0]["text"] == STOP_TEXT
+    await env.wait_state("suspended_quota")
+
+
 def test_session_registry_persists(tmp_path):
     r = SessionRegistry(tmp_path / "s.json")
     r.add("th1", "t1")
