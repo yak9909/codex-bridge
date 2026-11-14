@@ -8,4 +8,6 @@ if errorlevel 1 (
   set "PATH=%USERPROFILE%\.local\bin;%PATH%"
 )
 uv run codex-bridge-host stop --config host.yaml
-pause
+echo.
+echo 何かキーを押すと、このウィンドウを閉じます。
+pause >nul
