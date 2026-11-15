@@ -62,6 +62,7 @@ async def test_task_runs_to_completion(env):
     assert done["report"] == "できました" and done["thread_id"] == "th1"
     assert env.sessions.owns("th1")
     assert env.fake.received("thread/start")["developerInstructions"].startswith("ファイルの一覧")
+    assert "ほかの共有フォルダ内は絶対パス" in env.fake.received("thread/start")["developerInstructions"]
     seqs = [m["seq"] for m in env.sent if "seq" in m]
     assert len(seqs) == len(set(seqs)) and min(seqs) > 1_000_000
 
@@ -85,6 +86,7 @@ async def test_continue_thread_resumes_owned_thread(env):
     await env.runner.handle({"type": "task_start", "task_id": "t2", "prompt": "more", "continue_thread_id": "th1"})
     await env.wait_state("completed")
     assert env.fake.received("thread/resume")["threadId"] == "th1"
+    assert "ほかの共有フォルダ内は絶対パス" in env.fake.received("thread/resume")["developerInstructions"]
 
 
 async def test_continue_foreign_thread_fails(env):

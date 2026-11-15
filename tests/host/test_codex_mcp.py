@@ -72,6 +72,60 @@ async def test_tool_list_matches_spec(mcp):
     assert all("相対" in t["description"] or t["name"] == "get_command_result" for t in tools)
 
 
+async def test_instructions_explain_shared_folder_paths_and_discovery(mcp):
+    instructions = (await mcp.post("/codex/mcp", json=INIT, headers=auth(TOKEN))).json()["result"]["instructions"]
+    for term in ("複数", "メイン", "相対パス", "ほかの共有フォルダ", "絶対パス",
+                 'list_dir("/")', "省略", "find_files", "grep", "すべて", "結果"):
+        assert term in instructions
+
+
+@pytest.mark.parametrize("name", ["list_dir", "find_files", "grep", "stat", "read_file", "write_file",
+                                 "edit_file", "apply_patch", "move_path", "delete_path", "run_command"])
+async def test_path_tool_descriptions_explain_absolute_paths_in_other_folders(mcp, name):
+    tools = (await rpc(mcp, "tools/list"))["result"]["tools"]
+    description = next(t["description"] for t in tools if t["name"] == name)
+    for term in ("メイン", "相対パス", "ほかの共有フォルダ", "絶対パス"):
+        assert term in description
+
+
+@pytest.fixture
+def shared_folders(share):
+    share.add_folder(share.outside, "write")
+    (share.outside / "extra.txt").write_text("needle in extra\n", encoding="utf-8", newline="\n")
+    return share
+
+
+@pytest.mark.parametrize("args", [{}, {"path": ""}, {"path": "/"}])
+async def test_list_dir_entry_point_lists_shared_folders(mcp, shared_folders, args):
+    res = await call(mcp, "list_dir", args)
+    assert not res.get("isError"), res
+    entries = json.loads(res["content"][0]["text"])
+    folders = {e["path"]: e for e in entries}
+    assert shared_folders.root.as_posix() in folders
+    assert shared_folders.outside.as_posix() in folders
+    assert folders[shared_folders.root.as_posix()]["main"] is True
+    assert folders[shared_folders.outside.as_posix()]["main"] is False
+
+
+async def test_list_dir_explicit_dot_lists_main_contents(mcp, shared_folders):
+    res = await call(mcp, "list_dir", {"path": "."})
+    assert not res.get("isError"), res
+    entries = json.loads(res["content"][0]["text"])
+    assert {e["name"] for e in entries} == {"raw", "docs", "out", "scripts"}
+
+
+@pytest.mark.parametrize("name, pattern", [("find_files", "**/*.txt"), ("grep", "needle")])
+@pytest.mark.parametrize("scope", [{}, {"path": ""}, {"path": "."}])
+async def test_search_scope_covers_all_folders_unless_explicit_dot(mcp, shared_folders, name, pattern, scope):
+    res = await call(mcp, name, {"pattern": pattern, **scope})
+    assert not res.get("isError"), res
+    result = json.loads(res["content"][0]["text"])
+    paths = {m["path"] for m in result["matches"]} if name == "grep" else set(result)
+    assert "raw/a.txt" in paths
+    assert ((shared_folders.outside / "extra.txt").as_posix() in paths) == (scope.get("path") != ".")
+    assert not any("secret" in p for p in paths)
+
+
 async def test_tool_success_returns_json_text(mcp):
     res = await call(mcp, "read_file", {"path": "raw/a.txt"})
     assert not res.get("isError") and json.loads(res["content"][0]["text"])["text"].startswith("line1")

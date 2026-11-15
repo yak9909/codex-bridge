@@ -20,7 +20,11 @@ from .usage import BlockNew, Interrupt, QuotaGuard, Steer, Suspend, Unblock
 from .worklog import WorkLog
 
 PREAMBLE = ("ファイルの一覧・検索・読み書き・コマンド実行は、MCP サーバー bridge の道具だけを使ってください。"
-            "パスは共有フォルダからの相対パスです。作業フォルダ（cwd）は空で、使いません。"
+            "共有フォルダは複数登録できます。"
+            'list_dir("/")（path 省略・空文字も同じ）で登録フォルダ一覧を確認してください。'
+            "メイン内は相対パス、ほかの共有フォルダ内は絶対パス（区切りは /）です。"
+            '明示的な "." はメインを指し、find_files と grep は path 省略で見えるすべてのフォルダを検索します。'
+            "結果のパスも同じ規則です。作業フォルダ（cwd）は空で、使いません。"
             "run_command や delete_path が承認待ち（waiting_approval）を返したら、作業を終えずに "
             "get_command_result（削除は同じ呼び出しのやり直し）で結果を待ってください。承認には数分かかることがあります。")
 NOT_OWNED = "このツールで作ったセッションではありません"
