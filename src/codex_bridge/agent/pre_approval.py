@@ -87,7 +87,9 @@ class PreApproval:
             return p
         return None
 
-    async def decide(self, approve: bool, reason: str = "") -> bool:
+    async def decide(self, approve: bool, reason: str = "", task_id: str | None = None) -> bool:
+        if task_id is not None and (self.pending is None or self.pending.task_id != task_id):
+            return False
         p, self.pending = self.pending, None  # first: nothing below may be decided twice
         if p is None:
             return False

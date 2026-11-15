@@ -53,6 +53,18 @@ async def test_rate_limits(fake):
     assert s.five_hour == Window(12, 1800000000) and s.weekly == Window(30, 1800500000)
 
 
+async def test_stop_closes_rpc_input_when_windows_tree_kill_is_unavailable(fake, monkeypatch):
+    from types import SimpleNamespace
+    from codex_bridge.agent import appserver
+
+    await fake.app.start()
+    monkeypatch.setattr(appserver.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=1))
+    await fake.app.stop()
+    # The real subprocess must have exited before a caller starts copying the data, even if Windows
+    # refuses taskkill. Closing the RPC input lets the server and a venv Python launcher end together.
+    assert fake.app.proc.returncode is not None and not fake.app.running
+
+
 @pytest.mark.parametrize("fake", [{"errors": {"thread/read": {"code": -32600, "message": "no such thread"}}}],
                          indirect=True)
 async def test_error_response_raises(fake):

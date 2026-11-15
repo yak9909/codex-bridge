@@ -1,0 +1,37 @@
+/* Page-specific layout; the visual parts are shared with the host. */
+.brand .sub { font-size: 13px; }
+.grid2 { grid-template-columns: 1.1fr 1fr; }
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 28px; }
+fieldset { min-width: 0; padding: 12px 14px; margin: 0; border: 1px solid var(--line); border-radius: 8px; }
+legend { font-weight: 600; padding: 0 5px; }
+fieldset p { margin: 4px 0 10px; }
+input.path { width: 100%; }
+code { overflow-wrap: anywhere; }
+.table-wrap { overflow: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th { text-align: left; color: var(--muted); font-size: 12px; font-weight: 400; }
+td, th { border-bottom: 1px solid var(--line); padding: 8px 10px; vertical-align: top; }
+td:first-child, th:first-child { padding-left: 0; }
+td { overflow-wrap: anywhere; }
+td:last-child { text-align: right; white-space: nowrap; }
+.session-id { display: inline-block; text-align: left; overflow-wrap: anywhere; }
+tr.selected { background: var(--accent-bg); }
+#session-filter { margin-bottom: 8px; overflow-wrap: anywhere; }
+#settings-form > .row { margin-top: 16px; }
+#data-form { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 4px; }
+details { margin-top: 12px; border-radius: 6px; padding: 8px 10px; background: var(--soft); }
+summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+.approval-reason { display: flex; gap: 12px; align-items: center; padding: 10px 18px; background: var(--amber-bg); border: 1px solid var(--amber-line); border-radius: 0 0 10px 10px; font-size: 13px; }
+.approval-reason input { flex: 1; min-width: 0; }
+#pending-region .card { border-radius: 10px 10px 0 0; }
+#message { padding: 10px 16px; border-radius: 8px; background: var(--accent-bg); overflow-wrap: anywhere; }
+#message.error { background: var(--bad-bg); color: var(--bad); }
+.best-effort { color: var(--warn); }
+@media (max-width: 900px) {
+  .grid2, .settings-grid { grid-template-columns: 1fr; }
+  .brand .sub { display: block; margin-left: 0; }
+  .topbar { gap: 10px; padding: 10px 14px; }
+  main { padding: 16px 12px 40px; }
+  .meter { grid-template-columns: 64px minmax(50px, 1fr); }
+  .meter .m-val { grid-column: 2; text-align: left; }
+}

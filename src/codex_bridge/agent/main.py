@@ -19,12 +19,13 @@ from .. import __version__
 from ..common.invite import Invite, parse_invite
 from .appserver import AppServer, codex_command
 from .control_client import ControlClient
-from .logview import LogStore, create_logview_app
+from .logview import LogStore
 from .runner import AgentRunner
 from .sessions import SessionRegistry
 from .settings import SettingsApplier, SettingsStore, hello_fields, resolve_workdir
 from .setup import (MIN_CODEX_VERSION, choose_codex, data_root, download_codex, load_invite, make_guard, run_login,
                     save_invite, user_mcp_names)
+from .ui import create_ui_app
 from .worklog import WorkLog
 
 LOGVIEW_PORT = 8766
@@ -90,7 +91,7 @@ class Tray:
         self.paused = False
         self.icon = pystray.Icon("codex-bridge", img, TITLE, menu=pystray.Menu(
             pystray.MenuItem(lambda item: f"状態: {self.status}", None, enabled=False),
-            pystray.MenuItem("ログ画面を開く", lambda: webbrowser.open(f"http://127.0.0.1:{LOGVIEW_PORT}/"),
+            pystray.MenuItem("画面を開く", lambda: webbrowser.open(f"http://127.0.0.1:{LOGVIEW_PORT}/"),
                              default=True),
             pystray.MenuItem(lambda item: "再開する" if self.paused else "一時停止する", lambda: on_pause_toggle()),
             pystray.MenuItem("終了", lambda: on_quit()),
@@ -100,6 +101,12 @@ class Tray:
         self.status = s
         self.icon.title = f"{TITLE}: {s}"
         self.icon.update_menu()
+
+    def notify_pending(self, prompt: str) -> None:
+        try:
+            self.icon.notify(prompt[:200], "codex-bridge: 事前承認待ち")
+        except Exception:
+            pass
 
     def run_detached(self) -> None:
         threading.Thread(target=self.icon.run, daemon=True).start()
@@ -136,19 +143,37 @@ async def run_agent(invite: Invite, codex: Path, home: Path) -> bool:
             return False
 
     store = LogStore(home / "logs")
+    notified = None
+
+    def on_log(message: dict) -> None:
+        nonlocal notified
+        if message.get("type") in {"settings", "error"}:
+            store.add(message)  # task records belong only to WorkLog, without a second unfiltered copy
+        if message.get("type") == "task_state" and message.get("state") == "awaiting_lender":
+            pending = runner.pending_approval
+            key = (pending["task_id"], pending["kind"], pending["created"]) if pending else None
+            if key is not None and key != notified:
+                notified = key
+                tray.notify_pending(pending["prompt"])
+
     runner = AgentRunner(app, make_guard(mode), SessionRegistry(home / "sessions.json"), send=None,
-                         on_log=store.add,
+                         on_log=on_log,
                          worklog=WorkLog(home / "logs" / "tasks", retention_days=current["log_retention_days"]))
     runner.apply_settings(current)
+    runner.log_visibility = store.visibility
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
     relaunch = False
 
+    async def set_paused(paused: bool) -> None:
+        client.paused = paused
+        tray.paused = paused
+        tray.icon.update_menu()
+        if paused:
+            await client.drop()
+
     def toggle_pause() -> None:
-        client.paused = not client.paused
-        tray.paused = client.paused
-        if client.paused:
-            asyncio.run_coroutine_threadsafe(client.drop(), loop)
+        asyncio.run_coroutine_threadsafe(set_paused(not client.paused), loop)
 
     tray = Tray(on_quit=lambda: loop.call_soon_threadsafe(stop.set), on_pause_toggle=toggle_pause)
     versions = {"agent_version": __version__, "codex_version": codex_version(cmd), "auth_mode": mode}
@@ -160,15 +185,19 @@ async def run_agent(invite: Invite, codex: Path, home: Path) -> bool:
     async def move_data(new: Path) -> list[Path]:
         nonlocal relaunch
         left = await applier.move_data(new)
+        await set_paused(True)  # no new host request may arrive while the exe is relaunching
         relaunch = True  # the stores in this process still point at the old place: start again on the new one
         loop.call_later(1.0, stop.set)
         return left
 
-    logview = make_logview_server(store, settings, applier.apply, move_data)
+    logview = make_ui_server(runner, settings, client, versions=versions, data_root=home,
+                             on_settings=applier.apply, on_move=move_data, on_pause=set_paused)
 
     async def watchdog() -> None:
         while True:
             await asyncio.sleep(5)
+            if applier.moving:
+                continue
             try:
                 await applier.settle()  # a change that had to wait for the running task
             except Exception as e:
@@ -205,10 +234,9 @@ def ensure_std_streams() -> None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 
-def make_logview_server(store: LogStore, settings: SettingsStore | None = None, on_settings=None,
-                        on_move=None) -> uvicorn.Server:
-    # log_config=None: uvicorn's own logging setup inspects sys.stdout, which a windowed exe lacks.
-    return uvicorn.Server(uvicorn.Config(create_logview_app(store, settings, on_settings, on_move), host="127.0.0.1",
+def make_ui_server(runner, settings, client, **kwargs) -> uvicorn.Server:
+    # log_config=None: a windowed exe has no sys.stdout for uvicorn's logging setup.
+    return uvicorn.Server(uvicorn.Config(create_ui_app(runner, settings, client, **kwargs), host="127.0.0.1",
                                          port=LOGVIEW_PORT, log_level="warning", log_config=None))
 
 

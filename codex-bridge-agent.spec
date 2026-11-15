@@ -4,7 +4,8 @@
 a = Analysis(
     ["scripts/agent_entry.py"],
     pathex=["src"],
-    datas=[("src/codex_bridge/common/web", "codex_bridge/common/web")],  # UI parts shared with the host's page
+    datas=[("src/codex_bridge/common/web", "codex_bridge/common/web"),
+           ("src/codex_bridge/agent/static", "codex_bridge/agent/static")],  # UI parts shared with the host's page
     hiddenimports=["pystray._win32", "uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
                    "uvicorn.lifespan.on"],
     excludes=["mcp", "pytest"],

@@ -125,6 +125,10 @@ class AppServer:
 
     async def _stop(self) -> None:
         if self.proc and self.proc.returncode is None:
+            # EOF also shuts down the RPC server if Windows refuses taskkill (or the executable is a
+            # launcher whose child owns the pipes). Do not copy its data while that child still runs.
+            if self.proc.stdin:
+                self.proc.stdin.close()
             # Kill the whole tree: codex may be a .cmd wrapper around node.
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.proc.pid)], capture_output=True,
                            creationflags=CREATE_NO_WINDOW)
@@ -132,6 +136,7 @@ class AppServer:
                 await asyncio.wait_for(self.proc.wait(), 10)
             except asyncio.TimeoutError:
                 self.proc.kill()
+                await self.proc.wait()
         if self._reader:
             self._reader.cancel()
             await asyncio.gather(self._reader, return_exceptions=True)  # its "exited" report is settled now

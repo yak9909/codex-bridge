@@ -109,6 +109,7 @@ class AgentRunner:
         self.cur: Current | None = None
         self.settings = defaults()  # the lender's settings (settings.py); apply_settings() brings in a changed one
         self.approval = PreApproval(self)  # a request waiting for the lender's yes (design 4.5)
+        self.last_usage = None  # latest snapshot for the local screen
         self.log_visibility = "summary"
         self.friend_limits = {"five_hour": None, "weekly": None, "force": False}
         self._seq = itertools.count(int(time.time() * 1000))
@@ -129,9 +130,9 @@ class AgentRunner:
         p = self.approval.pending
         return p.view() if p is not None else None
 
-    async def decide_pending(self, approve: bool, reason: str = "") -> bool:
+    async def decide_pending(self, approve: bool, reason: str = "", task_id: str | None = None) -> bool:
         """The lender's answer. False when nothing waits (decided already, timed out, or the task is over)."""
-        return await self.approval.decide(approve, reason)
+        return await self.approval.decide(approve, reason, task_id=task_id)
 
     async def expire_pending(self) -> None:
         await self.approval.expire()
@@ -511,6 +512,7 @@ class AgentRunner:
             snap = await self.app.rate_limits()
         except Exception:  # app-server restarting, pipe closed, timeout
             return
+        self.last_usage = snap
         await self._safe_send(protocol.msg("usage", **snap.to_message(), friend_limits=self.friend_limits))
         await self._apply(self.guard.on_usage(snap))
 

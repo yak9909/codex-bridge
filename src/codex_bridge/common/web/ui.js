@@ -76,7 +76,7 @@ const UI = (() => {
     const kind = (m) => (m.kind === "lender" ? "lender" : "host");
     const pct = w ? Math.min(100, Math.max(0, w.used_percent)) : 0;
     const hot = !!w && lines.length > 0 && pct >= Math.min(...lines.map((m) => m.value));
-    const back = w ? fmtIso(w.resets_at_local) : "";
+    const back = w ? esc(fmtIso(w.resets_at_local)) : "";
     el.classList.add("meter");
     el.classList.toggle("hot", hot);
     setHtml(el, `
@@ -155,6 +155,9 @@ const UI = (() => {
   function line(e) {
     const d = e.data && typeof e.data === "object" ? e.data : {};
     switch (e.kind) {
+      case "task_prompt": return { kind: "say", text: `依頼・追加の指示: ${text(d.text, 8000)}` };
+      case "final_report": return { kind: "say", text: text(d.text, 8000) };
+      case "state": return { kind: "state", text: own(STATE_JA, d.state) || text(d.state) };
       case "agent_message": return { kind: "say", text: text(d.text, 8000) };
       case "plan": {
         const steps = planSteps(d);

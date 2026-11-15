@@ -1,9 +1,15 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
-from codex_bridge.agent.logview import LogStore, create_logview_app
+from codex_bridge.agent.logview import LogStore
+from codex_bridge.agent.runner import AgentRunner
+from codex_bridge.agent.sessions import SessionRegistry
+from codex_bridge.agent.ui import create_ui_app
+from codex_bridge.agent.usage import QuotaGuard
+from codex_bridge.agent.worklog import WorkLog
 
 
 @pytest.fixture
@@ -20,20 +26,19 @@ def store(tmp_path):
 
 @pytest.fixture
 async def client(store):
-    t = httpx.ASGITransport(app=create_logview_app(store), client=("127.0.0.1", 1))
-    async with httpx.AsyncClient(transport=t, base_url="http://127.0.0.1:8766") as c:
+    _, c = settings_app(store.dir.parent)
+    async with c:
         yield c
 
 
 async def test_logview_respects_visibility(client, store):
     store.set_visibility("summary")
-    page = (await client.get("/api/events")).json()
-    assert [e["kind"] for e in page["events"]] == ["task_prompt", "final_report"]
+    assert [e["kind"] for e in store.visible()] == ["task_prompt", "final_report"]
     store.set_visibility("files")
-    kinds = [e["kind"] for e in (await client.get("/api/events")).json()["events"]]
+    kinds = [e["kind"] for e in store.visible()]
     assert kinds == ["task_prompt", "tool_call", "final_report"]
     store.set_visibility("all")
-    kinds = [e["kind"] for e in (await client.get("/api/events")).json()["events"]]
+    kinds = [e["kind"] for e in store.visible()]
     assert "agent_message" in kinds and "state" in kinds
 
 
@@ -54,9 +59,12 @@ def test_store_persists_to_disk(tmp_path, store):
 def settings_app(tmp_path, **kw):
     from codex_bridge.agent.settings import SettingsStore
     store = SettingsStore(tmp_path / "settings.json")
-    app = create_logview_app(LogStore(tmp_path / "logs"), settings=store, **kw)
+    runner = AgentRunner(SimpleNamespace(workdir=tmp_path / "workdir"), QuotaGuard({}),
+                         SessionRegistry(tmp_path / "sessions.json"), send=None,
+                         worklog=WorkLog(tmp_path / "logs" / "tasks"))
+    app = create_ui_app(runner, store, SimpleNamespace(), versions={}, data_root=tmp_path, **kw)
     t = httpx.ASGITransport(app=app, client=("127.0.0.1", 1))
-    return store, httpx.AsyncClient(transport=t, base_url="http://127.0.0.1:8766")
+    return store, httpx.AsyncClient(transport=t, base_url="http://127.0.0.1:8766", headers={"X-Codex-Bridge": "1"})
 
 
 async def test_limits_api_defaults_save_and_notify(tmp_path):
@@ -66,16 +74,16 @@ async def test_limits_api_defaults_save_and_notify(tmp_path):
         seen.append(s)
     store, client = settings_app(tmp_path, on_settings=changed)
     async with client as c:
-        assert (await c.get("/api/limits")).json() == {"five_hour": 80, "weekly": 80, "force": False}  # design 4.3
-        r = await c.put("/api/limits", json={"five_hour": 70, "weekly": None, "force": True})
-        assert r.status_code == 200 and r.json() == {"five_hour": 70, "weekly": None, "force": True}
+        assert (await c.get("/api/settings")).json()["settings"]["limits"] == {"five_hour": 80, "weekly": 80, "force": False}
+        r = await c.put("/api/settings", json={"limits": {"five_hour": 70, "weekly": None, "force": True}})
+        assert r.status_code == 200 and r.json()["limits"] == {"five_hour": 70, "weekly": None, "force": True}
         assert seen[-1]["limits"] == {"five_hour": 70, "weekly": None, "force": True}
-        # the page of v0.1 sends what the input boxes hold: text, and "" for an empty box
-        r = await c.put("/api/limits", json={"five_hour": "65", "weekly": "", "force": False})
+        # The new page sends numbers/null; v0.1's persisted limits are migrated by SettingsStore.
+        r = await c.put("/api/settings", json={"limits": {"five_hour": 65, "weekly": None, "force": False}})
         assert r.status_code == 200 and seen[-1]["limits"] == {"five_hour": 65, "weekly": None, "force": False}
-        assert (await c.put("/api/limits", json={"five_hour": 150})).status_code == 400
-        assert (await c.put("/api/limits", json={"five_hour": "abc"})).status_code == 400
-        assert (await c.put("/api/limits", json={"five_hour": 70}, headers={"Host": "evil:1"})).status_code == 403
+        assert (await c.put("/api/settings", json={"limits": {"five_hour": 150}})).status_code == 400
+        assert (await c.put("/api/settings", json={"limits": {"five_hour": "abc"}})).status_code == 400
+        assert (await c.put("/api/settings", json={"limits": {"five_hour": 70}}, headers={"Host": "evil:1"})).status_code == 403
     assert store.get()["limits"] == {"five_hour": 65, "weekly": None, "force": False}
 
 
@@ -111,16 +119,19 @@ async def test_data_location_api_moves_through_the_callback_and_reports_why_not(
         return []
     _, client = settings_app(tmp_path, on_move=move)
     async with client as c:
-        r = await c.put("/api/data-location", json={"path": "D:/new place"})
+        r = await c.post("/api/settings/data-root", json={"path": "D:/new place"})
         assert r.status_code == 200 and r.json()["moved"] is True and moved[0] == Path("D:/new place")
-        r = await c.put("/api/data-location", json={"path": "D:/bad"})
+        # A successful move ends writes on this process until it restarts; use a fresh app for failure cases.
+    _, client = settings_app(tmp_path / "retry", on_move=move)
+    async with client as c:
+        r = await c.post("/api/settings/data-root", json={"path": "D:/bad"})
         assert r.status_code == 400 and "空のフォルダ" in r.json()["detail"]
-        assert (await c.put("/api/data-location", json={"path": ""})).status_code == 400
-        assert (await c.put("/api/data-location", json={})).status_code == 400
-        assert (await c.put("/api/data-location", json={"path": "D:/x"}, headers={"Host": "evil:1"})).status_code == 403
+        assert (await c.post("/api/settings/data-root", json={"path": ""})).status_code == 400
+        assert (await c.post("/api/settings/data-root", json={})).status_code == 422
+        assert (await c.post("/api/settings/data-root", json={"path": "D:/x"}, headers={"Host": "evil:1"})).status_code == 403
     _, plain = settings_app(tmp_path / "other")
     async with plain as c:
-        assert (await c.put("/api/data-location", json={"path": "D:/x"})).status_code == 404
+        assert (await c.post("/api/settings/data-root", json={"path": "D:/x"})).status_code == 503
 
 
 def test_v02_tool_events_keep_showing_as_tool_calls_and_the_rest_adds_no_rows(tmp_path):
