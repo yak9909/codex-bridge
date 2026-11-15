@@ -17,7 +17,8 @@
 - R3 貸している人の画面: 使用量のバーと使用量の上限が分けられていて使いにくい。管理画面と同じにする（バーのすぐそばで上限を見て変えられる）。
 - R4 貸している人の画面: 承認の待ち時間を「無し」（期限なし）にできる。
 - R5 貸している人の画面: 招待コードを画面から入れ直せる（失効したときに exe の再設定が要らない）。
-- R6 exe は 1 つにまとめる（利用者の決定）。
+- R6 exe は 1 つにまとめる（利用者の決定）。貸す側と使う側は、起動時のダイアログで選べる（利用者の指示）。
+- R11 貸す側は、1 台の PC で複数同時に起動できる（利用者の指示）。それぞれが自分の招待コード・設定・作業ログ・画面を持つ。
 - R7 フォルダの走査を必ず速くする。目標: 5000 ファイルで 0.3 秒以内、10 万ファイルで 3 秒以内（この PC で計測。v0.2 の修正前は 5000 ファイル 3.36 秒、修正後 9.76 秒）。
 - R8 「一時停止などができなくなる状態」は、画面にはっきり出す（そして直せるようにする）。
 - R9 画面は撮影して見ながら作る。各画面の作業は、撮影画像の目視確認が終わるまで完了にしない。
@@ -36,7 +37,7 @@
 1. 大きなフォルダ（数万ファイル、深い入れ子、ジャンクションやシンボリックリンクを含む）でも走査が速く、リンクの先がデータフォルダや共有外を指していれば今までどおり見えない → Task 1 のテスト（リンク経由の拒否）と計測。
 2. 招待コードを入れ直したとき、作業中のタスクや承認待ちがあれば断る（途中で接続先が変わって記録が迷子にならない）→ Task 4 のテスト。
 3. 承認の待ち時間「無し」のまま exe を終了・再接続しても、承認待ちが消えずに送り直される → Task 4 のテスト（v0.2 の Review Focus 4 と同じ動き）。
-4. 1 つにまとめた exe を、ダブルクリック（貸す側）と .bat（使う側）の両方で起動したとき、使う側のコマンドの文字がコンソールに出る → Task 5 の手動確認（撮影と出力の記録）。
+4. 1 つにまとめた exe を、ダブルクリック（ダイアログ）と .bat（使う側）の両方で起動したとき、使う側のコマンドの文字がコンソールに出る。貸す側を 2 つ同時に動かしても、設定・招待・作業ログ・画面のポートが混ざらない → Task 5 のテスト（`test_profiles`）と Task 6 の確認。
 5. 規則が詰まった状態（データフォルダを含むフォルダが規則に残っている）でも、一時停止・コマンド実行の切り替え・そのフォルダを外す操作はできる → Task 2 のテスト。
 
 ---
@@ -148,30 +149,43 @@
 - [ ] **Step 7: 撮影と目視（R9。これが終わるまで完了にしない）** — Task 3 の Step 5 と同じ決まり。状態: 通常（バーと上限の入力が並ぶ）、上限超え、待ち時間なしにチェック、招待が無効の帯、招待の入れ直し欄を開いたところ。管理画面の「Codex を貸している人」の欄の撮影と並べて、バーと上限の並びが同じ考え方になっていることを確かめて報告に書く。撮影画像は `.superpowers/sdd/2026-11-16-feedback/shots/task-4/`。
 - [ ] **Step 8: Commit** — `feat(agent): usage and limits together; no-timeout approval; re-enter invite on screen`
 
-### Task 5: exe を 1 つにまとめる（R6）
+### Task 5: exe を 1 つにまとめ、起動時のダイアログで役割を選ぶ。貸す側は複数起動できる（R6, R11）
 
 **Files:**
-- Create: `scripts/codex_bridge_entry.py`, `codex-bridge.spec`
+- Create: `src/codex_bridge/entry.py`（役割の振り分け）、`src/codex_bridge/launcher.py`（起動時のダイアログ。tkinter。今の `agent.main.ask_invite` と同じ作り）、`src/codex_bridge/agent/profiles.py`（貸す側のプロファイル）、`scripts/codex_bridge_entry.py`, `codex-bridge.spec`
 - Delete: `scripts/host_entry.py`, `scripts/agent_entry.py`, `codex-bridge-host.spec`, `codex-bridge-agent.spec`
-- Modify: `scripts/make_bats.py`（と生成される `setup.bat` `start.bat` `stop.bat` `install-mcp.bat`）、`scripts/build_release.py`, `pyproject.toml`（`[project.scripts]` に `codex-bridge` を足す。開発用の `codex-bridge-host` / `codex-bridge-agent` は残す）
-- Modify: `README.md`, `docs/operation-guide.md`, `docs/friend-guide.md`（exe の名前と起動のしかた）
-- Test: `tests/test_entry.py`
+- Modify: `src/codex_bridge/agent/main.py`（プロファイルを受け取る。画面のポートと単一起動の印をプロファイルごとに）、`src/codex_bridge/agent/setup.py`（`data_root()` をプロファイルごとに）、`scripts/make_bats.py`（と生成される `setup.bat` `start.bat` `stop.bat` `install-mcp.bat`）、`scripts/build_release.py`, `pyproject.toml`（`[project.scripts]` に `codex-bridge` を足す。開発用の `codex-bridge-host` / `codex-bridge-agent` は残す）
+- Modify: `README.md`, `docs/operation-guide.md`, `docs/friend-guide.md`（exe の名前・起動のダイアログ・複数の貸す側）
+- Test: `tests/test_entry.py`, `tests/agent/test_profiles.py`
 
 **Interfaces:**
-- Produces: `codex_bridge.entry.main(argv: list[str]) -> int` — `argv` が空、または先頭が `agent` → 貸す側（今の `agent.main.main`）。先頭が `host` → 残りを今の `host.main.main` に渡す。それ以外 → 使い方を出して 2 を返す。
+- Produces:
+  - `codex_bridge.entry.main(argv: list[str]) -> int` — `argv` が空 → 起動のダイアログを出し、選ばれた役割で動く（キャンセルなら 0）。先頭が `host` → 残りを `host.main.main` に渡す（.bat 用。ダイアログを出さない）。先頭が `agent` → `agent [--profile <名前>]` で、その貸す側をダイアログなしで動かす。それ以外 → 使い方を出して 2。
+  - `codex_bridge.launcher.choose_role(profiles: list[Profile]) -> Choice | None` — `Choice = ("host",) | ("agent", profile_name)`。ダイアログの中身: 「使う側（自分の PC のフォルダを Codex に使わせる）」のボタン 1 つ、「貸す側」の一覧（プロファイルごとに 1 行。名前・接続先・今動いているか）、「新しい貸す側を追加」（名前を入れる）。動いている貸す側を選んだら、新しく起動せず、その画面をブラウザで開く。
+  - `codex_bridge.agent.profiles`:
+    - `Profile(name: str, home: Path, ui_port: int)`
+    - `list_profiles() -> list[Profile]`、`create_profile(name: str) -> Profile`（名前は 1〜32 文字、ファイル名に使えない文字は拒否、同じ名前は拒否）
+    - 既定のプロファイル `default` は、今の保存場所（`%LOCALAPPDATA%\codex-bridge-agent` と location.txt の仕組み）と画面のポート 8766 をそのまま使う（v0.2 までの利用者の設定・招待がそのまま残る）。
+    - 追加のプロファイルは `%LOCALAPPDATA%\codex-bridge-agent\profiles\<名前>\` を自分の保存場所の起点にし（location.txt もその中）、画面のポートは 8767 から空いている番号を選んでプロファイルに保存する（次からも同じ番号）。
+    - 単一起動の印（Mutex）はプロファイルごと。同じプロファイルの二重起動は、すでに動いている方の画面を開いて終わる。違うプロファイルは同時に動く。
+  - 使う側を選んだとき: exe の隣に `host.yaml` がなければ `setup` を、あれば `start` を、コンソールの窓を開いて（`AllocConsole`）動かす。
+  - `CODEX_BRIDGE_AGENT_HOME`（試験用の環境変数）は今までどおり効く（プロファイルより優先）。
 
-- [ ] **Step 1: 失敗するテスト** — `tests/test_entry.py`: 引数なし → agent の main が呼ばれる／`host start --config host.yaml` → host の main が `["start", "--config", "host.yaml"]` で呼ばれる／`agent` → agent／`foo` → 2。
-- [ ] **Step 2: 実装** — `src/codex_bridge/entry.py`。exe はウィンドウなし（`console=False`）で作り、`host` のときだけ `ctypes.windll.kernel32.AttachConsole(-1)`（失敗したら `AllocConsole()`）で親のコンソールにつなぎ、`sys.stdout` / `sys.stderr` / `sys.stdin` を `CONOUT$` / `CONIN$` で開き直す。
-- [ ] **Step 3: spec とビルド** — `codex-bridge.spec` 1 つ（両方の静的ファイルと hiddenimports を合わせる）。`build_release.py` は admin の zip に `codex-bridge.exe`＋.bat＋`vendor/rg.exe`＋docs、friend の zip に `codex-bridge.exe`＋`使い方.md`。.bat は `"%~dp0codex-bridge.exe" host <cmd> --config host.yaml`。
-- [ ] **Step 4: 文書** — 3 つの文書の exe の名前と起動のしかたを直す（貸す人は「codex-bridge.exe をダブルクリック」、使う人は今までどおり .bat）。
-- [ ] **Step 5: 通過を確かめる** — 全テスト。
-- [ ] **Step 6: Commit** — `build: one codex-bridge.exe for both sides`
+- [ ] **Step 1: 失敗するテスト**
+  - `tests/test_entry.py`: 引数なし → `choose_role` が呼ばれ、`("host",)` なら host、`("agent","work")` なら agent が `work` で動く、`None` なら 0／`host start --config host.yaml` → host の main が `["start", "--config", "host.yaml"]` で呼ばれ、ダイアログは出ない／`agent --profile work` → ダイアログなしで agent／`foo` → 2。
+  - `tests/agent/test_profiles.py`: 既定のプロファイルの保存場所と 8766 が今と同じ／追加したプロファイルが自分の保存場所と 8767 以降の空きポートを持ち、次に読んでも同じ／ポートが使用中なら次の番号／名前の検証／2 つのプロファイルの設定・招待・作業ログが混ざらない。
+- [ ] **Step 2: 実装（振り分けとダイアログ）** — exe はウィンドウなし（`console=False`）で作る。`host` のときは `ctypes.windll.kernel32.AttachConsole(-1)`（失敗したら `AllocConsole()`）でコンソールにつなぎ、`sys.stdout` / `sys.stderr` / `sys.stdin` を `CONOUT$` / `CONIN$` で開き直す。
+- [ ] **Step 3: 実装（プロファイル）** — agent の main・setup・画面のポート・Mutex・トレイの表示（「codex-bridge（貸す側: <名前>）」）・画面の見出しにプロファイル名を通す。Codex のログイン（`~/.codex`）はプロファイルの間で共通（v0.2 の範囲では分けない。文書にそう書く）。
+- [ ] **Step 4: spec とビルド** — `codex-bridge.spec` 1 つ（両方の静的ファイルと hiddenimports を合わせる）。`build_release.py` は admin の zip に `codex-bridge.exe`＋.bat＋`vendor/rg.exe`＋docs、friend の zip に `codex-bridge.exe`＋`使い方.md`。.bat は `"%~dp0codex-bridge.exe" host <cmd> --config host.yaml`。
+- [ ] **Step 5: 文書** — 3 つの文書に、exe の名前、起動のダイアログ、貸す側を複数動かす方法（「新しい貸す側を追加」、それぞれに招待コード、画面のポートは 8767 から）を書く。
+- [ ] **Step 6: 通過を確かめ、ダイアログを撮影** — 全テスト。起動のダイアログ（プロファイル 0 個・2 個のとき）をスクリーンショットで撮り、目で確かめる（`.superpowers/sdd/2026-11-16-feedback/shots/task-5/`）。
+- [ ] **Step 7: Commit** — `build: one codex-bridge.exe with a start-up role dialog; several lender profiles`
 
 ### Task 6: 本物での確認と撮影（Review Focus 1〜5、R9）
 
 このタスクは実装ではなく確認。コードは直さず、失敗は記録する。
 
-- [ ] **Step 1:** `uv run --no-sync python scripts/build_release.py`（前に `release/` の中身を一時フォルダへ退避し、あとで戻す）。zip を一時フォルダに展開し、`codex-bridge.exe` をダブルクリック相当（引数なし）で起動 → トレイと 8766 の画面、`setup.bat` / `start.bat` / `stop.bat` で使う側が動き、コンソールに文字が出る。
+- [ ] **Step 1:** `uv run --no-sync python scripts/build_release.py`（前に `release/` の中身を一時フォルダへ退避し、あとで戻す）。zip を一時フォルダに展開し、`codex-bridge.exe` を引数なしで起動 → 起動のダイアログが出る。貸す側を 2 つ（既定と追加 1 つ）同時に動かし、トレイが 2 つ、画面が 8766 と 8767 で別々に開く。同じ貸す側をもう一度選ぶと、二重起動せず画面が開く。`setup.bat` / `start.bat` / `stop.bat` で使う側が動き、コンソールに文字が出る。保存場所は試験用（`CODEX_BRIDGE_AGENT_HOME` または一時フォルダ）にし、利用者の本物の貸す側の設定に触らない。
 - [ ] **Step 2:** 試験用の host（一時フォルダの host.yaml）と貸す側 1 つで、招待を失効 → 貸す人の画面に赤い帯 → 新しいコードを画面から入れる → つながる。
 - [ ] **Step 3:** 待ち時間なしの事前承認で依頼 → 長く待っても期限切れにならない → 許可で始まる。
 - [ ] **Step 4:** 2 万ファイル以上の共有フォルダで find_files・grep・コマンド実行の前後の走査の時間を測る。
