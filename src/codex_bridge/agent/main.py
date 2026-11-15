@@ -184,8 +184,13 @@ async def run_agent(invite: Invite, codex: Path, home: Path) -> bool:
 
     async def move_data(new: Path) -> list[Path]:
         nonlocal relaunch
-        left = await applier.move_data(new)
-        await set_paused(True)  # no new host request may arrive while the exe is relaunching
+        was_paused = client.paused
+        await set_paused(True)  # stop routing before the stores start moving
+        try:
+            left = await applier.move_data(new)
+        except BaseException:
+            await set_paused(was_paused)
+            raise
         relaunch = True  # the stores in this process still point at the old place: start again on the new one
         loop.call_later(1.0, stop.set)
         return left

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import yaml
+import pytest
 
 from codex_bridge.host.policy import PolicyStore, parse_policy
 from codex_bridge.host.policy_migrate import migrate_v1
@@ -95,3 +96,16 @@ def test_store_without_share_root_keeps_v1_behaviour(tmp_path):
     f.write_text('default: read\nrules:\n  - {path: "raw", level: write}\n', encoding="utf-8")
     p = PolicyStore(f).current()
     assert p.level_for("raw/x") == "write" and p.level_for("docs/x") == "read"
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_final_review_migration_preserves_original_bytes(tmp_path, existing):
+    path = tmp_path / "policy.yaml"
+    original = b'# original comment\r\ndefault: write\r\nexec: {mode: ask}\r\n'
+    path.write_bytes(original)
+    backup = tmp_path / "policy.v1.yaml"
+    if existing:
+        backup.write_bytes(b"earlier backup")
+    store = PolicyStore(path, share_root=tmp_path / "share")
+    assert store.current().v2
+    assert backup.read_bytes() == (b"earlier backup" if existing else original)

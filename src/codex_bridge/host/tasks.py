@@ -109,6 +109,7 @@ class TaskManager:
         self._req_ids = itertools.count(1)
         self._task_ids = itertools.count(1)
         self.on_change: list[Callable[[], None]] = []
+        self.invited_names: Callable[[], set[str]] | None = None
         self.settings = {"thresholds": dict(DEFAULT_THRESHOLDS), "log_visibility": "summary"}
         if self.settings_path.exists():
             self.settings.update(json.loads(self.settings_path.read_text(encoding="utf-8")))
@@ -187,13 +188,16 @@ class TaskManager:
         self._changed()
 
     def _connected(self) -> list[Lender]:
-        return [l for l in self._lenders.values() if l.connected]
+        return [l for l in self._lenders.values() if l.connected and self._invited(l.name)]
+
+    def _invited(self, name: str) -> bool:
+        return self.invited_names is None or name in self.invited_names()
 
     def _resolve(self, name: str | None) -> Lender:
         """The named lender, or the only connected one when no name is given."""
         if name is not None:
             lender = self._lenders.get(name)
-            if lender is None or not lender.connected:
+            if lender is None or not lender.connected or not self._invited(name):
                 raise ToolError(f"「{name}」の agent が接続されていません。"
                                 "その人の PC で codex-bridge-agent が動いているか確かめてください。")
             return lender
@@ -446,7 +450,7 @@ class TaskManager:
                 raise ToolError(f"このタスクの会話は「{prev.lender}」の Codex にあるため、"
                                 f"「{lender}」には続きを送れません。{RETRY_FRESH}")
             target = self._lenders.get(prev.lender)
-            if target is None or not target.connected:
+            if target is None or not target.connected or not self._invited(prev.lender):
                 raise ToolError(f"このタスクの会話を持つ「{prev.lender}」の agent が接続されていません。{RETRY_FRESH}")
         self._ready(target)
         if not target.capabilities.get("resumable", True):

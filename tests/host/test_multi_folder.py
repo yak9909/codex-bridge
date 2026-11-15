@@ -81,3 +81,52 @@ def test_move_between_folders_respects_levels(multi):
 
 def test_relative_paths_still_use_main(multi):
     assert multi.read.read_file("raw/a.txt")["path"] == "raw/a.txt"
+
+
+def test_final_review_data_is_invisible_even_with_broad_policy(share):
+    # Model a pre-existing / externally edited policy, bypassing registration entirely.
+    import yaml
+    raw = {"folders": [{"path": share.root.parent.as_posix(), "level": "write"}],
+           "main": share.root.as_posix(), "exec": {"mode": "ask"}}
+    share.policy.path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    target = share.policy.path.as_posix()
+    with pytest.raises(ToolError, match="not found"):
+        share.write.write_file(target, "exec: {mode: all}\n")
+    with pytest.raises(ToolError, match="not found"):
+        share.read.read_file(target)
+    assert share.policy.current().exec_mode == "ask"
+    assert "data" not in {e["name"] for e in share.read.list_dir(share.root.parent.as_posix())}
+    assert not any("data/" in p for p in share.read.find_files("**/*"))
+    assert not any("data/" in m["path"] for m in share.search.grep("folders")["matches"])
+
+
+def test_final_review_folder_level_refuses_data_parent(share):
+    from codex_bridge.host.policy_form import set_folder_level
+    with pytest.raises(ValueError, match="データフォルダ.*含むフォルダは共有できません"):
+        set_folder_level(share.policy, share.data_dir.parent.as_posix(), "write")
+
+
+@pytest.mark.parametrize("path", [None, ".", ".codex-bridge", ".codex-bridge/outputs/private.txt"])
+def test_final_review_search_never_discovers_command_outputs(multi, path):
+    private = multi.root / ".codex-bridge" / "outputs" / "private.txt"
+    private.parent.mkdir(parents=True)
+    private.write_text("needle private output", encoding="utf-8")
+    # Include a directly registered internal folder in the all-folders walk, too.
+    multi.add_folder(private.parent, "read")
+    assert not any(".codex-bridge" in p for p in multi.read.find_files("**/*", path))
+    assert not any(".codex-bridge" in m["path"] for m in multi.search.grep("needle", path)["matches"])
+    assert multi.read.read_file(private.as_posix())["text"] == "needle private output"
+
+
+def test_final_review_list_cannot_discover_command_output_names(share):
+    private = share.root / ".codex-bridge" / "outputs" / "private.txt"
+    private.parent.mkdir(parents=True)
+    private.write_text("private", encoding="utf-8")
+    assert ".codex-bridge" not in {e["name"] for e in share.read.list_dir(".")}
+    assert share.read.list_dir(".codex-bridge/outputs") == []
+
+
+def test_final_review_whitespace_paths_mean_all_folders(multi):
+    assert multi.read.list_dir(" \t ") == multi.read.list_dir("/")
+    assert multi.read.find_files("**/*.py", " \t ") == multi.read.find_files("**/*.py")
+    assert multi.search.grep("needle", " \t ") == multi.search.grep("needle")

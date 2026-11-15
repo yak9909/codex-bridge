@@ -90,7 +90,7 @@ def build_codex_mcp(s: HostServices, match_token: Callable[[str], str | None]) -
     @tool("path 省略・空文字・/ は登録フォルダ一覧、. はメインの中身を返します。"
           "path: メイン内は相対パス、ほかの共有フォルダ内は絶対パス。指定フォルダでは名前・種類・大きさ・更新日時を返します。")
     async def list_dir(path: str = "/") -> CallToolResult:
-        return await run("list_dir", {"path": path}, lambda: s.read.list_dir(path or "/"), blocking=True)
+        return await run("list_dir", {"path": path}, lambda: s.read.list_dir(path.strip() or "/"), blocking=True)
 
     @tool("検索先の配下でファイル名を glob（pattern、例: **/*.csv）で探します。"
           "path: メイン内は相対パス、ほかの共有フォルダ内は絶対パス。省略で見える全フォルダ、. でメインを検索。結果も同じパス形式。")

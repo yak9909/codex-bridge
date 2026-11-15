@@ -56,6 +56,23 @@ async def call(client, name: str, args: dict) -> dict:
     return r.json()["result"]
 
 
+async def test_final_review_claude_refuses_data_parent(env, share):
+    _, local, _ = env
+    parent = share.data_dir.parent.as_posix()
+    for name, args in [("set_folder_level", {"path": parent, "level": "write"}),
+                       ("set_policy", {"text": f'folders: [{{path: "{parent}", level: write}}]'})]:
+        result = await call(local, name, args)
+        assert result.get("isError") and "データフォルダ" in result["content"][0]["text"]
+
+
+def test_final_review_guide_explains_multiple_folders_and_legacy_alias():
+    from codex_bridge.host.claude_mcp import GUIDE, INSTRUCTIONS
+    for term in ("folders", "相対パス", "絶対パス", "add_shared_folder", "remove_shared_folder",
+                 "set_main_folder", "set_share_root", "write", "旧名", "protocol", "v0.1", "メイン"):
+        assert term in GUIDE
+    assert "folders" in INSTRUCTIONS
+
+
 async def test_tool_names(env):
     mgr, local, _ = env
     r = await local.post("/claude/mcp", headers=ACCEPT, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})

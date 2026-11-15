@@ -87,6 +87,28 @@ async def test_page_and_shared_assets(env):
     assert (await env.http.put("/api/data-location", json={"path": "D:/x"}, headers=WRITE)).status_code == 404
 
 
+async def test_final_review_shutdown_records_failure_and_sends_to_host(env):
+    await env.runner.handle({"type": "task_start", "task_id": "t1", "prompt": "do"})
+    assert env.runner.cur is not None
+    await env.runner.shutdown()
+    states = [e["data"] for e in env.log.task_events("t1") if e["kind"] == "state"]
+    assert states[-1]["state"] == "failed"
+    assert "終了" in states[-1]["report"] and "中断" in states[-1]["report"]
+    assert env.runner.cur is None
+    sent = [m for m in env.sent if m["type"] == "task_state"]
+    assert sent[-1]["state"] == "failed" and sent[-1]["report"] == states[-1]["report"]
+    await env.runner.shutdown()
+    assert len([m for m in env.sent if m["type"] == "task_state"]) == len(sent)
+
+
+@pytest.mark.parametrize("state", ["running", "awaiting_lender", "queued"])
+async def test_final_review_orphaned_worklog_task_shows_interrupted(env, state):
+    env.log.add("lost", "task_prompt", {"text": "do"})
+    env.log.add("lost", "state", {"state": state})
+    task = (await env.http.get("/api/tasks/lost")).json()
+    assert task["state"] == "failed" and "中断" in task["report"] and task["finished"] is not None
+
+
 @pytest.mark.parametrize("path", ["/", "/static/app.js", "/admin/common/ui.js", "/api/overview", "/api/tasks",
                                   "/api/tasks/t1", "/api/pending", "/api/sessions", "/api/settings"])
 async def test_every_read_checks_host(env, path):

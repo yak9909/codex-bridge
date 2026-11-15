@@ -22,10 +22,12 @@ class SearchTools:
     def grep(self, pattern: str, path: str | None = None, glob: str | None = None,
              ignore_case: bool = False, context: int = 0, limit: int = 500) -> dict:
         """Without a path: every shared folder."""
-        if path:
+        if path and path.strip():
             base = self.paths.resolve(path, "read")
             if not base.exists():
                 raise not_found(path)
+            if not self.paths.discoverable(base):
+                return {"matches": [], "truncated": False}
             targets = [(base, ".")] if base.is_dir() else [(base.parent, base.name)]
         else:
             self.paths.check_running()
@@ -35,6 +37,8 @@ class SearchTools:
         seen: set[tuple[str, int]] = set()
         truncated = False
         for cwd, target in targets:
+            if not self.paths.discoverable(cwd / target):
+                continue
             truncated = self._run(pattern, cwd, target, glob, ignore_case, context, limit, None, matches, seen)
             if not truncated and not pattern.isascii():
                 # Shift_JIS files only match when ripgrep decodes them as such.
@@ -53,6 +57,7 @@ class SearchTools:
             cmd += ["-C", str(int(context))]
         if glob:
             cmd += ["--glob", glob]
+        cmd += ["--glob", "!.codex-bridge/**", "--glob", "!**/.codex-bridge/**"]
         if encoding:
             cmd += ["--encoding", encoding]
         # "--" ends option parsing: a path such as "--pre=cmd.exe" must never become an rg option.
@@ -97,7 +102,7 @@ class SearchTools:
             return cache[key]
         p = (cwd / rg_path)
         rel: str | None = None
-        if self.paths.visible(p):
+        if self.paths.discoverable(p):
             if encoding is None or sniff_file(p.resolve()) == "cp932":
                 rel = self.paths.to_rel(p)
         cache[key] = rel

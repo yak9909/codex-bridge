@@ -6,7 +6,7 @@ import os
 from pathlib import Path, PureWindowsPath
 from typing import Literal
 
-from .policy import Level, PolicyStore, normalize_rel
+from .policy import OUTPUTS_TOP, Level, PolicyStore, normalize_rel
 
 
 class ToolError(Exception):
@@ -27,8 +27,13 @@ def _nc(p: Path | str) -> str:
 class SafePaths:
     """Paths are absolute (any registered folder) or relative to the main folder."""
 
-    def __init__(self, root: Path, policy: PolicyStore) -> None:
+    def __init__(self, root: Path, policy: PolicyStore, *, install_dir: Path | None = None,
+                 protected: tuple[Path, ...] = ()) -> None:
         self.policy = policy
+        self.install_dir = Path(install_dir).resolve() if install_dir else None
+        self._protected = tuple(Path(p).resolve() for p in (policy.path.parent, *protected))
+        if self.install_dir:
+            self._protected += tuple(self.install_dir / d for d in ("vendor", "src", ".venv", "scripts"))
         self.set_root(root)
 
     def set_root(self, root: Path) -> None:
@@ -50,6 +55,14 @@ class SafePaths:
 
     def level_of(self, p: Path) -> Level | None:
         """Level of an absolute path; None if it is in no shared folder."""
+        # These exclusions outrank every policy, including a manually edited broad folder rule.
+        for candidate in (Path(p), Path(p).resolve(strict=False)):
+            if any(self._under(candidate, base) is not None for base in self._protected):
+                return None
+            if self.install_dir:
+                rel = self._under(candidate, self.install_dir)
+                if rel and "/" not in rel and not candidate.is_dir():
+                    return None  # host.yaml, executables, batch files, and other installation files
         pol = self.policy.current()
         if pol.v2:
             return pol.level_for_abs(p)
@@ -141,3 +154,8 @@ class SafePaths:
         except OSError:
             return False
         return all(self.level_of(x) not in (None, "hidden") for x in (Path(p), real))
+
+    def discoverable(self, p: Path) -> bool:
+        """Internal outputs are readable by their returned path, but cannot be enumerated/searched."""
+        return all(OUTPUTS_TOP not in (part.lower() for part in candidate.parts)
+                   for candidate in (Path(p), Path(p).resolve(strict=False))) and self.visible(p)

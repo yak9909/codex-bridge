@@ -6,6 +6,7 @@ from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from codex_bridge.host.control import add_control_route
+from codex_bridge.host.paths import ToolError
 from codex_bridge.host.tasks import TaskManager, TaskRecord
 from codex_bridge.host.tokens import TokenStore
 
@@ -104,3 +105,35 @@ def test_token_store_keeps_only_hashes(tmp_path):
     assert tok not in raw and len(ts.hashes()) == 1
     assert TokenStore(tmp_path).hashes() == ts.hashes()
     assert [t["name"] for t in ts.list()] == ["a"]
+
+
+@pytest.mark.parametrize("reissue", [False, True])
+def test_final_review_token_change_closes_connected_lender(env, reissue):
+    mgr, tokens, tok, client = env
+    with client.websocket_connect("/agent/ws", headers={"Authorization": f"Bearer {tok}"}) as ws:
+        ws.send_json({"type": "hello"})
+        assert ws.receive_json()["type"] == "settings"
+        mgr.tasks["t1"] = TaskRecord("t1", "p", 0, state="running", lender="friend")
+        if reissue:
+            new = tokens.issue("friend")
+        else:
+            tokens.revoke("friend")
+        # Check detachment first so a regression fails without blocking on receive.
+        import asyncio
+        import time
+        deadline = time.monotonic() + 2
+        while mgr.agent_info("friend")["connected"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert mgr.agent_info("friend")["connected"] is False
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
+        assert mgr.tasks["t1"].state == "agent_offline"
+        for name in (None, "friend"):
+            with pytest.raises(ToolError, match="接続"):
+                asyncio.run(mgr.start("must not send", lender=name))
+    if reissue:
+        assert tokens.match(tok) is None
+        with client.websocket_connect("/agent/ws", headers={"Authorization": f"Bearer {new}"}) as ws:
+            ws.send_json({"type": "hello", "current_task_id": None})
+            assert ws.receive_json()["type"] == "settings"
+            assert mgr.agent_info("friend")["connected"] is True

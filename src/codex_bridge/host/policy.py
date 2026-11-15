@@ -17,6 +17,7 @@ ExecMode = Literal["off", "allowlist", "ask", "all"]
 LEVELS = ("hidden", "read", "write")
 EXEC_MODES = ("off", "allowlist", "ask", "all")
 OUTPUTS_TOP = ".codex-bridge"
+DATA_SHARE_MSG = "codex-bridge のデータフォルダ（記録や合言葉の置き場）を含むフォルダは共有できません"
 
 
 @dataclass(frozen=True)
@@ -259,6 +260,12 @@ class PolicyStore:
         from .policy_migrate import migrate_v1
         new = migrate_v1(raw, self.share_root)
         parse_policy(new)
+        backup = self.path.with_name("policy.v1.yaml")
+        try:
+            with backup.open("xb") as f:
+                f.write(self.path.read_bytes())
+        except FileExistsError:
+            pass  # keep the first original, byte for byte (including comments and line endings)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(yaml.safe_dump(new, allow_unicode=True, sort_keys=False), encoding="utf-8")
         os.replace(tmp, self.path)
@@ -279,11 +286,19 @@ class PolicyStore:
             raw = yaml.safe_load(text) or {}
         except yaml.YAMLError as e:
             raise ValueError(f"YAML の書式が正しくありません: {e}") from e
-        parse_policy(raw)
+        parsed = parse_policy(raw)
+        for folder in parsed.folders:
+            self.guard_shared_folder(folder.path)
+        if not parsed.v2 and self.share_root:
+            self.guard_shared_folder(self.share_root)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, self.path)
         self.current()
+
+    def guard_shared_folder(self, path: Path) -> None:
+        if self.path.parent.resolve().is_relative_to(Path(path).resolve()):
+            raise ValueError(DATA_SHARE_MSG)
 
     def update(self, **changes) -> None:
         """Change top-level keys (e.g. paused) or exec keys via exec_<name>."""

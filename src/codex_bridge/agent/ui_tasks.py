@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from .runner import AgentRunner
+from .runner import INTERRUPTED, AgentRunner
 
 TOOLS = {"tool_call", "tool_started", "tool_finished"}
 FINISHED = {"completed", "cancelled", "failed", "suspended_quota", "rejected_by_lender"}
@@ -72,6 +72,9 @@ def task_view(runner: AgentRunner, task_id: str, *, detail: bool = True) -> dict
             task["progress"] = cur.progress
     if pending is not None and pending["task_id"] == task_id:
         task.update(state="awaiting_lender", finished=None)
+    if (task["state"] not in FINISHED and (cur is None or cur.task_id != task_id)
+            and (pending is None or pending["task_id"] != task_id)):
+        task.update(state="failed", report=INTERRUPTED, finished=events[-1]["ts"])
     if detail:
         task["events"] = visible_events(events, runner.log_visibility)
         task["event_count"] = len(task["events"])

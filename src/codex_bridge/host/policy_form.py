@@ -148,6 +148,7 @@ def set_folder_level(store: PolicyStore, path: str, level: str) -> dict:
         if not rel or not form["main"]:
             raise ValueError("フォルダを指定してください")
         target = (Path(form["main"]) / rel).as_posix()
+    store.guard_shared_folder(Path(target))
     form["folders"] = [f for f in form["folders"] if _key(f["path"]) != _key(target)]
     if level != INHERIT:
         form["folders"].append({"path": target, "level": level})

@@ -8,6 +8,7 @@ import secrets
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 from .mcp_util import sha256_hex
 
@@ -18,6 +19,7 @@ class TokenStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._items: dict[str, dict] = {}
+        self.on_change: list[Callable[[str], None]] = []
         if self.path.exists():
             self._items = json.loads(self.path.read_text(encoding="utf-8"))
 
@@ -29,12 +31,16 @@ class TokenStore:
         with self._lock:
             self._items[name] = {"sha256": sha256_hex(token), "created": time.time()}
             self._save()
+        for cb in list(self.on_change):
+            cb(name)
         return token
 
     def revoke(self, name: str) -> None:
         with self._lock:
             self._items.pop(name, None)
             self._save()
+        for cb in list(self.on_change):
+            cb(name)
 
     def hashes(self) -> set[str]:
         return {v["sha256"] for v in self._items.values()}

@@ -1,5 +1,8 @@
 import sys
+import asyncio
 from types import SimpleNamespace
+
+import pytest
 
 from codex_bridge.agent import main as agent_main
 from codex_bridge.agent.settings import SettingsStore
@@ -47,3 +50,91 @@ def test_crash_is_written_to_log_and_reported(tmp_path, monkeypatch):
     log = (tmp_path / "logs" / "crash.log").read_text(encoding="utf-8")
     assert "RuntimeError: boom" in log
     assert shown and "crash.log" in shown[0]
+
+
+@pytest.mark.parametrize("fails,already_paused", [(False, False), (True, False), (True, True)])
+async def test_final_review_move_pauses_before_copy_and_restores_on_failure(tmp_path, monkeypatch,
+                                                                         fails, already_paused):
+    from codex_bridge.common.invite import Invite
+    observed, refs = [], {}
+
+    class App:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+        async def auth_mode(self):
+            return "chatgpt"
+
+    class Runner:
+        def __init__(self, *args, **kwargs):
+            self.settings = {}
+
+        def apply_settings(self, settings):
+            self.settings = settings
+
+        async def start(self):
+            pass
+
+        async def shutdown(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            self.paused = already_paused
+            refs["client"] = self
+
+        async def drop(self):
+            observed.append("drop")
+
+        async def refresh_hello(self):
+            pass
+
+        async def run_forever(self):
+            await asyncio.Future()
+
+    class Applier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def apply(self, settings):
+            pass
+
+        async def move_data(self, path):
+            observed.append(("move", refs["client"].paused))
+            if fails:
+                raise OSError("copy failed")
+            return []
+
+    def tray(on_quit, on_pause_toggle):
+        refs["quit"] = on_quit
+        return SimpleNamespace(icon=SimpleNamespace(update_menu=lambda: None, stop=lambda: None),
+                               run_detached=lambda: None, set_status=lambda s: None)
+
+    def server(*args, on_move, **kwargs):
+        async def serve():
+            try:
+                await on_move(tmp_path / "new")
+            except OSError:
+                pass
+            observed.append(("after", refs["client"].paused))
+            refs["quit"]()
+        return SimpleNamespace(serve=serve, should_exit=False)
+
+    for name, value in {"AppServer": App, "AgentRunner": Runner, "ControlClient": Client,
+                        "SettingsApplier": Applier, "Tray": tray, "make_ui_server": server,
+                        "resolve_workdir": lambda *a: tmp_path / "wd", "user_mcp_names": lambda: [],
+                        "codex_version": lambda cmd: "test"}.items():
+        monkeypatch.setattr(agent_main, name, value)
+    result = await agent_main.run_agent(Invite("http://test", "tok", "friend"), tmp_path / "codex.exe", tmp_path)
+    assert ("move", True) in observed
+    assert ("after", already_paused if fails else True) in observed
+    assert result is (not fails)

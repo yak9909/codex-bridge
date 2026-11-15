@@ -270,8 +270,16 @@ def _inside(child: Path, parent: Path) -> bool:
 
 
 def _copy_tree(src: Path, dst: Path, skip: frozenset) -> None:
-    shutil.copytree(src, dst, dirs_exist_ok=True,
-                    ignore=lambda d, names: [n for n in names if n in skip] if Path(d) == Path(src) else [])
+    def ignore(d, names):
+        ignored = [n for n in names if n in skip] if Path(d) == Path(src) else []
+        for n in names:
+            if n not in ignored and os.path.isjunction(Path(d) / n):
+                # copytree(symlinks=True) still follows Windows junctions. Refuse instead of copying
+                # unrelated data; the move rolls back and leaves the original link in place.
+                raise ValueError("ジャンクションを含むため保存場所を移せません。リンクを外してからお試しください")
+        return ignored
+
+    shutil.copytree(src, dst, dirs_exist_ok=True, symlinks=True, ignore=ignore)
 
 
 def _verify_tree(src: Path, dst: Path, skip: frozenset) -> list[str]:
@@ -297,6 +305,12 @@ def _verify_tree(src: Path, dst: Path, skip: frozenset) -> list[str]:
 
 
 def _remove_tree(p: Path, left: list[Path]) -> None:
+    if os.path.isjunction(p):
+        try:
+            p.rmdir()  # unlink the junction itself; never chmod or descend into its target
+        except OSError:
+            left.append(p)
+        return
     if p.is_dir() and not p.is_symlink():
         for child in list(p.iterdir()):
             _remove_tree(child, left)

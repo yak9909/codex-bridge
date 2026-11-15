@@ -34,6 +34,7 @@ SendFn = Callable[[dict], Awaitable[None]]
 TOOL_ITEMS = ("mcpToolCall", "dynamicToolCall", "commandExecution", "fileChange")
 PROGRESS_INTERVAL = 2.0  # the half-written message goes to the host at most this often (seconds)
 PROGRESS_MAX = 20_000
+INTERRUPTED = "アプリが終了したため、タスクは中断されました。"
 
 
 @dataclass
@@ -152,8 +153,12 @@ class AgentRunner:
         return self.approval.pending.task_id if self.approval.pending is not None else None
 
     async def shutdown(self) -> None:
-        """The exe is ending: a request still waiting is refused, while the host can still be told."""
+        """Record the interruption while the host is still connected, before event intake stops."""
         await self.approval.shutdown()
+        async with self._lock:
+            if self.cur is not None:
+                await self._state("failed", report=INTERRUPTED)
+                await self._end(app_alive=False)
 
     async def stop(self) -> None:
         for t in self._tasks:

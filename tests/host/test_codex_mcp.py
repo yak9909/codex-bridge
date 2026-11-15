@@ -64,6 +64,12 @@ async def test_revoked_token_rejected_immediately(mcp):
     assert (await mcp.post("/codex/mcp", json=INIT, headers=auth(TOKEN))).status_code == 401
 
 
+async def test_final_review_mcp_whitespace_list_is_omitted_path(mcp):
+    blank = await call(mcp, "list_dir", {"path": " \t "})
+    omitted = await call(mcp, "list_dir", {})
+    assert blank == omitted
+
+
 async def test_tool_list_matches_spec(mcp):
     tools = (await rpc(mcp, "tools/list"))["result"]["tools"]
     assert {t["name"] for t in tools} == {

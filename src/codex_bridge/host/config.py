@@ -15,6 +15,7 @@ class HostConfig:
     public_bind: str  # "<tailscale ip>:<port>"
     local_port: int
     rg_path: Path
+    install_dir: Path | None = None  # directory containing host.yaml and the host executables/scripts
 
 
 def load_host_config(path: Path) -> HostConfig:
@@ -30,4 +31,5 @@ def load_host_config(path: Path) -> HostConfig:
         public_bind=str(raw.get("public_bind", "127.0.0.1:8765")),
         local_port=int(raw.get("local_port", 8770)),
         rg_path=p(raw.get("rg_path", "vendor/rg.exe")),
+        install_dir=base.resolve(),
     )

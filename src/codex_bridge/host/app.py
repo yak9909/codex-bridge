@@ -68,11 +68,14 @@ def build_host(config: HostConfig, config_path: Path | None = None) -> Host:
     data.mkdir(parents=True, exist_ok=True)
     policy = PolicyStore(data / "policy.yaml", share_root=config.share_root)  # converts a v0.1 file
     audit = AuditLog(data / "audit.jsonl")
-    paths = SafePaths(config.share_root, policy)
+    paths = SafePaths(config.share_root, policy,
+                      install_dir=config.install_dir or (config_path.parent if config_path else None),
+                      protected=(config.rg_path, *((config_path,) if config_path else ())))
     snapshots = Snapshots(data)
     approvals = Approvals(policy)
     mgr = TaskManager(data, touched_fn=snapshots.touched)
     tokens = TokenStore(data)
+    mgr.invited_names = lambda: {i["name"] for i in tokens.list()}
 
     def task_id_fn() -> str | None:
         """A Codex tool call belongs to the task of the lender whose token it came with, never to

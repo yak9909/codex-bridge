@@ -262,6 +262,47 @@ def build_root(root: Path) -> None:
     (root / "bin" / "codex-x.dll").write_bytes(b"dll")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction")
+def test_final_review_remove_junction_leaves_target_untouched(tmp_path):
+    from conftest import make_junction
+    target = tmp_path / "outside"
+    target.mkdir()
+    file = target / "keep.txt"
+    file.write_bytes(b"keep")
+    link = tmp_path / "junction"
+    make_junction(link, target)
+    try:
+        left = []
+        st._remove_tree(link, left)
+        assert not link.exists() and left == []
+        assert file.read_bytes() == b"keep"
+    finally:
+        if os.path.isjunction(link):
+            link.rmdir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction")
+def test_final_review_copy_does_not_follow_junction(tmp_path):
+    from conftest import make_junction
+    src, dst, target = (tmp_path / p for p in ("src", "dst", "outside"))
+    src.mkdir()
+    target.mkdir()
+    (target / "private.txt").write_bytes(b"private")
+    link = src / "junction"
+    make_junction(link, target)
+    try:
+        # Copy may refuse a junction; either way it must not materialize its target.
+        try:
+            st._copy_tree(src, dst, frozenset())
+        except ValueError as e:
+            assert "ジャンクション" in str(e)
+        assert not (dst / "junction").exists() or os.path.isjunction(dst / "junction")
+        assert (target / "private.txt").read_bytes() == b"private"
+    finally:
+        if os.path.isjunction(link):
+            link.rmdir()
+
+
 def snapshot(root: Path) -> dict:
     return {str(p.relative_to(root)): (p.read_bytes() if p.is_file() else None) for p in sorted(root.rglob("*"))}
 

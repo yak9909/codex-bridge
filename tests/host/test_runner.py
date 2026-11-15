@@ -48,6 +48,20 @@ async def test_mode_all_runs(share):
     assert r["status"] == "done" and r["exit_code"] == 0 and r["stdout"].strip() == "1"
 
 
+async def test_final_review_output_path_is_unguessable_and_owner_can_retrieve(share):
+    import re
+    from pathlib import Path
+    share.set_policy(exec_mode="all", limits={"output_max_bytes": 2048})
+    share.runner.lender_fn = lambda: "alice"
+    r = await share.runner.run_command(f'{PY} -c "print(\'x\'*3000)"')
+    result = await share.runner.get_command_result(r["job_id"], 5)
+    assert re.fullmatch(r"[0-9a-f]{32}\.stdout\.txt", Path(result["output_file"]).name)
+    assert share.read.read_file(result["output_file"])["text"].startswith("xxx")
+    share.runner.lender_fn = lambda: "bob"
+    with pytest.raises(ToolError, match="ジョブが見つかりません"):
+        await share.runner.get_command_result(r["job_id"], 0)
+
+
 async def test_allowlisted_runs_without_approval(share):
     (share.root / "scripts/hello.py").write_text("print('hi')\n", encoding="utf-8")
     share.set_policy(exec_allow=[f"{PY} scripts/*.py *"])

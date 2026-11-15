@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from .policy_form import _abs, add_folder, remove_folder, set_main_folder
-from .setup_tools import inside
 
 
 class ShareBusy(Exception):
@@ -14,8 +13,7 @@ class ShareBusy(Exception):
 
 def _guard(host, path: str, *, busy_check: bool = True) -> Path:
     p = Path(_abs(path))
-    if inside(host.config.data_dir, p):
-        raise ValueError("codex-bridge のデータフォルダ（記録や合言葉の置き場）を含むフォルダは共有できません")
+    host.policy.guard_shared_folder(p)
     if busy_check and host.mgr.current_task_id():
         raise ShareBusy("作業中のタスクがあるため、共有フォルダは変えられません。終わってから変えてください")
     return p

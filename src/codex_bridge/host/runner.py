@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import os
+import secrets
 import shlex
 import subprocess
 from dataclasses import dataclass, field
@@ -200,7 +201,7 @@ class CommandRunner:
         before = await asyncio.to_thread(self._write_area_state)
         out_dir = self.paths.root / OUTPUTS_TOP / "outputs"
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{job.id}.stdout.txt"
+        out_path = out_dir / f"{secrets.token_hex(16)}.stdout.txt"
         proc = await asyncio.create_subprocess_shell(
             job.command, cwd=str(real_cwd), stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, creationflags=CREATIONFLAGS)

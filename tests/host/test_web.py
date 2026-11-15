@@ -25,6 +25,38 @@ def make_host(tmp_path):
     return build_host(load_host_config(cfg), config_path=cfg)
 
 
+@pytest.mark.parametrize("endpoint", ["policy", "policy-form"])
+async def test_final_review_admin_refuses_data_parent(admin, host, endpoint):
+    form = {"folders": [{"path": host.config.data_dir.parent.as_posix(), "level": "write"}]}
+    kwargs = {"content": yaml.safe_dump(form)} if endpoint == "policy" else {"json": form}
+    r = await admin.put(f"/admin/api/{endpoint}", headers=H, **kwargs)
+    assert r.status_code == 400 and "データフォルダ" in r.text
+
+
+def test_final_review_install_files_are_invisible_under_broad_policy(host):
+    root = host.config_path.parent
+    host.policy.path.write_text(yaml.safe_dump({"folders": [{"path": root.as_posix(), "level": "write"}]}),
+                                encoding="utf-8")
+    for path in (host.config_path, root / "vendor" / "rg.exe", root / "start.bat", root / "stop.bat"):
+        assert host.paths.level_of(path) is None
+        assert not host.paths.visible(path)
+    assert host.paths.level_of(host.config.share_root / "raw") == "write"
+
+
+async def test_final_review_routing_refuses_names_missing_from_tokens(host):
+    from codex_bridge.host.paths import ToolError
+    sent = []
+    async def send(m):
+        sent.append(m)
+    link = host.mgr.attach("uninvited", send)
+    await host.mgr.on_agent_message(link, {"type": "hello"})
+    sent.clear()
+    for name in (None, "uninvited"):
+        with pytest.raises(ToolError, match="接続"):
+            await host.mgr.start("private prompt", lender=name)
+    assert not sent
+
+
 def admin_client(host) -> httpx.AsyncClient:
     t = httpx.ASGITransport(app=create_local_app(host), client=("127.0.0.1", 5000))
     return httpx.AsyncClient(transport=t, base_url="http://127.0.0.1:8770")
@@ -204,10 +236,13 @@ async def test_cannot_change_share_root_during_a_task(admin, host, tmp_path):
     assert r.status_code == 409
 
 
-async def join(mgr, name: str, send=None, **hello) -> int:
+async def join(host, name: str, send=None, **hello) -> int:
     """A lender's agent connects and says hello (only then is it given tasks). Returns the link id."""
     async def drop(m):
         pass
+    mgr = host.mgr
+    if name not in {i["name"] for i in host.tokens.list()}:
+        host.tokens.issue(name)
     link = mgr.attach(name, send or drop)
     await mgr.on_agent_message(link, {"type": "hello", "agent_version": "0.2.0", "codex_version": "x",
                                       "auth_mode": "chatgpt", **hello})
@@ -219,7 +254,7 @@ async def test_send_followup_and_cancel_from_admin(admin, host):
 
     async def send(m):
         sent.append(m)
-    link = await join(host.mgr, "friend", send)
+    link = await join(host, "friend", send)
     r = await admin.post("/admin/api/tasks", json={"prompt": "hello"}, headers=H)
     assert r.status_code == 200
     tid = r.json()["task_id"]
@@ -236,7 +271,7 @@ async def test_send_followup_and_cancel_from_admin(admin, host):
 
 async def test_task_detail_has_what_the_page_shows(admin, host):
     # heading of the detail: who did it, when it started and ended (design 5); the record: plan and the rest
-    link = await join(host.mgr, "alice")
+    link = await join(host, "alice")
     before = time.time()
     tid = (await admin.post("/admin/api/tasks", json={"prompt": "hello"}, headers=H)).json()["task_id"]
     await host.mgr.on_agent_message(link, {"type": "event", "seq": 1, "task_id": tid, "kind": "plan",
@@ -258,7 +293,7 @@ async def test_task_detail_has_what_the_page_shows(admin, host):
 
 
 async def test_task_detail_carries_the_half_written_message(admin, host):
-    link = await join(host.mgr, "alice")
+    link = await join(host, "alice")
     tid = (await admin.post("/admin/api/tasks", json={"prompt": "hello"}, headers=H)).json()["task_id"]
     assert (await admin.get(f"/admin/api/tasks/{tid}")).json()["progress"] is None
     await host.mgr.on_agent_message(link, {"type": "event", "task_id": tid, "kind": "progress",
@@ -269,7 +304,7 @@ async def test_task_detail_carries_the_half_written_message(admin, host):
 
 async def test_task_apis_answer_whatever_a_lender_sends_about_a_task(admin, host):
     # review I1: a NaN in a state or an event must not turn the task list or a task's detail into an error
-    link = await join(host.mgr, "alice")
+    link = await join(host, "alice")
     tid = (await admin.post("/admin/api/tasks", json={"prompt": "hello"}, headers=H)).json()["task_id"]
     nan = float("nan")
     for text in (
@@ -316,13 +351,14 @@ def window(percent: int) -> dict:
     return {"used_percent": percent, "resets_at": int(time.time()) + 3600}
 
 
-async def two_lenders(mgr) -> dict:
+async def two_lenders(host) -> dict:
     """alice (little room left) and bob (lots of room, disposable sessions); returns what each was sent."""
+    mgr = host.mgr
     sent = {"alice": [], "bob": []}
     for name, used, resumable in (("alice", 60, True), ("bob", 10, False)):
         async def send(m, name=name):
             sent[name].append(m)
-        link = await join(mgr, name, send, protocol=2, capabilities={"resumable": resumable, "pre_approval": False},
+        link = await join(host, name, send, protocol=2, capabilities={"resumable": resumable, "pre_approval": False},
                           limits={"five_hour": 70, "weekly": None, "force": True})
         await mgr.on_agent_message(link, {"type": "usage", "five_hour": window(used), "weekly": None, "ts": 0})
     return sent
@@ -330,7 +366,7 @@ async def two_lenders(mgr) -> dict:
 
 async def test_lenders_api_lists_each_lender(admin, host):
     assert (await admin.get("/admin/api/lenders")).json() == []
-    await two_lenders(host.mgr)
+    await two_lenders(host)
     tid = (await admin.post("/admin/api/tasks", json={"prompt": "x", "lender": "alice"}, headers=H)).json()["task_id"]
     rows = (await admin.get("/admin/api/lenders")).json()
     assert [r["name"] for r in rows] == ["alice", "bob"]
@@ -349,7 +385,7 @@ async def test_lenders_api_lists_each_lender(admin, host):
 async def test_lenders_api_lists_invited_names_that_have_not_connected(admin, host):
     for name in ("alice", "carol"):
         await admin.post("/admin/api/invites", json={"name": name}, headers=H)
-    await two_lenders(host.mgr)  # alice and bob connect; carol has only been invited
+    await two_lenders(host)  # alice and bob connect; carol has only been invited
     rows = (await admin.get("/admin/api/lenders")).json()
     assert [r["name"] for r in rows] == ["alice", "bob", "carol"]
     carol = rows[2]
@@ -361,7 +397,7 @@ async def test_lenders_api_lists_invited_names_that_have_not_connected(admin, ho
 
 async def test_lenders_api_survives_numbers_that_are_not_json(admin, host):
     nan, inf = float("nan"), float("inf")
-    link = await join(host.mgr, "alice", agent_version=nan, protocol=inf, capabilities={"resumable": nan, "x": inf},
+    link = await join(host, "alice", agent_version=nan, protocol=inf, capabilities={"resumable": nan, "x": inf},
                       limits={"five_hour": nan, "weekly": inf, "force": nan})
     await host.mgr.on_agent_message(link, {
         "type": "usage", "ts": nan, "friend_limits": {"five_hour": inf},
@@ -377,7 +413,7 @@ async def test_lenders_api_survives_numbers_that_are_not_json(admin, host):
 
 
 async def test_send_task_to_a_chosen_lender(admin, host):
-    sent = await two_lenders(host.mgr)
+    sent = await two_lenders(host)
     r = await admin.post("/admin/api/tasks", json={"prompt": "one", "lender": "alice"}, headers=H)  # bob has more room
     assert r.status_code == 200 and r.json()["lender"] == "alice"
     assert sent["alice"][-1]["type"] == "task_start" and sent["alice"][-1]["task_id"] == r.json()["task_id"]
@@ -393,7 +429,7 @@ async def test_send_task_to_a_chosen_lender(admin, host):
 @pytest.mark.parametrize("lender", [0, False, [], {}, 0.0, True, ["bob"]])
 async def test_send_task_with_a_lender_that_is_not_a_name_is_refused(admin, host, lender):
     # "empty" values of another type must not be read as "automatic": only a missing, null or "" lender is
-    sent = await two_lenders(host.mgr)
+    sent = await two_lenders(host)
     r = await admin.post("/admin/api/tasks", json={"prompt": "one", "lender": lender}, headers=H)
     assert r.status_code == 400 and "送り先" in r.json()["detail"]
     assert host.mgr.tasks == {} and all(m["type"] != "task_start" for m in sent["alice"] + sent["bob"])
@@ -401,15 +437,15 @@ async def test_send_task_with_a_lender_that_is_not_a_name_is_refused(admin, host
 
 @pytest.mark.parametrize("body", [{}, {"lender": None}, {"lender": ""}])
 async def test_send_task_without_a_lender_is_automatic(admin, host, body):
-    sent = await two_lenders(host.mgr)
+    sent = await two_lenders(host)
     r = await admin.post("/admin/api/tasks", json={"prompt": "one", **body}, headers=H)
     assert r.status_code == 200 and r.json()["lender"] == "bob"  # the one with the most room
     assert sent["bob"][-1]["task_id"] == r.json()["task_id"]
 
 
 async def test_undo_refused_for_every_task_in_progress(admin, host):
-    await join(host.mgr, "alice")
-    await join(host.mgr, "bob")
+    await join(host, "alice")
+    await join(host, "bob")
     tids = [(await admin.post("/admin/api/tasks", json={"prompt": p}, headers=H)).json()["task_id"]
             for p in ("one", "two")]
     assert {host.mgr.tasks[t].lender for t in tids} == {"alice", "bob"}

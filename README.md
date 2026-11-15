@@ -20,6 +20,7 @@ GitHub の **Releases** から 2 つの zip を取得します。v0.2.0 の配�
 | `codex-bridge-friend-v0.2.0.zip` | 知人 | 展開して `codex-bridge-agent.exe` を起動し、自分用の招待コードを貼る。中の「使い方.md」を参照 |
 
 v0.1 の exe も、v0.2 の依頼主側につなげられます。知人側の新しい画面と設定には v0.2 の exe が必要です。更新するときは依頼主側を先に更新してください。
+メイン以外のフォルダを使うには、知人側の exe も v0.2 が必要です（v0.1 の exe はメインのフォルダだけで作業できます）。
 
 リリースの作り方（開発者向け）: `uv run python scripts/build_release.py` で `release/` に 2 つの zip ができます。
 
