@@ -4,7 +4,7 @@
 
 **Goal:** v0.2 のリリース前に、利用者が画面を触って出した指摘（画面の使いにくさ・招待の入れ直し・走査の遅さ・規則の詰まり・exe が 2 つあること）をすべて直す。
 
-**Architecture:** 既存の feat/v0.2 ブランチ（HEAD 2677798）の上に積む。走査は「パスを 1 件ずつ解決する」のをやめ、リンクの所だけ解決する。画面は共通部品（common/web/ui.js）を直し、管理画面と貸す人の画面で同じ形にする。exe は 1 つ（`codex-bridge.exe`）にし、引数で役割を分ける。
+**Architecture:** 既存の feat/v0.2 ブランチ（HEAD 2677798）の上に積む。走査は「パスを 1 件ずつ解決する」のをやめ、リンクの所だけ解決する。画面は共通部品（common/web/ui.js）を直し、管理画面と貸す人の画面で同じ形にする。exe は 1 つ（`codex-bridge.exe`）にし、起動時のダイアログ（.bat からは引数）で役割を分ける。貸す側は 1 つの画面で接続先を複数持ち、作業は全体で 1 つずつ行う。
 
 **Tech Stack:** Python 3.12 / FastAPI / uvicorn / asyncio、素の JS（共通部品 ui.js）、PyInstaller、Windows（NTFS のジャンクション、DPAPI）、ripgrep（vendor/rg.exe）
 
@@ -18,7 +18,11 @@
 - R4 貸している人の画面: 承認の待ち時間を「無し」（期限なし）にできる。
 - R5 貸している人の画面: 招待コードを画面から入れ直せる（失効したときに exe の再設定が要らない）。
 - R6 exe は 1 つにまとめる（利用者の決定）。貸す側と使う側は、起動時のダイアログで選べる（利用者の指示）。
-- R11 貸す側は、1 台の PC で複数同時に起動できる（利用者の指示）。それぞれが自分の招待コード・設定・作業ログ・画面を持つ。
+- R11 貸す側は 1 つの exe・1 つの画面のまま、画面から接続先（招待コード）を複数追加できる（利用者の指示。複数起動はしない）。
+  - 上限（使用量の上限と強制停止）は全体で共通（同じ Codex の利用枠のため）。
+  - 使える機能の制限・事前承認・セッションの使い捨て・作業ログの見せ方は、接続先ごとに分ける。
+  - 作業は全体で同時に 1 つだけ。ほかの接続先の作業中は、依頼主の host に「作業中」と伝わり、自動の振り分けから外れる。
+  - 保存場所・作業フォルダ・記録の保管日数は全体で共通。
 - R7 フォルダの走査を必ず速くする。目標: 5000 ファイルで 0.3 秒以内、10 万ファイルで 3 秒以内（この PC で計測。v0.2 の修正前は 5000 ファイル 3.36 秒、修正後 9.76 秒）。
 - R8 「一時停止などができなくなる状態」は、画面にはっきり出す（そして直せるようにする）。
 - R9 画面は撮影して見ながら作る。各画面の作業は、撮影画像の目視確認が終わるまで完了にしない。
@@ -35,10 +39,11 @@
 ## Review Focus
 
 1. 大きなフォルダ（数万ファイル、深い入れ子、ジャンクションやシンボリックリンクを含む）でも走査が速く、リンクの先がデータフォルダや共有外を指していれば今までどおり見えない → Task 1 のテスト（リンク経由の拒否）と計測。
-2. 招待コードを入れ直したとき、作業中のタスクや承認待ちがあれば断る（途中で接続先が変わって記録が迷子にならない）→ Task 4 のテスト。
+2. 招待コードを入れ直す・接続先を外すとき、その接続先で作業中のタスクや承認待ちがあれば断る（途中で接続先が変わって記録が迷子にならない）→ Task 5 のテスト。
 3. 承認の待ち時間「無し」のまま exe を終了・再接続しても、承認待ちが消えずに送り直される → Task 4 のテスト（v0.2 の Review Focus 4 と同じ動き）。
-4. 1 つにまとめた exe を、ダブルクリック（ダイアログ）と .bat（使う側）の両方で起動したとき、使う側のコマンドの文字がコンソールに出る。貸す側を 2 つ同時に動かしても、設定・招待・作業ログ・画面のポートが混ざらない → Task 5 のテスト（`test_profiles`）と Task 6 の確認。
+4. 2 つの接続先から同時に依頼が届いても、始まるのは 1 つだけで、もう一方の依頼主には「別の依頼主の作業中」と伝わり、作業中のまま固まらない。接続先ごとの事前承認・機能の制限・作業ログが混ざらない → Task 5 のテスト。
 5. 規則が詰まった状態（データフォルダを含むフォルダが規則に残っている）でも、一時停止・コマンド実行の切り替え・そのフォルダを外す操作はできる → Task 2 のテスト。
+6. 1 つにまとめた exe を、ダブルクリック（ダイアログ）と .bat（使う側）の両方で起動したとき、使う側のコマンドの文字がコンソールに出る。v0.2 までの貸す側の設定と招待コードが、最初の接続先としてそのまま残る → Task 5・6 のテストと Task 7 の確認。
 
 ---
 
@@ -117,77 +122,97 @@
   - 撮影画像は `.superpowers/sdd/2026-11-16-feedback/shots/task-3/` に置く（リポジトリには入れない）。
 - [ ] **Step 6: Commit** — `fix(ui): shorter task detail; invite copy shows it worked`
 
-### Task 4: 貸している人の画面 — 使用量と上限を 1 か所に、待ち時間「無し」、招待の入れ直し（R3, R4, R5, R9）
+### Task 4: 貸している人の画面 — 使用量と上限を 1 か所に、承認の待ち時間「無し」（R3, R4, R9）
 
 **Files:**
 - Modify: `src/codex_bridge/agent/static/index.html`, `app.js`, `settings.js`, `style.css`
 - Modify: `src/codex_bridge/agent/settings.py:48,86`（`timeout_min` に None を許す）、`src/codex_bridge/agent/pre_approval.py:67,106`（None なら期限なし）
-- Modify: `src/codex_bridge/agent/ui.py`（`POST /api/invite`、overview に `invite_problem`）、`src/codex_bridge/agent/control_client.py`（接続先の差し替え）、`src/codex_bridge/agent/main.py`（差し替えのとき Codex の app-server を起動し直す）
-- Test: `tests/agent/test_settings.py`, `tests/agent/test_pre_approval.py`, `tests/agent/test_ui.py`
-
-**Interfaces:**
-- Consumes: `parse_invite(text) -> Invite`（common/invite.py）、`save_invite(directory, invite)`（agent/setup.py）
-- Produces: `ControlClient.replace_invite(invite: Invite) -> None`（今の接続を閉じ、新しい接続先で繋ぎ直す）。`POST /api/invite {code: str}` → 200 `{host_name}`／400（読めないコード）／409（作業中・承認待ちあり）。overview に `invite_problem: null | "rejected"`（接続が 401/403 で断られているとき "rejected"）。
+- Test: `tests/agent/test_settings.py`, `tests/agent/test_pre_approval.py`
 
 - [ ] **Step 1: 失敗するテスト**
   - `test_timeout_none_is_allowed_and_default_stays_30`: `update({"pre_approval": {"timeout_min": None}})` が通る。既定は 30 のまま。0 や負は今までどおり拒否。
   - `test_no_timeout_means_never_expires`: 待ち時間が None の承認待ちは、時計を 1 年進めても期限切れにならない。
   - `test_no_timeout_pending_is_resent_after_reconnect`: その承認待ちが再接続のあと `hello` の後に送り直される。
-  - `test_replace_invite_reconnects_and_saves`: `POST /api/invite` で新しいコードを入れると、invite.bin が新しい内容になり、`replace_invite` が呼ばれ、overview の `host_name` が変わる。
-  - `test_replace_invite_refused_while_busy`: 作業中または承認待ちのときは 409、何も変わらない。
-  - `test_replace_invite_bad_code`: 読めないコードは 400、何も変わらない。
-  - `test_invite_problem_shown_when_rejected`: 接続が 403 で断られている間、overview の `invite_problem` が "rejected"。
-  - 書き込みは今までどおり `X-Codex-Bridge: 1` が必須。
 - [ ] **Step 2: 失敗を確かめる**
-- [ ] **Step 3: 実装（設定と承認）** — `timeout_min` の検証を「None か 1〜MAX_TIMEOUT_MIN」に。期限の計算は None なら行わない。
-- [ ] **Step 4: 実装（招待の入れ直し）** — 保存 → `replace_invite` → Codex の app-server は接続先の URL と合言葉を引数で持つので、作業中でなければ新しい値で起動し直す。
-- [ ] **Step 5: 画面**
+- [ ] **Step 3: 実装** — `timeout_min` の検証を「None か 1〜MAX_TIMEOUT_MIN」に。期限の計算は None なら行わない。
+- [ ] **Step 4: 画面**
   - 使用量の欄を管理画面と同じ形にする: 各枠のバーのすぐ右に「あなたの上限 [ 80 ] %」の入力、欄の下に「超えたらすぐ強制的に止める」と「保存」。設定の欄から上限の入力は消す（二重に置かない）。バーの線（依頼主の線・あなたの線）は今のまま。
   - 事前承認の待ち時間: 「[ 30 ] 分」の入力の隣に「待ち時間なし（期限なしで待つ）」のチェック。チェックすると入力を無効にし、None を保存。
-  - 今の状態の欄に「接続先の招待コードを入れ直す」ボタン。押すと入力欄と「つなぎ直す」が開く。`invite_problem` が "rejected" のときは、欄の上に赤い帯「招待コードが無効になっています。依頼主から新しいコードをもらい、ここに入れてください。」を出し、入力欄を最初から開く。
-- [ ] **Step 6: 通過を確かめる**
-- [ ] **Step 7: 撮影と目視（R9。これが終わるまで完了にしない）** — Task 3 の Step 5 と同じ決まり。状態: 通常（バーと上限の入力が並ぶ）、上限超え、待ち時間なしにチェック、招待が無効の帯、招待の入れ直し欄を開いたところ。管理画面の「Codex を貸している人」の欄の撮影と並べて、バーと上限の並びが同じ考え方になっていることを確かめて報告に書く。撮影画像は `.superpowers/sdd/2026-11-16-feedback/shots/task-4/`。
-- [ ] **Step 8: Commit** — `feat(agent): usage and limits together; no-timeout approval; re-enter invite on screen`
+- [ ] **Step 5: 通過を確かめる**
+- [ ] **Step 6: 撮影と目視（R9。これが終わるまで完了にしない）** — Task 3 の Step 5 と同じ決まり。状態: 通常（バーと上限の入力が並ぶ）、上限超え、待ち時間なしにチェック。管理画面の「Codex を貸している人」の欄の撮影と並べて、バーと上限の並びが同じ考え方になっていることを確かめて報告に書く。撮影画像は `.superpowers/sdd/2026-11-16-feedback/shots/task-4/`。
+- [ ] **Step 7: Commit** — `feat(agent): usage and limits side by side; approval can wait without a time limit`
 
-### Task 5: exe を 1 つにまとめ、起動時のダイアログで役割を選ぶ。貸す側は複数起動できる（R6, R11）
+### Task 5: 貸す側の画面から接続先（招待コード）を追加・入れ直し・外す（R5, R11, R9）
 
 **Files:**
-- Create: `src/codex_bridge/entry.py`（役割の振り分け）、`src/codex_bridge/launcher.py`（起動時のダイアログ。tkinter。今の `agent.main.ask_invite` と同じ作り）、`src/codex_bridge/agent/profiles.py`（貸す側のプロファイル）、`scripts/codex_bridge_entry.py`, `codex-bridge.spec`
-- Delete: `scripts/host_entry.py`, `scripts/agent_entry.py`, `codex-bridge-host.spec`, `codex-bridge-agent.spec`
-- Modify: `src/codex_bridge/agent/main.py`（プロファイルを受け取る。画面のポートと単一起動の印をプロファイルごとに）、`src/codex_bridge/agent/setup.py`（`data_root()` をプロファイルごとに）、`scripts/make_bats.py`（と生成される `setup.bat` `start.bat` `stop.bat` `install-mcp.bat`）、`scripts/build_release.py`, `pyproject.toml`（`[project.scripts]` に `codex-bridge` を足す。開発用の `codex-bridge-host` / `codex-bridge-agent` は残す）
-- Modify: `README.md`, `docs/operation-guide.md`, `docs/friend-guide.md`（exe の名前・起動のダイアログ・複数の貸す側）
-- Test: `tests/test_entry.py`, `tests/agent/test_profiles.py`
+- Create: `src/codex_bridge/agent/connections.py`（接続先の一覧の保存と読み込み）
+- Modify: `src/codex_bridge/agent/main.py`（接続先ごとに `ControlClient` と Codex の app-server を持つ）、`src/codex_bridge/agent/runner.py` と `pre_approval.py`（作業は全体で 1 つ。接続先ごとの設定を使う）、`src/codex_bridge/agent/settings.py`（共通の設定と接続先ごとの設定に分ける）、`src/codex_bridge/agent/setup.py`（invite.bin を接続先ごとに）、`src/codex_bridge/agent/control_client.py`、`src/codex_bridge/agent/ui.py`、`src/codex_bridge/agent/ui_tasks.py`、`src/codex_bridge/agent/worklog.py`（記録に接続先を持たせる）、`src/codex_bridge/agent/static/*`
+- Modify: `src/codex_bridge/host/tasks.py`, `src/codex_bridge/host/lenders.py`（貸す人が「ほかの依頼主の作業中」のとき振り分けない）、`src/codex_bridge/common/protocol.py`
+- Test: `tests/agent/test_connections.py`, `tests/agent/test_ui.py`, `tests/host/test_lenders.py`, `tests/integration/test_host_agent.py`
 
 **Interfaces:**
 - Produces:
-  - `codex_bridge.entry.main(argv: list[str]) -> int` — `argv` が空 → 起動のダイアログを出し、選ばれた役割で動く（キャンセルなら 0）。先頭が `host` → 残りを `host.main.main` に渡す（.bat 用。ダイアログを出さない）。先頭が `agent` → `agent [--profile <名前>]` で、その貸す側をダイアログなしで動かす。それ以外 → 使い方を出して 2。
-  - `codex_bridge.launcher.choose_role(profiles: list[Profile]) -> Choice | None` — `Choice = ("host",) | ("agent", profile_name)`。ダイアログの中身: 「使う側（自分の PC のフォルダを Codex に使わせる）」のボタン 1 つ、「貸す側」の一覧（プロファイルごとに 1 行。名前・接続先・今動いているか）、「新しい貸す側を追加」（名前を入れる）。動いている貸す側を選んだら、新しく起動せず、その画面をブラウザで開く。
-  - `codex_bridge.agent.profiles`:
-    - `Profile(name: str, home: Path, ui_port: int)`
-    - `list_profiles() -> list[Profile]`、`create_profile(name: str) -> Profile`（名前は 1〜32 文字、ファイル名に使えない文字は拒否、同じ名前は拒否）
-    - 既定のプロファイル `default` は、今の保存場所（`%LOCALAPPDATA%\codex-bridge-agent` と location.txt の仕組み）と画面のポート 8766 をそのまま使う（v0.2 までの利用者の設定・招待がそのまま残る）。
-    - 追加のプロファイルは `%LOCALAPPDATA%\codex-bridge-agent\profiles\<名前>\` を自分の保存場所の起点にし（location.txt もその中）、画面のポートは 8767 から空いている番号を選んでプロファイルに保存する（次からも同じ番号）。
-    - 単一起動の印（Mutex）はプロファイルごと。同じプロファイルの二重起動は、すでに動いている方の画面を開いて終わる。違うプロファイルは同時に動く。
-  - 使う側を選んだとき: exe の隣に `host.yaml` がなければ `setup` を、あれば `start` を、コンソールの窓を開いて（`AllocConsole`）動かす。
-  - `CODEX_BRIDGE_AGENT_HOME`（試験用の環境変数）は今までどおり効く（プロファイルより優先）。
+  - `Connection(id: str, invite: Invite, settings: dict)` — `id` は追加のときに作る短いランダムな文字列（パスに使える文字だけ）。`settings` は接続先ごとの部分: `features`、`pre_approval`、`disposable`、`log_visibility`。
+  - 共通の設定（`AgentSettings` に残すもの）: `limits`、`workdir`、`log_retention_days`。保存場所の移動も共通。
+  - `ConnectionStore(home: Path)`: `list() -> list[Connection]`、`add(code: str) -> Connection`（読めないコードは ValueError、同じ接続先（URL と名前が同じ）がすでにあれば ValueError）、`replace_invite(id, code) -> Connection`、`remove(id) -> None`、`update_settings(id, patch) -> dict`（今の `SettingsStore.update` と同じ検証）。保存は `<保存場所>/connections/<id>/`（`invite.bin` は DPAPI、`settings.json`）。
+  - 移行: 起動時、`<保存場所>/invite.bin` があって `connections/` がなければ、それと今の設定の接続先ごとの部分を最初の接続先に移す（元の invite.bin は移したあとに消す。途中で失敗したら元のまま）。
+  - 作業は全体で 1 つ: どれかの接続先で作業中・承認待ちのあいだは、ほかの接続先から来た `task_start` / `task_followup` を `task_state rejected_by_lender`（report「貸している人は、ほかの依頼主の作業をしています。あとでもう一度頼むか、ほかの人に頼んでください。」）で断る。あわせて、作業の始まりと終わりで、ほかの接続先に `lender_status {busy_elsewhere: bool}` を送る。
+  - host: `lender_status` を受けたら、その人を `busy_elsewhere` の間は自動の振り分けから外し、名前を指定した依頼には今の「作業中」と同じ答えを返す。v0.1 の exe は送ってこないので何も変わらない。管理画面の「Codex を貸している人」の表では、その人の作業中のタスクの列に「ほかの依頼主の作業中」と出す。
+  - 貸す側の API（書き込みは `X-Codex-Bridge: 1` が必須）: `GET /api/connections` → `[{id, host_name, connected, invite_problem: null|"rejected", busy}]`、`POST /api/connections {code}` → 201／400、`PUT /api/connections/{id}/invite {code}` → 200／400／409（その接続先で作業中・承認待ち）、`DELETE /api/connections/{id}` → 200／409（同じ）、`GET/PUT /api/connections/{id}/settings`。タスク・承認待ち・セッションの API の応答に `connection_id` と `host_name` を足す。
+  - 招待が無効（接続が 401/403 で断られている）とき、その接続先の `invite_problem` を "rejected" にし、再接続は控えめに続ける（今と同じ待ち時間の伸ばし方）。
 
 - [ ] **Step 1: 失敗するテスト**
-  - `tests/test_entry.py`: 引数なし → `choose_role` が呼ばれ、`("host",)` なら host、`("agent","work")` なら agent が `work` で動く、`None` なら 0／`host start --config host.yaml` → host の main が `["start", "--config", "host.yaml"]` で呼ばれ、ダイアログは出ない／`agent --profile work` → ダイアログなしで agent／`foo` → 2。
-  - `tests/agent/test_profiles.py`: 既定のプロファイルの保存場所と 8766 が今と同じ／追加したプロファイルが自分の保存場所と 8767 以降の空きポートを持ち、次に読んでも同じ／ポートが使用中なら次の番号／名前の検証／2 つのプロファイルの設定・招待・作業ログが混ざらない。
-- [ ] **Step 2: 実装（振り分けとダイアログ）** — exe はウィンドウなし（`console=False`）で作る。`host` のときは `ctypes.windll.kernel32.AttachConsole(-1)`（失敗したら `AllocConsole()`）でコンソールにつなぎ、`sys.stdout` / `sys.stderr` / `sys.stdin` を `CONOUT$` / `CONIN$` で開き直す。
-- [ ] **Step 3: 実装（プロファイル）** — agent の main・setup・画面のポート・Mutex・トレイの表示（「codex-bridge（貸す側: <名前>）」）・画面の見出しにプロファイル名を通す。Codex のログイン（`~/.codex`）はプロファイルの間で共通（v0.2 の範囲では分けない。文書にそう書く）。
-- [ ] **Step 4: spec とビルド** — `codex-bridge.spec` 1 つ（両方の静的ファイルと hiddenimports を合わせる）。`build_release.py` は admin の zip に `codex-bridge.exe`＋.bat＋`vendor/rg.exe`＋docs、friend の zip に `codex-bridge.exe`＋`使い方.md`。.bat は `"%~dp0codex-bridge.exe" host <cmd> --config host.yaml`。
-- [ ] **Step 5: 文書** — 3 つの文書に、exe の名前、起動のダイアログ、貸す側を複数動かす方法（「新しい貸す側を追加」、それぞれに招待コード、画面のポートは 8767 から）を書く。
-- [ ] **Step 6: 通過を確かめ、ダイアログを撮影** — 全テスト。起動のダイアログ（プロファイル 0 個・2 個のとき）をスクリーンショットで撮り、目で確かめる（`.superpowers/sdd/2026-11-16-feedback/shots/task-5/`）。
-- [ ] **Step 7: Commit** — `build: one codex-bridge.exe with a start-up role dialog; several lender profiles`
+  - `test_add_two_connections_and_both_connect`: 2 つの偽の host に 2 つの招待コードで接続先を足すと、両方に `hello` が届く。
+  - `test_only_one_task_at_a_time`: A から作業が始まっている間に B から `task_start` が来ると、B に `rejected_by_lender`（上の report）が返り、B に `lender_status {busy_elsewhere: true}` が届いている。A の作業が終わると B に `busy_elsewhere: false`。承認待ちのあいだも同じ。
+  - `test_settings_are_per_connection_but_limits_are_shared`: A だけ事前承認をオンにすると、A の依頼は承認待ちに、B の依頼はすぐ始まる。上限を変えると両方に効く。機能の制限が接続先ごとに Codex の起動の引数に入る。
+  - `test_replace_invite_and_remove_refused_while_that_connection_is_busy`: 409。ほかの接続先が作業中でも、自分が作業中でなければ入れ直し・外しはできる。
+  - `test_rejected_invite_is_reported`: 接続が 403 で断られている接続先の `invite_problem` が "rejected"。新しいコードを入れると "rejected" が消えてつながる。
+  - `test_migrates_single_invite_to_first_connection`: v0.2 までの `invite.bin` と設定がある保存場所で起動すると、最初の接続先として同じ招待と設定が残り、作業ログも見える。
+  - `test_worklog_and_sessions_show_their_connection`: タスク一覧・詳細・セッションに `host_name` が入る。
+  - host: `test_busy_elsewhere_lender_is_skipped_by_auto_routing` と `test_named_busy_elsewhere_lender_gets_busy_answer`（`tests/host/test_lenders.py`）。
+- [ ] **Step 2: 失敗を確かめる**
+- [ ] **Step 3: 実装（貸す側の中身）** — 接続先ごとに `ControlClient` と Codex の app-server（接続先の URL と合言葉を引数に持つため）を持つ。app-server は依頼が来たときに起動し、しばらく使わなければ止めてよい。作業中かどうかの判定と 1 つずつの制御は 1 か所（runner のロック）にまとめる。
+- [ ] **Step 4: 実装（host）** — `lender_status` の受け取りと振り分けからの除外。`protocol.py` に型を足す。
+- [ ] **Step 5: 画面**
+  - 「今の状態」の欄を「接続先」の欄にする。接続先ごとに 1 行: 依頼主（接続先のアドレス）、接続状態、作業中か、「設定」「招待コードを入れ直す」「外す」。欄の下に「接続先を追加」（招待コードを貼る欄と「追加」ボタン）。
+  - `invite_problem` が "rejected" の行は赤くし、「招待コードが無効になっています。依頼主から新しいコードをもらって入れ直してください。」と、入れ直しの欄を最初から開いて出す。
+  - 接続先の「設定」を押すと、その接続先の設定（使える機能の制限・事前承認・セッションの使い捨て・道具の記録の見せ方）が開く。共通の設定（保存場所・作業フォルダ・記録の保管日数）は今の設定の欄に残し、上限は使用量の欄（Task 4）に置く。
+  - タスク一覧・承認待ちの欄・セッションの一覧に、どの依頼主のものかを出す。接続先で絞り込める。
+- [ ] **Step 6: 通過を確かめる** — 全テスト。
+- [ ] **Step 7: 撮影と目視（R9。これが終わるまで完了にしない）** — Task 3 の Step 5 と同じ決まり。状態: 接続先 2 つ（片方作業中）、招待が無効の行、接続先の設定を開いたところ、接続先を追加する欄。撮影画像は `.superpowers/sdd/2026-11-16-feedback/shots/task-5/`。
+- [ ] **Step 8: 文書** — `docs/friend-guide.md` に、接続先の追加・入れ直し・外し方、設定のどれが共通でどれが接続先ごとか、作業は同時に 1 つであることを書く。`docs/operation-guide.md` に、貸す人がほかの依頼主の作業中のときの見え方を書く。
+- [ ] **Step 9: Commit** — `feat(agent): several hosts from one lender screen; one task at a time`
 
-### Task 6: 本物での確認と撮影（Review Focus 1〜5、R9）
+### Task 6: exe を 1 つにまとめ、起動時のダイアログで役割を選ぶ（R6）
+
+**Files:**
+- Create: `src/codex_bridge/entry.py`（役割の振り分け）、`src/codex_bridge/launcher.py`（起動時のダイアログ。tkinter。今の `agent.main.ask_invite` と同じ作り）、`scripts/codex_bridge_entry.py`, `codex-bridge.spec`
+- Delete: `scripts/host_entry.py`, `scripts/agent_entry.py`, `codex-bridge-host.spec`, `codex-bridge-agent.spec`
+- Modify: `scripts/make_bats.py`（と生成される `setup.bat` `start.bat` `stop.bat` `install-mcp.bat`）、`scripts/build_release.py`, `pyproject.toml`（`[project.scripts]` に `codex-bridge` を足す。開発用の `codex-bridge-host` / `codex-bridge-agent` は残す）
+- Modify: `README.md`, `docs/operation-guide.md`, `docs/friend-guide.md`（exe の名前と起動のダイアログ）
+- Test: `tests/test_entry.py`
+
+**Interfaces:**
+- Produces:
+  - `codex_bridge.entry.main(argv: list[str]) -> int` — `argv` が空 → 起動のダイアログを出し、選ばれた役割で動く（キャンセルなら 0）。先頭が `host` → 残りを `host.main.main` に渡す（.bat 用。ダイアログを出さない）。先頭が `agent` → 貸す側をダイアログなしで動かす。それ以外 → 使い方を出して 2。
+  - `codex_bridge.launcher.choose_role() -> Literal["host", "agent"] | None` — ダイアログに 2 つの大きなボタン: 「使う側 — 自分の PC のフォルダを、ほかの人の Codex に使ってもらう」「貸す側 — 自分の Codex を、ほかの人に使ってもらう」。閉じたら None。
+  - 貸す側を選んだとき、すでに貸す側が動いていれば（今の単一起動の印で分かる）、新しく起動せずその画面（8766）をブラウザで開く。
+  - 使う側を選んだとき: exe の隣に `host.yaml` がなければ `setup` を、あれば `start` を、コンソールの窓を開いて（`AllocConsole`）動かす。
+
+- [ ] **Step 1: 失敗するテスト** — `tests/test_entry.py`: 引数なし → `choose_role` が呼ばれ、"host" なら host（`host.yaml` の有無で setup / start）、"agent" なら agent、None なら 0／`host start --config host.yaml` → host の main が `["start", "--config", "host.yaml"]` で呼ばれ、ダイアログは出ない／`agent` → ダイアログなしで agent／`foo` → 2。
+- [ ] **Step 2: 実装** — exe はウィンドウなし（`console=False`）で作る。`host` のときは `ctypes.windll.kernel32.AttachConsole(-1)`（失敗したら `AllocConsole()`）でコンソールにつなぎ、`sys.stdout` / `sys.stderr` / `sys.stdin` を `CONOUT$` / `CONIN$` で開き直す。
+- [ ] **Step 3: spec とビルド** — `codex-bridge.spec` 1 つ（両方の静的ファイルと hiddenimports を合わせる）。`build_release.py` は admin の zip に `codex-bridge.exe`＋.bat＋`vendor/rg.exe`＋docs、friend の zip に `codex-bridge.exe`＋`使い方.md`。.bat は `"%~dp0codex-bridge.exe" host <cmd> --config host.yaml`。
+- [ ] **Step 4: 文書** — 3 つの文書の exe の名前と起動のしかたを直す（貸す人は「codex-bridge.exe をダブルクリックして『貸す側』」、使う人は .bat か『使う側』）。
+- [ ] **Step 5: 通過を確かめ、ダイアログを撮影** — 全テスト。起動のダイアログをスクリーンショットで撮り、目で確かめる（`.superpowers/sdd/2026-11-16-feedback/shots/task-6/`）。
+- [ ] **Step 6: Commit** — `build: one codex-bridge.exe with a start-up role dialog`
+
+### Task 7: 本物での確認と撮影（Review Focus 1〜6、R9）
 
 このタスクは実装ではなく確認。コードは直さず、失敗は記録する。
 
-- [ ] **Step 1:** `uv run --no-sync python scripts/build_release.py`（前に `release/` の中身を一時フォルダへ退避し、あとで戻す）。zip を一時フォルダに展開し、`codex-bridge.exe` を引数なしで起動 → 起動のダイアログが出る。貸す側を 2 つ（既定と追加 1 つ）同時に動かし、トレイが 2 つ、画面が 8766 と 8767 で別々に開く。同じ貸す側をもう一度選ぶと、二重起動せず画面が開く。`setup.bat` / `start.bat` / `stop.bat` で使う側が動き、コンソールに文字が出る。保存場所は試験用（`CODEX_BRIDGE_AGENT_HOME` または一時フォルダ）にし、利用者の本物の貸す側の設定に触らない。
-- [ ] **Step 2:** 試験用の host（一時フォルダの host.yaml）と貸す側 1 つで、招待を失効 → 貸す人の画面に赤い帯 → 新しいコードを画面から入れる → つながる。
-- [ ] **Step 3:** 待ち時間なしの事前承認で依頼 → 長く待っても期限切れにならない → 許可で始まる。
+- [ ] **Step 1:** `uv run --no-sync python scripts/build_release.py`（前に `release/` の中身を一時フォルダへ退避し、あとで戻す）。zip を一時フォルダに展開し、`codex-bridge.exe` を引数なしで起動 → 起動のダイアログが出る。「貸す側」でトレイと 8766 の画面、もう一度起動して「貸す側」を選ぶと二重起動せず画面が開く。`setup.bat` / `start.bat` / `stop.bat` で使う側が動き、コンソールに文字が出る。貸す側の保存場所は試験用（`CODEX_BRIDGE_AGENT_HOME`）にし、利用者の本物の貸す側の設定に触らない。
+- [ ] **Step 2:** 試験用の host を 2 つ（一時フォルダの host.yaml、別のポート）と貸す側 1 つで、貸す側の画面から接続先を 2 つ足す。片方の host から依頼 → 作業中に、もう片方の host の管理画面で「ほかの依頼主の作業中」と出て、自動の振り分けで選ばれない。片方の招待を失効 → 貸す側の画面でその行が赤くなる → 新しいコードを入れ直す → つながる。
+- [ ] **Step 3:** 片方の接続先だけ事前承認・待ち時間なしにして依頼 → 長く待っても期限切れにならない → 許可で始まる。もう片方の接続先の依頼はすぐ始まる（作業が空いているとき）。
 - [ ] **Step 4:** 2 万ファイル以上の共有フォルダで find_files・grep・コマンド実行の前後の走査の時間を測る。
-- [ ] **Step 5:** 管理画面と貸す人の画面を撮り、Requirements R1〜R5・R8 を目で確かめる。撮影画像は `.superpowers/sdd/2026-11-16-feedback/shots/task-6/`。
+- [ ] **Step 5:** 管理画面と貸す人の画面を撮り、Requirements R1〜R5・R8・R11 を目で確かめる。撮影画像は `.superpowers/sdd/2026-11-16-feedback/shots/task-7/`。
 - [ ] **Step 6:** 起動したものをすべて止め、`git status` が空で、`release/` に v0.1.0 が残っていることを確かめる。
