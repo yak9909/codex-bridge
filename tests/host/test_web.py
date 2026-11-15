@@ -257,6 +257,16 @@ async def test_task_detail_has_what_the_page_shows(admin, host):
     assert again.result(tid)["finished"] == ended and again.result(tid)["created"] == t["created"]
 
 
+async def test_task_detail_carries_the_half_written_message(admin, host):
+    link = await join(host.mgr, "alice")
+    tid = (await admin.post("/admin/api/tasks", json={"prompt": "hello"}, headers=H)).json()["task_id"]
+    assert (await admin.get(f"/admin/api/tasks/{tid}")).json()["progress"] is None
+    await host.mgr.on_agent_message(link, {"type": "event", "task_id": tid, "kind": "progress",
+                                           "data": {"text": "要点 3: 在庫は"}})
+    t = (await admin.get(f"/admin/api/tasks/{tid}")).json()
+    assert t["progress"] == "要点 3: 在庫は" and t["events"] == []
+
+
 async def test_task_apis_answer_whatever_a_lender_sends_about_a_task(admin, host):
     # review I1: a NaN in a state or an event must not turn the task list or a task's detail into an error
     link = await join(host.mgr, "alice")

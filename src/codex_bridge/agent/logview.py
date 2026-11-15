@@ -16,6 +16,7 @@ VISIBLE = {
     "all": {"task_prompt", "final_report", "tool_call", "agent_message", "status", "state", "error",
             "started", "turn_completed"},
 }
+LOGGED_ELSEWHERE = {"tool_started", "plan", "reasoning_summary", "token_usage", "progress"}
 MAX_ENTRIES = 5000
 
 
@@ -29,8 +30,13 @@ def _normalize(m: dict) -> dict | None:
         return {**base, "kind": "final_report", "text": m.get("text") or ""}
     if t == "event":
         d = m.get("data") or {}
-        if m.get("kind") == "tool_call":
-            return {**base, "kind": "tool_call", "text": f"{d.get('tool')} {d.get('arguments', '')}"}
+        kind = m.get("kind")
+        if kind in ("tool_call", "tool_finished"):  # v0.2 sends tool_finished where v0.1 sent tool_call
+            args = d.get("arguments", "")
+            args = args if isinstance(args, str) else json.dumps(args, ensure_ascii=False)
+            return {**base, "kind": "tool_call", "text": f"{d.get('tool')} {args}"}
+        if kind in LOGGED_ELSEWHERE:  # in the work log (agent/worklog.py), not in this list
+            return None
         return {**base, "kind": m.get("kind"), "text": d.get("text") or d.get("status") or ""}
     if t == "task_state":
         return {**base, "kind": "state", "text": m.get("state", "")}

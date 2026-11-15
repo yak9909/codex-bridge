@@ -62,3 +62,17 @@ async def test_limits_api_defaults_save_and_notify(tmp_path):
         assert (await c.put("/api/limits", json={"five_hour": 150})).status_code == 400
         assert (await c.put("/api/limits", json={"five_hour": 70}, headers={"Host": "evil:1"})).status_code == 403
     assert LimitsStore(tmp_path / "limits.json").get() == {"five_hour": 70, "weekly": None, "force": True}
+
+
+def test_v02_tool_events_keep_showing_as_tool_calls_and_the_rest_adds_no_rows(tmp_path):
+    # the friend's page of v0.1 lists tool calls (under "files"); v0.2 sends tool_finished instead of tool_call.
+    # The new kinds belong to the work log, not to this list.
+    s = LogStore(tmp_path / "logs")
+    s.set_visibility("files")
+    for kind, data in [("tool_started", {"tool": "read_file", "arguments": {"path": "a.txt"}}),
+                       ("tool_finished", {"tool": "read_file", "arguments": {"path": "a.txt"}, "success": True}),
+                       ("plan", {"steps": []}), ("token_usage", {"input": 1, "output": 2}),
+                       ("reasoning_summary", {"text": "考え"})]:
+        s.add({"type": "event", "seq": 1, "task_id": "t1", "kind": kind, "data": data})
+    assert [(e["kind"], e["text"]) for e in s.visible()] == [("tool_call", 'read_file {"path": "a.txt"}')]
+    assert len(s.entries) == 1

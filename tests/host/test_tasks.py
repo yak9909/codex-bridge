@@ -315,3 +315,68 @@ async def test_records_spoilt_before_these_checks_do_not_break_the_lists(tmp_pat
     assert mgr.result("bad")["state"] == "completed" and mgr.result("bad")["report"] == "done after all"
     assert await mgr.start("next")
     assert '"state": "completed"' in (tasks / "bad.json").read_text(encoding="utf-8")
+
+
+# ---- what Codex is doing: new event kinds, and the half-written message (design 4.10, 6) ------------------
+async def test_the_new_event_kinds_are_kept_as_events(tmp_path, mgr, agent):
+    tid = await mgr.start("a")
+    kinds = {"plan": {"steps": [{"step": "読む", "status": "inProgress"}]}, "reasoning_summary": {"text": "考え"},
+             "tool_started": {"tool": "grep", "arguments": {"pattern": "x"}},
+             "tool_finished": {"tool": "grep", "arguments": "{}", "duration_ms": 3, "success": True,
+                               "result_summary": "ok"},
+             "token_usage": {"input": 10, "output": 2}, "tool_call": {"tool": "grep", "status": "completed"}}
+    for kind, data in kinds.items():
+        await agent.push("event", task_id=tid, kind=kind, data=data)
+    assert [(e["kind"], e["data"]) for e in mgr.events(tid)] == list(kinds.items())
+    assert [e["kind"] for e in TaskManager(tmp_path / "data", touched_fn=lambda t: []).events(tid)] == list(kinds)
+
+
+async def test_the_half_written_message_is_kept_in_memory_only(tmp_path, mgr, agent):
+    tid = await mgr.start("a")
+    seen = []
+    mgr.on_change.append(lambda: seen.append(mgr.progress(tid)))
+    assert mgr.progress(tid) is None
+    await agent.push("event", task_id=tid, kind="progress", data={"text": "要点 1: 売"})
+    await agent.push("event", task_id=tid, kind="progress", data={"text": "要点 1: 売上は"})  # only the latest counts
+    assert mgr.progress(tid) == "要点 1: 売上は" and seen[-1] == "要点 1: 売上は"  # watchers are told
+    assert mgr.events(tid) == [] and mgr.result(tid)["event_count"] == 0
+    assert not (mgr.dir / f"{tid}.jsonl").exists() and "売上" not in (mgr.dir / f"{tid}.json").read_text(encoding="utf-8")
+    assert TaskManager(tmp_path / "data", touched_fn=lambda t: []).progress(tid) is None
+    assert agent.last("ack")["seq"] == agent.seq
+
+
+async def test_the_half_written_message_goes_when_the_message_is_finished_or_the_task_ends(mgr, agent):
+    tid = await mgr.start("a")
+    await agent.push("event", task_id=tid, kind="progress", data={"text": "書きかけ"})
+    await agent.push("event", task_id=tid, kind="agent_message", data={"text": "書き終えた"})
+    assert mgr.progress(tid) is None and [e["kind"] for e in mgr.events(tid)] == ["agent_message"]
+    await agent.push("event", task_id=tid, kind="progress", data={"text": "次の書きかけ"})
+    await agent.push("task_state", task_id=tid, state="running", thread_id="th1")
+    assert mgr.progress(tid) == "次の書きかけ"
+    await agent.finish(tid)
+    assert mgr.progress(tid) is None
+
+
+@pytest.mark.parametrize("data", [None, "text", ["x"], {}, {"text": 5}, {"text": NAN}, {"text": None}])
+async def test_a_half_written_message_that_is_not_text_is_ignored(mgr, agent, data):
+    tid = await mgr.start("a")
+    await agent.push("event", task_id=tid, kind="progress", data={"text": "ok"})
+    await agent.push("event", task_id=tid, kind="progress", data=data)
+    assert mgr.progress(tid) == "ok" and mgr.events(tid) == []
+    as_json(mgr.progress(tid))
+
+
+async def test_the_half_written_message_is_cut_to_a_size_the_page_can_hold(mgr, agent):
+    tid = await mgr.start("a")
+    await agent.push("event", task_id=tid, kind="progress", data={"text": "あ" * 100_000})
+    assert len(mgr.progress(tid)) <= 20_000
+
+
+async def test_the_half_written_message_of_another_lenders_task_is_ignored(mgr, agent):
+    tid = await mgr.start("a")
+    other = FakeAgent.__new__(FakeAgent)
+    other.mgr, other.sent, other.seq = mgr, [], 0
+    other.link = mgr.attach("someone", other.send)
+    await other.push("hello", agent_version="0.1.0", codex_version="x", auth_mode="chatgpt")
+    await other.push("event", task_id=tid, kind="progress", data={"text": "not yours"})
+    assert mgr.progress(tid) is None

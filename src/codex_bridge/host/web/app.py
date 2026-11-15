@@ -201,7 +201,8 @@ def admin_router(host) -> APIRouter:
     @r.get("/api/tasks/{task_id}")
     async def task(task_id: str):
         try:
-            return {**host.mgr.result(task_id), "events": host.mgr.events(task_id)[-200:]}
+            return {**host.mgr.result(task_id), "events": host.mgr.events(task_id)[-200:],
+                    "progress": host.mgr.progress(task_id)}
         except ToolError as e:
             raise HTTPException(404, str(e))
 

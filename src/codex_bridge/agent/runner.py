@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
@@ -12,6 +13,7 @@ from ..common import protocol
 from .appserver import AppServer, AppServerError
 from .sessions import SessionRegistry
 from .usage import BlockNew, Interrupt, QuotaGuard, Steer, Suspend, Unblock
+from .worklog import WorkLog
 
 PREAMBLE = ("ファイルの一覧・検索・読み書き・コマンド実行は、MCP サーバー bridge の道具だけを使ってください。"
             "パスは共有フォルダからの相対パスです。作業フォルダ（cwd）は空で、使いません。"
@@ -19,6 +21,9 @@ PREAMBLE = ("ファイルの一覧・検索・読み書き・コマンド実行�
             "get_command_result（削除は同じ呼び出しのやり直し）で結果を待ってください。承認には数分かかることがあります。")
 NOT_OWNED = "このツールで作ったセッションではありません"
 SendFn = Callable[[dict], Awaitable[None]]
+TOOL_ITEMS = ("mcpToolCall", "dynamicToolCall", "commandExecution", "fileChange")
+PROGRESS_INTERVAL = 2.0  # the half-written message goes to the host at most this often (seconds)
+PROGRESS_MAX = 20_000
 
 
 @dataclass
@@ -30,6 +35,12 @@ class Current:
     cancelling: bool = False
     suspend_at: int | None = None
     followups: list[str] = field(default_factory=list)
+    progress: str = ""                 # the agent message being written (item/agentMessage/delta)
+    progress_item: str | None = None
+    progress_sent_at: float | None = None
+    tokens_in: int = 0                 # this turn so far, summed over its model calls
+    tokens_out: int = 0
+    tokens_seen: bool = False
 
 
 def _summ(v, n=300):
@@ -37,10 +48,47 @@ def _summ(v, n=300):
     return s if len(s) <= n else s[:n] + "…"
 
 
+def _cap(v, n=1000):
+    """A value of a tool call as it is sent: as it is when small, else as cut-off text (a write_file call carries a whole file)."""
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return _summ(v, n)
+    try:
+        dumped = json.dumps(v, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return _summ(v, n)
+    return v if len(dumped) <= n else dumped[:n] + "…"
+
+
+def _tool_name(item: dict):
+    return item.get("tool") or item.get("command") or item.get("type")
+
+
+def _tool_result(item: dict) -> str:
+    err = item.get("error")
+    if err:
+        return _summ(err.get("message") if isinstance(err, dict) and err.get("message") else err)
+    res = item.get("result")
+    if isinstance(res, dict):
+        texts = [c.get("text") for c in res.get("content") or [] if isinstance(c, dict) and isinstance(c.get("text"), str)]
+        return _summ("\n".join(texts)) if texts else ""
+    return _summ(res) if res else _summ(item.get("aggregatedOutput") or "")
+
+
+def _duration_ms(item: dict):
+    ms = item.get("durationMs")
+    if isinstance(ms, (int, float)) and not isinstance(ms, bool):
+        return ms
+    a, b = item.get("startedAtMs"), item.get("completedAtMs")
+    return b - a if isinstance(a, (int, float)) and isinstance(b, (int, float)) else None
+
+
 class AgentRunner:
     def __init__(self, app: AppServer, guard: QuotaGuard, sessions: SessionRegistry, send: SendFn,
                  usage_interval: float = 60, tick_interval: float = 5,
-                 on_log: Callable[[dict], None] | None = None) -> None:
+                 on_log: Callable[[dict], None] | None = None, worklog: WorkLog | None = None,
+                 progress_interval: float = PROGRESS_INTERVAL, clock: Callable[[], float] = time.monotonic) -> None:
         self.app = app
         self.guard = guard
         self.sessions = sessions
@@ -48,6 +96,9 @@ class AgentRunner:
         self.usage_interval = usage_interval
         self.tick_interval = tick_interval
         self.on_log = on_log or (lambda e: None)
+        self.worklog = worklog
+        self.progress_interval = progress_interval
+        self.clock = clock
         self.cur: Current | None = None
         self.log_visibility = "summary"
         self.friend_limits = {"five_hour": None, "weekly": None, "force": False}
@@ -58,6 +109,7 @@ class AgentRunner:
 
     # ---- lifecycle -----------------------------------------------------
     async def start(self) -> None:
+        self._prune_worklog()
         self._tasks = [asyncio.create_task(self._pump()), asyncio.create_task(self._usage_loop()),
                        asyncio.create_task(self._tick_loop())]
 
@@ -83,14 +135,33 @@ class AgentRunner:
         for seq in sorted(self._unacked):
             await self._safe_send(self._unacked[seq])
 
+    def _record(self, task_id: str | None, kind: str, data) -> None:
+        """Into the work log (design 4.10); a disk error must never keep Codex's progress from the host."""
+        if self.worklog is None or not task_id:
+            return
+        try:
+            self.worklog.add(task_id, kind, data)
+        except Exception as e:
+            self.on_log({"type": "error", "text": f"記録に失敗しました: {type(e).__name__}: {e}"})
+
+    def _prune_worklog(self) -> None:
+        if self.worklog is not None:
+            try:
+                self.worklog.prune()
+            except Exception as e:
+                self.on_log({"type": "error", "text": f"古い記録を消せませんでした: {type(e).__name__}: {e}"})
+
     async def _event(self, kind: str, **data) -> None:
         if self.cur:
+            self._record(self.cur.task_id, kind, data)
             await self._send_seq("event", task_id=self.cur.task_id, kind=kind, data=data)
 
     async def _state(self, state: str, report: str | None = None, resume_at: int | None = None,
                      task_id: str | None = None, thread_id: str | None = None) -> None:
         cur = self.cur
-        await self._send_seq("task_state", task_id=task_id or (cur.task_id if cur else None), state=state,
+        task_id = task_id or (cur.task_id if cur else None)
+        self._record(task_id, "state", {"state": state, "report": report, "resume_at": resume_at})
+        await self._send_seq("task_state", task_id=task_id, state=state,
                              thread_id=thread_id or (cur.thread_id if cur else None), report=report,
                              resume_at=resume_at)
 
@@ -137,6 +208,8 @@ class AgentRunner:
                 return
             self.cur = Current(task_id=m["task_id"])
             self.on_log({"type": "task_prompt", "task_id": m["task_id"], "prompt": m["prompt"]})
+            self._prune_worklog()
+            self._record(m["task_id"], "task_prompt", {"text": m["prompt"]})
             try:
                 cont = m.get("continue_thread_id")
                 if cont:
@@ -158,6 +231,7 @@ class AgentRunner:
         if cur is None or cur.task_id != m["task_id"] or cur.thread_id is None:
             return
         self.on_log({"type": "task_prompt", "task_id": cur.task_id, "prompt": m["text"]})
+        self._record(cur.task_id, "task_prompt", {"text": m["text"]})
         if cur.turn_id:
             try:
                 await self.app.turn_steer(cur.thread_id, cur.turn_id, m["text"])
@@ -216,15 +290,45 @@ class AgentRunner:
         if method == "turn/started":
             if cur:
                 cur.turn_id = p["turn"]["id"]
+                cur.tokens_in = cur.tokens_out = 0
+                cur.tokens_seen = False
             await self._apply(self.guard.on_turn_started(p["turn"]["id"]))
+        elif method == "item/agentMessage/delta":
+            if cur:
+                await self._on_delta(cur, p)
+        elif method == "item/started":
+            item = p.get("item") or {}
+            if item.get("type") in TOOL_ITEMS and cur:
+                await self._event("tool_started", tool=_tool_name(item), arguments=_cap(item.get("arguments")))
         elif method == "item/completed":
             item = p.get("item") or {}
             if item.get("type") == "agentMessage" and cur:
                 cur.last_message = item.get("text")
+                cur.progress, cur.progress_item = "", None  # complete: the next message starts afresh
                 await self._event("agent_message", text=item.get("text"))
-            elif item.get("type") in ("mcpToolCall", "dynamicToolCall", "commandExecution", "fileChange") and cur:
-                await self._event("tool_call", item_type=item["type"], tool=item.get("tool") or item.get("command"),
-                                  arguments=_summ(item.get("arguments", "")), status=item.get("status"))
+            elif item.get("type") == "reasoning" and cur:
+                parts = [x.strip() for x in item.get("summary") or [] if isinstance(x, str) and x.strip()]
+                if parts:  # the summary only, never the reasoning itself ("content")
+                    await self._event("reasoning_summary", text=_summ("\n".join(parts), 4000))
+            elif item.get("type") in TOOL_ITEMS and cur:
+                await self._event("tool_finished", tool=_tool_name(item), arguments=_cap(item.get("arguments")),
+                                  duration_ms=_duration_ms(item),
+                                  success=item.get("status") == "completed" and not item.get("error")
+                                  and item.get("exitCode") in (None, 0),
+                                  result_summary=_tool_result(item))
+        elif method == "turn/plan/updated":
+            if cur:
+                steps = [{"step": str(x.get("step")), "status": x.get("status")}
+                         for x in p.get("plan") or [] if isinstance(x, dict)]
+                await self._event("plan", steps=steps)
+        elif method == "thread/tokenUsage/updated":
+            last = (p.get("tokenUsage") or {}).get("last") or {}
+            if cur:  # one model call; the turn's total goes out when the turn ends
+                for attr, key in (("tokens_in", "inputTokens"), ("tokens_out", "outputTokens")):
+                    n = last.get(key)
+                    if isinstance(n, int) and not isinstance(n, bool):
+                        setattr(cur, attr, getattr(cur, attr) + n)
+                        cur.tokens_seen = True
         elif method == "turn/completed":
             await self._on_turn_completed(p.get("turn") or {})
         elif method == "account/rateLimits/updated":
@@ -240,6 +344,10 @@ class AgentRunner:
         if cur is None:
             return
         cur.turn_id = None
+        if cur.tokens_seen:
+            await self._event("token_usage", input=cur.tokens_in, output=cur.tokens_out)
+        cur.tokens_in = cur.tokens_out = 0
+        cur.tokens_seen = False
         await self._event("turn_completed", status=turn.get("status"))
         suspend = next((a for a in actions if isinstance(a, Suspend)), None)
         if suspend or cur.suspend_at is not None:
@@ -255,6 +363,20 @@ class AgentRunner:
         self.on_log({"type": "final_report", "task_id": cur.task_id, "text": cur.last_message})
         self.cur = None
         asyncio.create_task(self.refresh_usage())
+
+    async def _on_delta(self, cur: Current, p: dict) -> None:
+        """The message being written goes to the host at most every progress_interval seconds. It has no
+        seq (an old one is not worth re-sending) and is not recorded: the finished message follows."""
+        if cur.progress_item != p.get("itemId"):
+            cur.progress, cur.progress_item = "", p.get("itemId")
+        delta = p.get("delta")
+        if isinstance(delta, str) and len(cur.progress) < PROGRESS_MAX:
+            cur.progress = (cur.progress + delta)[:PROGRESS_MAX]
+        now = self.clock()
+        if cur.progress and (cur.progress_sent_at is None or now - cur.progress_sent_at >= self.progress_interval):
+            cur.progress_sent_at = now
+            await self._safe_send(protocol.msg("event", task_id=cur.task_id, kind="progress",
+                                               data={"text": cur.progress}))
 
     async def _apply(self, actions) -> None:
         cur = self.cur

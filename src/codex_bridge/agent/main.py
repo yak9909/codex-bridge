@@ -24,6 +24,7 @@ from .runner import AgentRunner
 from .sessions import SessionRegistry
 from .setup import (MIN_CODEX_VERSION, choose_codex, data_root, download_codex, load_invite, make_guard, run_login,
                     save_invite, user_mcp_names)
+from .worklog import WorkLog
 
 LOGVIEW_PORT = 8766
 TITLE = "codex-bridge"
@@ -133,7 +134,7 @@ async def run_agent(invite: Invite, codex: Path, home: Path) -> None:
 
     store = LogStore(home / "logs")
     runner = AgentRunner(app, make_guard(mode), SessionRegistry(home / "sessions.json"), send=None,
-                         on_log=store.add)
+                         on_log=store.add, worklog=WorkLog(home / "logs" / "tasks"))
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
 

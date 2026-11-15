@@ -26,7 +26,8 @@ QUOTA = "使用量の上限のため受け付けません。再開可能: {}"
 # A continuation can only go to the lender whose Codex holds the session (design §3.3).
 RETRY_FRESH = "続きとしては送れないので、前回の報告を添えて新しく依頼してください。"
 NOT_READY = "「{}」の agent は接続したばかりで、まだ準備ができていません。数秒待ってからやり直してください。"
-SPOILT = "記録が壊れていたため、このタスクがどう終わったかは分かりません。"
+PROGRESS_MAX = 20_000  # characters of the half-written message that are kept
+SPOILT ="記録が壊れていたため、このタスクがどう終わったかは分かりません。"
 
 
 def iso_local(ts: float | None) -> str | None:
@@ -95,6 +96,7 @@ class TaskManager:
         self.touched_fn = touched_fn
         self.tasks: dict[str, TaskRecord] = {}
         self._events: dict[str, list[dict]] = {}
+        self._progress: dict[str, str] = {}        # the message Codex is writing now; memory only, never an event
         self._lenders: dict[str, Lender] = {}      # by invite name, in order of first connection
         self._links: dict[int, Lender] = {}        # live link id -> lender (one link per lender)
         self._last: Lender | None = None           # the latest to connect, even if gone since
@@ -278,6 +280,15 @@ class TaskManager:
             # kept and shown as it comes, so: a kind in words, and no number in the data that JSON cannot carry
             task_id, kind = as_text(m.get("task_id")), as_text(m.get("kind"))
             if kind and self._own_task(lender, task_id):
+                if kind == "progress":  # the half-written message: shown under "working", not part of the record
+                    data = m.get("data")
+                    text = data.get("text") if isinstance(data, dict) else None
+                    if isinstance(text, str) and text:
+                        self._progress[task_id] = text[:PROGRESS_MAX]
+                        self._changed()
+                    return
+                if kind == "agent_message":
+                    self._progress.pop(task_id, None)  # it is written now
                 self._append_event(task_id, {"ts": time.time(), "kind": kind, "data": protocol.finite(m.get("data"))})
         elif t == "task_state":
             rec = self._own_task(lender, as_text(m.get("task_id")))
@@ -287,6 +298,8 @@ class TaskManager:
             rec.lender = lender.name
             rec.state = state
             rec.state_before_offline = None
+            if state in FINAL_STATES:
+                self._progress.pop(rec.task_id, None)
             rec.thread_id = as_text(m.get("thread_id")) or rec.thread_id
             report, resume_at = as_text(m.get("report")), moment(m.get("resume_at"))
             if report is not None:
@@ -469,6 +482,10 @@ class TaskManager:
 
     def events(self, task_id: str) -> list[dict]:
         return list(self._events.get(task_id, []))
+
+    def progress(self, task_id: str) -> str | None:
+        """The message Codex is writing now (None when it is not writing one)."""
+        return self._progress.get(task_id)
 
     def status(self, task_id: str | None = None) -> dict:
         if task_id is None:
