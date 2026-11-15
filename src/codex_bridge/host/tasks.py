@@ -17,7 +17,7 @@ from .lenders import (Lender, SendFn, as_protocol, as_text, blocked_until, momen
                       normalize_limits, normalize_window, number, pick_lender)
 from .paths import ToolError
 
-ACTIVE_STATES = ("queued", "running", "agent_offline")
+ACTIVE_STATES = ("queued", "running", "agent_offline", "awaiting_lender")  # awaiting_lender: the lender has not approved yet
 DEFAULT_THRESHOLDS = {"five_hour": 90, "weekly": 95}
 REQUEST_TIMEOUT = 30.0
 NOT_CONNECTED = "知人側の agent が接続されていません。知人の PC で codex-bridge-agent が動いているか確かめてください。"
@@ -26,6 +26,8 @@ QUOTA = "使用量の上限のため受け付けません。再開可能: {}"
 # A continuation can only go to the lender whose Codex holds the session (design §3.3).
 RETRY_FRESH = "続きとしては送れないので、前回の報告を添えて新しく依頼してください。"
 NOT_READY = "「{}」の agent は接続したばかりで、まだ準備ができていません。数秒待ってからやり直してください。"
+AWAITING = ("{} は、Codex を貸している人の承認待ちです。承認されるまで追加の指示は送れません"
+            "（待つか cancel_task で止めてください）。")
 PROGRESS_MAX = 20_000  # characters of the half-written message that are kept
 SPOILT ="記録が壊れていたため、このタスクがどう終わったかは分かりません。"
 
@@ -121,6 +123,8 @@ class TaskManager:
             if rec is None:
                 continue  # not readable (cut off while being written, ...): left on disk, not listed
             if rec.state in ACTIVE_STATES:
+                if rec.state == "awaiting_lender":  # a pending approval is still pending when the agent comes back
+                    rec.state_before_offline = rec.state
                 rec.state = "agent_offline"
             self.tasks[rec.task_id] = rec
             self._events[rec.task_id] = _read_events(f.with_suffix(".jsonl"))
@@ -172,7 +176,7 @@ class TaskManager:
             return
         lender.send, lender.connected, lender.ready = None, False, False
         for rec in self.tasks.values():
-            if rec.lender == lender.name and rec.state in ("queued", "running"):
+            if rec.lender == lender.name and rec.state in ("queued", "running", "awaiting_lender"):
                 rec.state_before_offline = rec.state
                 rec.state = "agent_offline"
                 self._save(rec)
@@ -295,6 +299,9 @@ class TaskManager:
             state = _known_state(m.get("state"))
             if rec is None or state is None:  # a state this host does not know is not a state: nothing changes
                 return
+            if rec.state in FINAL_STATES and state != rec.state and rec.report != SPOILT:
+                return  # over is over (a message sent again after a reconnect must not bring a task back);
+                #         a record that was spoilt only says "failed" for want of knowing: the agent's word counts
             rec.lender = lender.name
             rec.state = state
             rec.state_before_offline = None
@@ -326,7 +333,8 @@ class TaskManager:
                 continue
             rec.lender = lender.name
             if rec.task_id == agent_task_id:
-                rec.state = rec.state_before_offline or "running"
+                if rec.state == "agent_offline":  # (else the agent already said where the task stands)
+                    rec.state = rec.state_before_offline or "running"
             else:
                 rec.state = "failed"
                 rec.report = rec.report or ("知人側の agent が再起動したため、このタスクは中断されました。"
@@ -472,6 +480,8 @@ class TaskManager:
         rec = self._get(task_id)
         if rec.state not in ACTIVE_STATES:
             raise ToolError(f"このタスクは作業中ではありません（{rec.state}）。続けるなら send_task の continue_task_id を使ってください")
+        if rec.state == "awaiting_lender":
+            raise ToolError(AWAITING.format(task_id))
         await self._send_for(rec, protocol.msg("task_followup", task_id=task_id, text=text))
 
     async def cancel(self, task_id: str) -> None:

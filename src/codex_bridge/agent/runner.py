@@ -13,6 +13,7 @@ from typing import Awaitable, Callable
 
 from ..common import protocol
 from .appserver import AppServer, AppServerError
+from .pre_approval import CANCELLED, FOLLOWUP, START, WAITING, PreApproval
 from .sessions import SessionRegistry
 from .settings import defaults, feature_instructions
 from .usage import BlockNew, Interrupt, QuotaGuard, Steer, Suspend, Unblock
@@ -107,6 +108,7 @@ class AgentRunner:
         self.clock = clock
         self.cur: Current | None = None
         self.settings = defaults()  # the lender's settings (settings.py); apply_settings() brings in a changed one
+        self.approval = PreApproval(self)  # a request waiting for the lender's yes (design 4.5)
         self.log_visibility = "summary"
         self.friend_limits = {"five_hour": None, "weekly": None, "force": False}
         self._seq = itertools.count(int(time.time() * 1000))
@@ -120,6 +122,33 @@ class AgentRunner:
         self._prune_worklog()
         self._tasks = [asyncio.create_task(self._pump()), asyncio.create_task(self._usage_loop()),
                        asyncio.create_task(self._tick_loop())]
+
+    @property
+    def pending_approval(self) -> dict | None:
+        """The request waiting for the lender's decision: task_id, prompt, kind (start | followup), created."""
+        p = self.approval.pending
+        return p.view() if p is not None else None
+
+    async def decide_pending(self, approve: bool, reason: str = "") -> bool:
+        """The lender's answer. False when nothing waits (decided already, timed out, or the task is over)."""
+        return await self.approval.decide(approve, reason)
+
+    async def expire_pending(self) -> None:
+        await self.approval.expire()
+
+    async def resend_pending(self) -> None:
+        """After a reconnect (and its hello): tell the host again that a request waits."""
+        await self.approval.resend()
+
+    def active_task_id(self) -> str | None:
+        """The task this agent is responsible for: the one working, or the one waiting for the lender's yes."""
+        if self.cur is not None:
+            return self.cur.task_id
+        return self.approval.pending.task_id if self.approval.pending is not None else None
+
+    async def shutdown(self) -> None:
+        """The exe is ending: a request still waiting is refused, while the host can still be told."""
+        await self.approval.shutdown()
 
     async def stop(self) -> None:
         for t in self._tasks:
@@ -142,6 +171,8 @@ class AgentRunner:
     async def _end(self, app_alive: bool = True) -> None:
         """The task is over (any way): a disposable session is dropped and no longer listed (design 4.6)."""
         cur, self.cur = self.cur, None
+        if cur is not None:
+            self.approval.drop(cur.task_id)  # a follow-up still waiting has nowhere to go any more
         if cur is not None and cur.ephemeral and cur.thread_id:
             self.sessions.remove(cur.thread_id)
             if app_alive:
@@ -236,39 +267,68 @@ class AgentRunner:
     def _instructions(self) -> str:
         return PREAMBLE + feature_instructions(self.settings["features"])
 
+    def log_prompt(self, task_id: str, text: str) -> None:
+        """What the borrower asked is always shown to the lender (design 4.9)."""
+        self.on_log({"type": "task_prompt", "task_id": task_id, "prompt": text})
+        self._record(task_id, "task_prompt", {"text": text})
+
     async def _task_start(self, m: dict) -> None:
         async with self._lock:
-            if self.cur is not None:
+            if self.cur is not None or self.approval.pending is not None:
                 await self._state("failed", report="別のタスクが作業中です", task_id=m["task_id"])
                 return
-            self.cur = Current(task_id=m["task_id"], ephemeral=bool(self.settings["disposable"]))
-            self.on_log({"type": "task_prompt", "task_id": m["task_id"], "prompt": m["prompt"]})
-            self._prune_worklog()
-            self._record(m["task_id"], "task_prompt", {"text": m["prompt"]})
-            try:
-                cont = m.get("continue_thread_id")
-                if cont:
-                    if self.cur.ephemeral:
-                        raise AppServerError(NO_RESUME)
-                    if not self.sessions.owns(cont):
-                        raise AppServerError(NOT_OWNED)
-                    self.cur.thread_id = await self.app.thread_resume(cont, self._instructions())
-                else:
-                    self.cur.thread_id = await self.app.thread_start(self._instructions(), self.cur.ephemeral)
-                self.sessions.add(self.cur.thread_id, self.cur.task_id, self.cur.ephemeral)
-                await self._state("running")
-                await self._event("started")
-                self.cur.turn_id = await self.app.turn_start(self.cur.thread_id, m["prompt"])
-            except Exception as e:  # app-server gone, pipe broken, timeout...: never keep a stale task
-                await self._state("failed", report=f"開始できませんでした: {type(e).__name__}: {e}")
-                await self._end()
+            if self.approval.enabled:
+                await self.approval.hold(m, START)
+                return
+            await self._start_locked(m)
+
+    async def _start_locked(self, m: dict, shown: bool = False) -> None:
+        """Begin the task (the lock is held). `shown`: the request was shown to the lender already, when it was held."""
+        if self.cur is not None:
+            await self._state("failed", report="別のタスクが作業中です", task_id=m["task_id"])
+            return
+        self.cur = Current(task_id=m["task_id"], ephemeral=bool(self.settings["disposable"]))
+        self._prune_worklog()
+        if not shown:
+            self.log_prompt(m["task_id"], m["prompt"])
+        try:
+            cont = m.get("continue_thread_id")
+            if cont:
+                if self.cur.ephemeral:
+                    raise AppServerError(NO_RESUME)
+                if not self.sessions.owns(cont):
+                    raise AppServerError(NOT_OWNED)
+                self.cur.thread_id = await self.app.thread_resume(cont, self._instructions())
+            else:
+                self.cur.thread_id = await self.app.thread_start(self._instructions(), self.cur.ephemeral)
+            self.sessions.add(self.cur.thread_id, self.cur.task_id, self.cur.ephemeral)
+            await self._state("running")
+            await self._event("started")
+            self.cur.turn_id = await self.app.turn_start(self.cur.thread_id, m["prompt"])
+        except Exception as e:  # app-server gone, pipe broken, timeout...: never keep a stale task
+            await self._state("failed", report=f"開始できませんでした: {type(e).__name__}: {e}")
+            await self._end()
 
     async def _followup(self, m: dict) -> None:
+        if self.approval.holds(m["task_id"]):  # what the lender is deciding on must not change under their hands
+            text = {"text": WAITING}
+            self._record(m["task_id"], "status", text)
+            await self._send_seq("event", task_id=m["task_id"], kind="status", data=text)
+            return
         cur = self.cur
         if cur is None or cur.task_id != m["task_id"] or cur.thread_id is None:
             return
-        self.on_log({"type": "task_prompt", "task_id": cur.task_id, "prompt": m["text"]})
-        self._record(cur.task_id, "task_prompt", {"text": m["text"]})
+        if self.approval.enabled:
+            await self.approval.hold(m, FOLLOWUP)
+            return
+        await self._deliver_followup(m)
+
+    async def _deliver_followup(self, m: dict, shown: bool = False) -> None:
+        cur = self.cur
+        if cur is None or cur.task_id != m["task_id"] or cur.thread_id is None:
+            return
+        if not shown:
+            self.log_prompt(cur.task_id, m["text"])
         if cur.turn_id:
             try:
                 await self.app.turn_steer(cur.thread_id, cur.turn_id, m["text"])
@@ -282,6 +342,10 @@ class AgentRunner:
             await self._end()
 
     async def _cancel(self, m: dict) -> None:
+        held = self.approval.drop(m["task_id"])
+        if held is not None and held.kind == START:  # it never began: nothing to interrupt
+            await self._state("cancelled", report=CANCELLED, task_id=held.task_id)
+            return
         cur = self.cur
         if cur is None or cur.task_id != m["task_id"]:
             return
@@ -473,5 +537,6 @@ class AgentRunner:
             await asyncio.sleep(self.tick_interval)
             try:
                 await self._apply(self.guard.tick())
+                await self.approval.expire()
             except Exception as e:
                 self.on_log({"type": "error", "text": f"tick: {type(e).__name__}: {e}"})

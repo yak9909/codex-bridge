@@ -9,11 +9,11 @@ from codex_bridge.host.tasks import TaskManager
 
 
 class FakeAgent:
-    def __init__(self, mgr: TaskManager):
+    def __init__(self, mgr: TaskManager, name: str = "friend"):
         self.mgr = mgr
         self.sent: list[dict] = []
         self.seq = 0
-        self.link = mgr.attach("friend", self.send)
+        self.link = mgr.attach(name, self.send)
 
     async def send(self, msg: dict) -> None:
         self.sent.append(msg)
@@ -380,3 +380,150 @@ async def test_the_half_written_message_of_another_lenders_task_is_ignored(mgr, 
     await other.push("hello", agent_version="0.1.0", codex_version="x", auth_mode="chatgpt")
     await other.push("event", task_id=tid, kind="progress", data={"text": "not yours"})
     assert mgr.progress(tid) is None
+
+
+# ---- pre-approval by the lender (design 4.5, 6) ----------------------------------------------
+def test_the_two_new_states_are_known_and_a_rejection_is_final():
+    assert "awaiting_lender" in protocol.TASK_STATES and "rejected_by_lender" in protocol.TASK_STATES
+    assert "rejected_by_lender" in protocol.FINAL_STATES and "awaiting_lender" not in protocol.FINAL_STATES
+
+
+async def test_awaiting_lender_is_kept_and_counts_as_working(mgr, agent):
+    tid = await mgr.start("a")
+    await agent.push("task_state", task_id=tid, state="awaiting_lender")
+    assert mgr.status(tid)["state"] == "awaiting_lender"
+    assert mgr.current_task_id() == tid and mgr.is_active(tid)
+    assert mgr.lenders()[0]["current_task_id"] == tid
+
+
+async def test_a_new_task_is_refused_while_the_lender_has_one_awaiting_approval(mgr, agent):
+    tid2 = await mgr.start("first")
+    await agent.finish(tid2)  # a finished one with a session to continue
+    tid = await mgr.start("a")
+    await agent.push("task_state", task_id=tid, state="awaiting_lender")
+    with pytest.raises(ToolError, match="作業中"):
+        await mgr.start("b")  # to that lender by name
+    with pytest.raises(ToolError, match="作業中"):
+        await mgr.start("b", lender="friend")
+    with pytest.raises(ToolError, match="作業中"):
+        await mgr.start("b", continue_task_id=tid2)
+    assert len([m for m in agent.sent if m["type"] == "task_start"]) == 2  # the two that were allowed
+
+
+async def test_automatic_routing_skips_the_lender_awaiting_approval(mgr, agent):
+    other = FakeAgent(mgr, "zed")
+    await other.push("hello", agent_version="0.2", codex_version="x", auth_mode="chatgpt")
+    first = await mgr.start("a", lender="friend")
+    await agent.push("task_state", task_id=first, state="awaiting_lender")
+    second = await mgr.start("b")
+    assert mgr.tasks[second].lender == "zed"
+
+
+async def test_a_rejection_is_final_carries_the_reason_and_frees_the_lender(mgr, agent):
+    tid = await mgr.start("a")
+    await agent.push("task_state", task_id=tid, state="awaiting_lender")
+    await agent.push("task_state", task_id=tid, state="rejected_by_lender", report="拒否されました: 今は困る")
+    r = mgr.result(tid)
+    assert r["state"] == "rejected_by_lender" and r["report"] == "拒否されました: 今は困る" and r["finished"]
+    assert mgr.current_task_id() is None and not mgr.is_active(tid)
+    assert await mgr.start("b")  # the lender is free again
+    with pytest.raises(ToolError, match="作業中ではありません"):
+        await mgr.followup(tid, "x")
+
+
+async def test_a_task_awaiting_approval_can_still_be_cancelled_but_not_given_more_instructions(mgr, agent):
+    tid = await mgr.start("a")
+    await agent.push("task_state", task_id=tid, state="awaiting_lender")
+    await mgr.cancel(tid)
+    assert agent.last("task_cancel")["task_id"] == tid
+    with pytest.raises(ToolError, match="承認待ち"):
+        await mgr.followup(tid, "also")
+    assert not [m for m in agent.sent if m["type"] == "task_followup"]
+
+
+async def test_a_pending_approval_survives_a_disconnect_and_the_resent_state(mgr, agent):
+    tid = await mgr.start("a")
+    await agent.push("task_state", task_id=tid, state="awaiting_lender")
+    mgr.detach(agent.link)
+    assert mgr.status(tid)["state"] == "agent_offline" and mgr.current_task_id() == tid
+    agent2 = FakeAgent(mgr)
+    agent2.seq = 100
+    await agent2.push("hello", agent_version="x", codex_version="x", auth_mode="chatgpt", current_task_id=tid)
+    assert mgr.status(tid)["state"] == "awaiting_lender"  # not failed, not running
+    await agent2.push("task_state", task_id=tid, state="awaiting_lender")  # the agent says it again
+    assert mgr.status(tid)["state"] == "awaiting_lender"
+    await agent2.push("task_state", task_id=tid, state="running", thread_id="th1")
+    assert mgr.status(tid)["state"] == "running"
+
+
+async def test_a_pending_approval_is_still_pending_after_the_host_restarts(tmp_path, mgr, agent):
+    tid = await mgr.start("a")
+    await agent.push("task_state", task_id=tid, state="awaiting_lender")
+    mgr2 = TaskManager(tmp_path / "data", touched_fn=lambda t: [])
+    assert mgr2.status(tid)["state"] == "agent_offline"
+    a2 = FakeAgent(mgr2)
+    await a2.push("hello", agent_version="x", codex_version="x", auth_mode="chatgpt", current_task_id=tid)
+    assert mgr2.status(tid)["state"] == "awaiting_lender"
+
+
+# ---- a task that is over stays over; a hello about the settings is not about the task ----------
+@pytest.mark.parametrize("final", ["completed", "failed", "cancelled", "rejected_by_lender"])
+async def test_a_final_state_is_not_left_again(mgr, agent, final):
+    tid = await mgr.start("a")
+    await agent.push("task_state", task_id=tid, state=final, thread_id="th1", report="first word")
+    stamp = mgr.result(tid)["finished"]
+    for later in ("running", "queued", "awaiting_lender", "agent_offline", "completed", "failed"):
+        if later == final:
+            continue
+        await agent.push("task_state", task_id=tid, state=later, thread_id="th2", report="late")
+        r = mgr.result(tid)
+        assert r["state"] == final and r["report"] == "first word" and r["thread_id"] == "th1"
+        assert r["finished"] == stamp
+    assert mgr.current_task_id() is None
+    assert agent.last("ack")["seq"] == agent.seq  # still acknowledged, or the agent would send it for ever
+
+
+async def test_a_failed_task_does_not_flicker_back_to_running_after_a_restart_of_the_host(tmp_path, mgr, agent):
+    tid = await mgr.start("a")
+    await agent.push("task_state", task_id=tid, state="failed", report="gave up")
+    mgr2 = TaskManager(tmp_path / "data", touched_fn=lambda t: [])
+    a2 = FakeAgent(mgr2)
+    await a2.push("task_state", seq=3, task_id=tid, state="running")  # an old message, sent again by the agent
+    assert mgr2.status(tid)["state"] == "failed" and mgr2.current_task_id() is None
+
+
+async def test_hello_without_current_task_id_leaves_a_queued_task_alone(mgr, agent):
+    # The agent says hello again when its settings change; if that lands just as a task starts, the task must
+    # not be taken for one the agent lost, and the lender must not look free (a second task would be sent to it).
+    tid = await mgr.start("a")
+    await agent.push("hello", agent_version="x", codex_version="x", auth_mode="chatgpt",
+                     protocol=2, capabilities={"resumable": False, "pre_approval": True})
+    assert mgr.status(tid)["state"] == "queued" and mgr.current_task_id() == tid
+    assert mgr.lenders()[0]["current_task_id"] == tid
+    assert mgr.agent_info()["capabilities"] == {"resumable": False, "pre_approval": True}  # it did take effect
+    with pytest.raises(ToolError, match="作業中"):
+        await mgr.start("b")
+    await agent.push("task_state", task_id=tid, state="running", thread_id="th1")
+    assert mgr.status(tid)["state"] == "running"
+
+
+async def test_a_result_sent_again_before_hello_is_not_taken_away_by_the_hello_after_it(mgr, agent):
+    # The task ended while the link was down; the agent sends what the host missed, then hello (no task any more).
+    tid = await mgr.start("a")
+    await agent.push("task_state", task_id=tid, state="running", thread_id="th1")
+    mgr.detach(agent.link)
+    agent2 = FakeAgent(mgr)
+    await agent2.push("task_state", seq=50, task_id=tid, state="completed", thread_id="th1", report="できました")
+    await agent2.push("hello", agent_version="x", codex_version="x", auth_mode="chatgpt", current_task_id=None)
+    r = mgr.result(tid)
+    assert r["state"] == "completed" and r["report"] == "できました"
+
+
+async def test_hello_naming_a_task_whose_state_the_agent_already_said_leaves_it_there(mgr, agent):
+    tid = await mgr.start("a")
+    await agent.push("task_state", task_id=tid, state="awaiting_lender")
+    mgr.detach(agent.link)
+    agent2 = FakeAgent(mgr)
+    await agent2.push("task_state", seq=50, task_id=tid, state="awaiting_lender")  # sent again, before hello
+    await agent2.push("hello", agent_version="x", codex_version="x", auth_mode="chatgpt", current_task_id=tid)
+    assert mgr.status(tid)["state"] == "awaiting_lender"  # not "running"

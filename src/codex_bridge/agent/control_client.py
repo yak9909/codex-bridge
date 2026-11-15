@@ -41,14 +41,32 @@ class ControlClient:
             raise ConnectionError("not connected")
         await self.ws.send(protocol.encode(m))
 
-    async def send_hello(self) -> None:
+    async def send_hello(self, with_task: bool = True) -> None:
         """Say who this agent is and what it can do. A callable `hello` is called now, so that a setting changed since
-        the last connection (disposable, pre-approval) is what the host hears."""
+        the last connection (disposable, pre-approval) is what the host hears.
+
+        `current_task_id` (the task the agent works on or holds for the lender's yes; None: it has none) makes the
+        host fail every task it thinks is running here but is not named. That is for a new connection only: a
+        hello about changed settings leaves it out (`with_task=False`), because it can overlap the start of a task
+        the agent has not heard of yet."""
         if self.ws is None:
             return
         fields = self.hello() if callable(self.hello) else self.hello
-        cur = self.runner.cur
-        await self.send(protocol.msg("hello", **fields, current_task_id=cur.task_id if cur else None))
+        extra = {"current_task_id": self.runner.active_task_id()} if with_task else {}
+        await self.send(protocol.msg("hello", **fields, **extra))
+
+    async def refresh_hello(self) -> None:
+        """For the lender changing settings while connected (SettingsApplier)."""
+        await self.send_hello(with_task=False)
+
+    async def on_connected(self) -> None:
+        """A connection was made. First what the host may have missed (a task that ended while the link was down
+        must be over on the host before hello, or hello, which fails the tasks the agent does not name, would
+        take its result away: a final state is not left again). Then hello. Then the request that still waits for the
+        lender, said again with a number of its own: the host must never lose a task waiting for the lender."""
+        await self.runner.resend_unacked()
+        await self.send_hello()
+        await self.runner.resend_pending()
 
     async def drop(self) -> None:
         """Close the current connection (used by tests and on shutdown)."""
@@ -69,8 +87,7 @@ class ControlClient:
                     self.ws = ws
                     backoff = self.initial_backoff
                     self.on_status("接続しました")
-                    await self.send_hello()
-                    await self.runner.resend_unacked()
+                    await self.on_connected()
                     async for text in ws:
                         try:
                             m = protocol.decode(text)

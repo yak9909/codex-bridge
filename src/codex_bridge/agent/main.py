@@ -155,7 +155,7 @@ async def run_agent(invite: Invite, codex: Path, home: Path) -> bool:
     client = ControlClient(invite, runner, hello=lambda: {**versions, **hello_fields(runner.settings)},
                            on_status=lambda s: tray.set_status(s))
     tray.run_detached()
-    applier = SettingsApplier(settings, app, runner, home, refresh_hello=client.send_hello, on_log=store.add)
+    applier = SettingsApplier(settings, app, runner, home, refresh_hello=client.refresh_hello, on_log=store.add)
 
     async def move_data(new: Path) -> list[Path]:
         nonlocal relaunch
@@ -184,6 +184,10 @@ async def run_agent(invite: Invite, codex: Path, home: Path) -> bool:
     tasks = [asyncio.create_task(client.run_forever()), asyncio.create_task(logview.serve()),
              asyncio.create_task(watchdog())]
     await stop.wait()
+    try:
+        await asyncio.wait_for(runner.shutdown(), 5)  # a request waiting for the lender is refused while the host is still connected
+    except Exception as e:
+        store.add({"type": "error", "text": f"終了の知らせを送れませんでした: {type(e).__name__}: {e}"})
     logview.should_exit = True
     for t in tasks[:1] + tasks[2:]:
         t.cancel()

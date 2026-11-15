@@ -29,8 +29,9 @@ HOST_TO_AGENT = {"task_start", "task_followup", "task_cancel", "session_list", "
 AGENT_TO_HOST = {"hello", "event", "usage", "task_state", "reply"}
 TYPES = HOST_TO_AGENT | AGENT_TO_HOST
 
-TASK_STATES = ("queued", "running", "completed", "suspended_quota", "failed", "cancelled", "agent_offline")
-FINAL_STATES = ("completed", "suspended_quota", "failed", "cancelled")
+TASK_STATES = ("queued", "running", "completed", "suspended_quota", "failed", "cancelled", "agent_offline",
+               "awaiting_lender", "rejected_by_lender")
+FINAL_STATES = ("completed", "suspended_quota", "failed", "cancelled", "rejected_by_lender")
 LOG_VISIBILITY = ("summary", "files", "all")
 
 
