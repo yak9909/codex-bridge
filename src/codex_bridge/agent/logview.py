@@ -10,6 +10,8 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
+from .settings import FEATURE_INFO, SettingsStore, defaults
+
 VISIBLE = {
     "summary": {"task_prompt", "final_report"},
     "files": {"task_prompt", "final_report", "tool_call"},
@@ -115,43 +117,40 @@ const d=await r.json();$("msg").style.color=r.ok?"#1f9d55":"#d14343";$("msg").te
 loadLimits();load();setInterval(load,3000);</script></body></html>"""
 
 
-class LimitsStore:
-    """The friend's own usage limits for the borrower (percent per window) and the force-stop choice."""
-
-    DEFAULT = {"five_hour": None, "weekly": None, "force": False}
-
-    def __init__(self, path: Path) -> None:
-        self.path = Path(path)
-
-    def get(self) -> dict:
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return dict(self.DEFAULT)
-        return {**self.DEFAULT, **{k: data.get(k) for k in self.DEFAULT}}
-
-    def set(self, data: dict) -> dict:
-        out = {"force": bool(data.get("force", False))}
-        for k in ("five_hour", "weekly"):
-            v = data.get(k)
-            if v in (None, ""):
-                out[k] = None
-                continue
-            v = float(v)
-            if not 0 < v <= 100:
-                raise ValueError("上限は 1〜100 の数で指定してください")
-            out[k] = v if v != int(v) else int(v)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(out), encoding="utf-8")
-        return out
+def _limits_patch(body: dict) -> dict:
+    """The limits page of v0.1 sends what its input boxes hold: text, and "" (or null) for an empty box."""
+    if not isinstance(body, dict):
+        raise ValueError("設定は JSON の object で指定してください")
+    out: dict = {"force": body.get("force", False)}
+    for k in ("five_hour", "weekly"):
+        v = body.get(k)
+        out[k] = None if v in (None, "") else float(v) if isinstance(v, str) else v
+    return out
 
 
-def create_logview_app(store: LogStore, limits: LimitsStore | None = None, on_limits=None) -> FastAPI:
+def create_logview_app(store: LogStore, settings: SettingsStore | None = None, on_settings=None,
+                       on_move=None) -> FastAPI:
+    """on_settings(new_settings) is awaited after a change is saved (it puts the change to work); on_move(path)
+    moves the data to that folder (design 4.7) and raises ValueError / OSError when it cannot."""
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     def local_only(request: Request) -> None:
         if (request.headers.get("host") or "").rsplit(":", 1)[0] not in ("127.0.0.1", "localhost"):
             raise HTTPException(403, "forbidden host")
+
+    def need_settings() -> SettingsStore:
+        if settings is None:
+            raise HTTPException(404, "not available")
+        return settings
+
+    async def save(patch: dict) -> dict:
+        try:
+            saved = need_settings().update(patch)
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, str(e))
+        if on_settings:
+            await on_settings(saved)
+        return saved
 
     @app.get("/", response_class=HTMLResponse)
     async def index():
@@ -161,22 +160,43 @@ def create_logview_app(store: LogStore, limits: LimitsStore | None = None, on_li
     async def events():
         return {"visibility": store.visibility, "events": store.visible()[-1000:]}
 
+    @app.get("/api/settings")
+    async def get_settings(request: Request):
+        local_only(request)
+        return {"settings": (settings.get() if settings else defaults()), "feature_info": FEATURE_INFO}
+
+    @app.put("/api/settings")
+    async def put_settings(request: Request, body: dict):
+        local_only(request)
+        return await save(body)
+
     @app.get("/api/limits")
     async def get_limits(request: Request):
         local_only(request)
-        return limits.get() if limits else dict(LimitsStore.DEFAULT)
+        return (settings.get() if settings else defaults())["limits"]
 
     @app.put("/api/limits")
     async def put_limits(request: Request, body: dict):
         local_only(request)
-        if limits is None:
-            raise HTTPException(404, "not available")
+        need_settings()
         try:
-            saved = limits.set(body)
+            patch = _limits_patch(body)
         except (TypeError, ValueError) as e:
-            raise HTTPException(400, str(e))
-        if on_limits:
-            on_limits(saved)
-        return saved
+            raise HTTPException(400, f"上限は 1〜100 の数で指定してください: {e}")
+        return (await save({"limits": patch}))["limits"]
+
+    @app.put("/api/data-location")
+    async def put_data_location(request: Request, body: dict):
+        local_only(request)
+        if on_move is None:
+            raise HTTPException(404, "not available")
+        path = body.get("path") if isinstance(body, dict) else None
+        if not isinstance(path, str) or not path.strip():
+            raise HTTPException(400, "保存場所のフォルダを指定してください")
+        try:
+            left = await on_move(Path(path.strip()))
+        except (ValueError, OSError) as e:
+            raise HTTPException(400, f"移せませんでした（元の場所のまま使います）: {e}" if isinstance(e, OSError) else str(e))
+        return {"moved": True, "left": [str(p) for p in left or []]}
 
     return app

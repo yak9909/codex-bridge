@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import copy
 import itertools
 import json
 import time
@@ -12,6 +14,7 @@ from typing import Awaitable, Callable
 from ..common import protocol
 from .appserver import AppServer, AppServerError
 from .sessions import SessionRegistry
+from .settings import defaults, feature_instructions
 from .usage import BlockNew, Interrupt, QuotaGuard, Steer, Suspend, Unblock
 from .worklog import WorkLog
 
@@ -20,6 +23,8 @@ PREAMBLE = ("ファイルの一覧・検索・読み書き・コマンド実行�
             "run_command や delete_path が承認待ち（waiting_approval）を返したら、作業を終えずに "
             "get_command_result（削除は同じ呼び出しのやり直し）で結果を待ってください。承認には数分かかることがあります。")
 NOT_OWNED = "このツールで作ったセッションではありません"
+NO_RESUME = "この PC の Codex は使い捨てセッションの設定のため、続きの依頼はできません。新しい依頼として出し直してください"
+DISCARD_TIMEOUT = 5.0  # asking Codex to drop a disposable thread must never hold up the next event
 SendFn = Callable[[dict], Awaitable[None]]
 TOOL_ITEMS = ("mcpToolCall", "dynamicToolCall", "commandExecution", "fileChange")
 PROGRESS_INTERVAL = 2.0  # the half-written message goes to the host at most this often (seconds)
@@ -33,6 +38,7 @@ class Current:
     turn_id: str | None = None
     last_message: str | None = None
     cancelling: bool = False
+    ephemeral: bool = False            # a disposable session: fixed when the task starts, dropped when it ends
     suspend_at: int | None = None
     followups: list[str] = field(default_factory=list)
     progress: str = ""                 # the agent message being written (item/agentMessage/delta)
@@ -100,6 +106,7 @@ class AgentRunner:
         self.progress_interval = progress_interval
         self.clock = clock
         self.cur: Current | None = None
+        self.settings = defaults()  # the lender's settings (settings.py); apply_settings() brings in a changed one
         self.log_visibility = "summary"
         self.friend_limits = {"five_hour": None, "weekly": None, "force": False}
         self._seq = itertools.count(int(time.time() * 1000))
@@ -109,6 +116,7 @@ class AgentRunner:
 
     # ---- lifecycle -----------------------------------------------------
     async def start(self) -> None:
+        self.sessions.purge_ephemeral()
         self._prune_worklog()
         self._tasks = [asyncio.create_task(self._pump()), asyncio.create_task(self._usage_loop()),
                        asyncio.create_task(self._tick_loop())]
@@ -117,6 +125,30 @@ class AgentRunner:
         for t in self._tasks:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+
+    def apply_settings(self, settings: dict) -> None:
+        """Settings the lender changed that work at once (what needs a Codex restart: SettingsApplier)."""
+        self.settings = copy.deepcopy(settings)
+        self.apply_local_limits(settings["limits"])
+        if self.worklog is not None:
+            self.worklog.retention_days = settings["log_retention_days"]
+
+    @contextlib.asynccontextmanager
+    async def exclusive(self):
+        """No task can start inside; yields whether the agent is idle (to restart Codex or move the data)."""
+        async with self._lock:
+            yield self.cur is None
+
+    async def _end(self, app_alive: bool = True) -> None:
+        """The task is over (any way): a disposable session is dropped and no longer listed (design 4.6)."""
+        cur, self.cur = self.cur, None
+        if cur is not None and cur.ephemeral and cur.thread_id:
+            self.sessions.remove(cur.thread_id)
+            if app_alive:
+                try:
+                    await asyncio.wait_for(self.app.thread_delete(cur.thread_id), DISCARD_TIMEOUT)
+                except Exception:
+                    pass  # an ephemeral thread lives in memory only: nothing on disk to clean up
 
     # ---- sending -------------------------------------------------------
     async def _safe_send(self, m: dict) -> None:
@@ -201,30 +233,35 @@ class AgentRunner:
         elif t == "session_delete":
             await self._session_op(m, read=False)
 
+    def _instructions(self) -> str:
+        return PREAMBLE + feature_instructions(self.settings["features"])
+
     async def _task_start(self, m: dict) -> None:
         async with self._lock:
             if self.cur is not None:
                 await self._state("failed", report="別のタスクが作業中です", task_id=m["task_id"])
                 return
-            self.cur = Current(task_id=m["task_id"])
+            self.cur = Current(task_id=m["task_id"], ephemeral=bool(self.settings["disposable"]))
             self.on_log({"type": "task_prompt", "task_id": m["task_id"], "prompt": m["prompt"]})
             self._prune_worklog()
             self._record(m["task_id"], "task_prompt", {"text": m["prompt"]})
             try:
                 cont = m.get("continue_thread_id")
                 if cont:
+                    if self.cur.ephemeral:
+                        raise AppServerError(NO_RESUME)
                     if not self.sessions.owns(cont):
                         raise AppServerError(NOT_OWNED)
-                    self.cur.thread_id = await self.app.thread_resume(cont, PREAMBLE)
+                    self.cur.thread_id = await self.app.thread_resume(cont, self._instructions())
                 else:
-                    self.cur.thread_id = await self.app.thread_start(PREAMBLE)
-                self.sessions.add(self.cur.thread_id, self.cur.task_id)
+                    self.cur.thread_id = await self.app.thread_start(self._instructions(), self.cur.ephemeral)
+                self.sessions.add(self.cur.thread_id, self.cur.task_id, self.cur.ephemeral)
                 await self._state("running")
                 await self._event("started")
                 self.cur.turn_id = await self.app.turn_start(self.cur.thread_id, m["prompt"])
             except Exception as e:  # app-server gone, pipe broken, timeout...: never keep a stale task
                 await self._state("failed", report=f"開始できませんでした: {type(e).__name__}: {e}")
-                self.cur = None
+                await self._end()
 
     async def _followup(self, m: dict) -> None:
         cur = self.cur
@@ -242,7 +279,7 @@ class AgentRunner:
             cur.turn_id = await self.app.turn_start(cur.thread_id, m["text"])
         except Exception as e:
             await self._state("failed", report=f"追加の指示を渡せませんでした: {type(e).__name__}: {e}")
-            self.cur = None
+            await self._end()
 
     async def _cancel(self, m: dict) -> None:
         cur = self.cur
@@ -256,7 +293,7 @@ class AgentRunner:
             except AppServerError:
                 pass
         await self._state("cancelled", report=cur.last_message)
-        self.cur = None
+        await self._end()
 
     async def _session_op(self, m: dict, read: bool) -> None:
         tid = m["thread_id"]
@@ -336,7 +373,7 @@ class AgentRunner:
         elif method == "_exited":
             if cur:
                 await self._state("failed", report="Codex（app-server）が終了しました")
-                self.cur = None
+                await self._end(app_alive=False)
 
     async def _on_turn_completed(self, turn: dict) -> None:
         cur = self.cur
@@ -361,7 +398,7 @@ class AgentRunner:
         else:
             await self._state("completed", report=cur.last_message)
         self.on_log({"type": "final_report", "task_id": cur.task_id, "text": cur.last_message})
-        self.cur = None
+        await self._end()
         asyncio.create_task(self.refresh_usage())
 
     async def _on_delta(self, cur: Current, p: dict) -> None:

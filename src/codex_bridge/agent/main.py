@@ -19,9 +19,10 @@ from .. import __version__
 from ..common.invite import Invite, parse_invite
 from .appserver import AppServer, codex_command
 from .control_client import ControlClient
-from .logview import LimitsStore, LogStore, create_logview_app
+from .logview import LogStore, create_logview_app
 from .runner import AgentRunner
 from .sessions import SessionRegistry
+from .settings import SettingsApplier, SettingsStore, hello_fields, resolve_workdir
 from .setup import (MIN_CODEX_VERSION, choose_codex, data_root, download_codex, load_invite, make_guard, run_login,
                     save_invite, user_mcp_names)
 from .worklog import WorkLog
@@ -114,12 +115,14 @@ def codex_version(cmd: list[str]) -> str:
         return "?"
 
 
-async def run_agent(invite: Invite, codex: Path, home: Path) -> None:
+async def run_agent(invite: Invite, codex: Path, home: Path) -> bool:
+    """Runs until the user quits. True when the data was moved to another place: the exe must start again."""
     cmd = codex_command(codex)
-    workdir = home / "workdir"
-    workdir.mkdir(exist_ok=True)
+    settings = SettingsStore(home / "settings.json", legacy_limits=home / "limits.json")
+    current = settings.get()
     # Our sessions use only the bridge tools: the friend's own MCP servers are switched off for them.
-    app = AppServer(cmd, invite.url, invite.token, workdir, disabled_mcp=user_mcp_names())
+    app = AppServer(cmd, invite.url, invite.token, resolve_workdir(current, home), disabled_mcp=user_mcp_names(),
+                    features=current["features"])
     await app.start()
     mode = await app.auth_mode()
     if mode == "none":
@@ -130,13 +133,16 @@ async def run_agent(invite: Invite, codex: Path, home: Path) -> None:
         mode = await app.auth_mode()
         if mode == "none":
             show_info("Codex にログインできませんでした。もう一度起動してください。", error=True)
-            return
+            return False
 
     store = LogStore(home / "logs")
     runner = AgentRunner(app, make_guard(mode), SessionRegistry(home / "sessions.json"), send=None,
-                         on_log=store.add, worklog=WorkLog(home / "logs" / "tasks"))
+                         on_log=store.add,
+                         worklog=WorkLog(home / "logs" / "tasks", retention_days=current["log_retention_days"]))
+    runner.apply_settings(current)
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
+    relaunch = False
 
     def toggle_pause() -> None:
         client.paused = not client.paused
@@ -145,18 +151,29 @@ async def run_agent(invite: Invite, codex: Path, home: Path) -> None:
             asyncio.run_coroutine_threadsafe(client.drop(), loop)
 
     tray = Tray(on_quit=lambda: loop.call_soon_threadsafe(stop.set), on_pause_toggle=toggle_pause)
-    client = ControlClient(invite, runner, hello={"agent_version": __version__, "codex_version": codex_version(cmd),
-                                                  "auth_mode": mode},
+    versions = {"agent_version": __version__, "codex_version": codex_version(cmd), "auth_mode": mode}
+    client = ControlClient(invite, runner, hello=lambda: {**versions, **hello_fields(runner.settings)},
                            on_status=lambda s: tray.set_status(s))
     tray.run_detached()
-    limits = LimitsStore(home / "limits.json")
-    runner.apply_local_limits(limits.get())
-    logview = make_logview_server(store, limits, runner.apply_local_limits)
+    applier = SettingsApplier(settings, app, runner, home, refresh_hello=client.send_hello, on_log=store.add)
+
+    async def move_data(new: Path) -> list[Path]:
+        nonlocal relaunch
+        left = await applier.move_data(new)
+        relaunch = True  # the stores in this process still point at the old place: start again on the new one
+        loop.call_later(1.0, stop.set)
+        return left
+
+    logview = make_logview_server(store, settings, applier.apply, move_data)
 
     async def watchdog() -> None:
         while True:
             await asyncio.sleep(5)
-            if not app.running:
+            try:
+                await applier.settle()  # a change that had to wait for the running task
+            except Exception as e:
+                store.add({"type": "error", "text": f"設定を反映できませんでした: {type(e).__name__}: {e}"})
+            if not app.running and not applier.moving:
                 tray.set_status("Codex を再起動しています")
                 try:
                     await app.start()
@@ -173,6 +190,7 @@ async def run_agent(invite: Invite, codex: Path, home: Path) -> None:
     await runner.stop()
     await app.stop()
     tray.icon.stop()
+    return relaunch
 
 
 def ensure_std_streams() -> None:
@@ -183,16 +201,17 @@ def ensure_std_streams() -> None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 
-def make_logview_server(store: LogStore, limits: LimitsStore | None = None, on_limits=None) -> uvicorn.Server:
+def make_logview_server(store: LogStore, settings: SettingsStore | None = None, on_settings=None,
+                        on_move=None) -> uvicorn.Server:
     # log_config=None: uvicorn's own logging setup inspects sys.stdout, which a windowed exe lacks.
-    return uvicorn.Server(uvicorn.Config(create_logview_app(store, limits, on_limits), host="127.0.0.1", port=LOGVIEW_PORT,
-                                         log_level="warning", log_config=None))
+    return uvicorn.Server(uvicorn.Config(create_logview_app(store, settings, on_settings, on_move), host="127.0.0.1",
+                                         port=LOGVIEW_PORT, log_level="warning", log_config=None))
 
 
-def run_guarded(fn, home: Path) -> None:
-    """Run fn; on an unexpected error write logs/crash.log and tell the user in Japanese."""
+def run_guarded(fn, home: Path):
+    """Run fn and return its result; on an unexpected error write logs/crash.log and tell the user in Japanese."""
     try:
-        fn()
+        return fn()
     except Exception:
         log = Path(home) / "logs" / "crash.log"
         log.parent.mkdir(parents=True, exist_ok=True)
@@ -205,15 +224,27 @@ def run_guarded(fn, home: Path) -> None:
 def main() -> None:
     ensure_std_streams()
     home = data_root()
-    run_guarded(lambda: _main(home), home)
+    if run_guarded(lambda: _main(home), home):
+        start_again()
 
 
-def _main(home: Path) -> None:
+def start_again() -> None:
+    """The data was moved (design 4.7): start the exe again so that it opens the new place."""
+    if not getattr(sys, "frozen", False):
+        show_info("保存場所を移しました。codex-bridge を起動し直してください。")
+        return
+    # a one-file exe passes its unpacked folder on through the environment: the new one must unpack its own
+    subprocess.Popen([sys.executable], env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}, close_fds=True,
+                     creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
+                     | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+
+
+def _main(home: Path) -> bool:
     invite = load_invite(home)
     if invite is None:
         invite = ask_invite()
         if invite is None:
-            return
+            return False
         save_invite(home, invite)
     on_path = shutil.which("codex")
     bundled = home / "bin" / "codex.exe"
@@ -223,13 +254,13 @@ def _main(home: Path) -> None:
         if not ask_yes_no(f"Codex（コマンド版、{need} 以降）が見つからないか、古い版です。公式サイト"
                           "（GitHub の openai/codex）から最新版をダウンロードしてよいですか？（約 200MB）\n"
                           "※ あなたが普段使っている Codex には影響しません。"):
-            return
+            return False
         try:
             codex = download_codex(home / "bin")
         except Exception as e:
             show_info(f"ダウンロードできませんでした: {e}", error=True)
-            return
-    asyncio.run(run_agent(invite, codex, home))
+            return False
+    return asyncio.run(run_agent(invite, codex, home))
 
 
 if __name__ == "__main__":

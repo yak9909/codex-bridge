@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import httpx
 import pytest
 
@@ -49,19 +51,76 @@ def test_store_persists_to_disk(tmp_path, store):
     assert len(LogStore(tmp_path / "logs").entries) == len(store.entries)
 
 
-async def test_limits_api_defaults_save_and_notify(tmp_path):
-    from codex_bridge.agent.logview import LimitsStore
-    seen = []
-    limits = LimitsStore(tmp_path / "limits.json")
-    app = create_logview_app(LogStore(tmp_path / "logs"), limits=limits, on_limits=seen.append)
+def settings_app(tmp_path, **kw):
+    from codex_bridge.agent.settings import SettingsStore
+    store = SettingsStore(tmp_path / "settings.json")
+    app = create_logview_app(LogStore(tmp_path / "logs"), settings=store, **kw)
     t = httpx.ASGITransport(app=app, client=("127.0.0.1", 1))
-    async with httpx.AsyncClient(transport=t, base_url="http://127.0.0.1:8766") as c:
-        assert (await c.get("/api/limits")).json() == {"five_hour": None, "weekly": None, "force": False}
+    return store, httpx.AsyncClient(transport=t, base_url="http://127.0.0.1:8766")
+
+
+async def test_limits_api_defaults_save_and_notify(tmp_path):
+    seen = []
+
+    async def changed(s):
+        seen.append(s)
+    store, client = settings_app(tmp_path, on_settings=changed)
+    async with client as c:
+        assert (await c.get("/api/limits")).json() == {"five_hour": 80, "weekly": 80, "force": False}  # design 4.3
         r = await c.put("/api/limits", json={"five_hour": 70, "weekly": None, "force": True})
-        assert r.status_code == 200 and seen[-1] == {"five_hour": 70, "weekly": None, "force": True}
+        assert r.status_code == 200 and r.json() == {"five_hour": 70, "weekly": None, "force": True}
+        assert seen[-1]["limits"] == {"five_hour": 70, "weekly": None, "force": True}
+        # the page of v0.1 sends what the input boxes hold: text, and "" for an empty box
+        r = await c.put("/api/limits", json={"five_hour": "65", "weekly": "", "force": False})
+        assert r.status_code == 200 and seen[-1]["limits"] == {"five_hour": 65, "weekly": None, "force": False}
         assert (await c.put("/api/limits", json={"five_hour": 150})).status_code == 400
+        assert (await c.put("/api/limits", json={"five_hour": "abc"})).status_code == 400
         assert (await c.put("/api/limits", json={"five_hour": 70}, headers={"Host": "evil:1"})).status_code == 403
-    assert LimitsStore(tmp_path / "limits.json").get() == {"five_hour": 70, "weekly": None, "force": True}
+    assert store.get()["limits"] == {"five_hour": 65, "weekly": None, "force": False}
+
+
+async def test_settings_api_reads_patches_notifies_and_refuses_bad_values(tmp_path):
+    seen = []
+
+    async def changed(s):
+        seen.append(s)
+    store, client = settings_app(tmp_path, on_settings=changed)
+    async with client as c:
+        got = (await c.get("/api/settings")).json()
+        assert got["settings"]["features"] == {"web_search": False, "image_generation": False,
+                                                "multi_agent": False, "goals": False}
+        assert got["feature_info"]["multi_agent"]["best_effort"] is True  # for the label on the screen
+        r = await c.put("/api/settings", json={"disposable": True, "features": {"goals": True}})
+        assert r.status_code == 200 and r.json()["disposable"] is True and r.json()["limits"]["five_hour"] == 80
+        assert seen[-1] == r.json() and store.get() == r.json()
+        r = await c.put("/api/settings", json={"disposable": "yes"})
+        assert r.status_code == 400 and len(seen) == 1 and store.get()["disposable"] is True
+        for host in ("evil:1",):
+            assert (await c.put("/api/settings", json={"disposable": False}, headers={"Host": host})).status_code == 403
+            assert (await c.get("/api/settings", headers={"Host": host})).status_code == 403
+    assert store.get()["disposable"] is True
+
+
+async def test_data_location_api_moves_through_the_callback_and_reports_why_not(tmp_path):
+    moved = []
+
+    async def move(path):
+        if "bad" in str(path):
+            raise ValueError("空のフォルダを指定してください")
+        moved.append(path)
+        return []
+    _, client = settings_app(tmp_path, on_move=move)
+    async with client as c:
+        r = await c.put("/api/data-location", json={"path": "D:/new place"})
+        assert r.status_code == 200 and r.json()["moved"] is True and moved[0] == Path("D:/new place")
+        r = await c.put("/api/data-location", json={"path": "D:/bad"})
+        assert r.status_code == 400 and "空のフォルダ" in r.json()["detail"]
+        assert (await c.put("/api/data-location", json={"path": ""})).status_code == 400
+        assert (await c.put("/api/data-location", json={})).status_code == 400
+        assert (await c.put("/api/data-location", json={"path": "D:/x"}, headers={"Host": "evil:1"})).status_code == 403
+    _, plain = settings_app(tmp_path / "other")
+    async with plain as c:
+        assert (await c.put("/api/data-location", json={"path": "D:/x"})).status_code == 404
 
 
 def test_v02_tool_events_keep_showing_as_tool_calls_and_the_rest_adds_no_rows(tmp_path):

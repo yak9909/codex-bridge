@@ -25,7 +25,7 @@ def ws_url(http_url: str) -> str:
 
 
 class ControlClient:
-    def __init__(self, invite: Invite, runner: AgentRunner, hello: dict, initial_backoff: float = 1.0,
+    def __init__(self, invite: Invite, runner: AgentRunner, hello: dict | Callable[[], dict], initial_backoff: float = 1.0,
                  on_status: Callable[[str], None] | None = None) -> None:
         self.invite = invite
         self.runner = runner
@@ -40,6 +40,15 @@ class ControlClient:
         if self.ws is None:
             raise ConnectionError("not connected")
         await self.ws.send(protocol.encode(m))
+
+    async def send_hello(self) -> None:
+        """Say who this agent is and what it can do. A callable `hello` is called now, so that a setting changed since
+        the last connection (disposable, pre-approval) is what the host hears."""
+        if self.ws is None:
+            return
+        fields = self.hello() if callable(self.hello) else self.hello
+        cur = self.runner.cur
+        await self.send(protocol.msg("hello", **fields, current_task_id=cur.task_id if cur else None))
 
     async def drop(self) -> None:
         """Close the current connection (used by tests and on shutdown)."""
@@ -60,9 +69,7 @@ class ControlClient:
                     self.ws = ws
                     backoff = self.initial_backoff
                     self.on_status("接続しました")
-                    cur = self.runner.cur
-                    await self.send(protocol.msg("hello", **self.hello,
-                                                 current_task_id=cur.task_id if cur else None))
+                    await self.send_hello()
                     await self.runner.resend_unacked()
                     async for text in ws:
                         try:

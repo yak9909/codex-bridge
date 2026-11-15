@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 
 from .. import __version__
+from .settings import defaults, feature_args
 from .usage import UsageSnapshot, snapshot_from_rate_limits
 
 MCP_NAME = "bridge"
@@ -36,14 +37,16 @@ def _toml_key(name: str) -> str:
     return name if _BARE_KEY.fullmatch(name) else json.dumps(name)
 
 
-def launch_args(host_url: str, disabled_mcp: list[str] | tuple = ()) -> list[str]:
+def launch_args(host_url: str, disabled_mcp: list[str] | tuple = (), features: dict | None = None) -> list[str]:
     """app-server arguments: only the bridge MCP server, none of the friend's tools or add-ons.
 
     disabled_mcp must list servers that really exist in the friend's config.toml: naming an unknown
-    server creates an empty entry and makes app-server fail to start."""
+    server creates an empty entry and makes app-server fail to start. features: which of the lender's
+    restrictable features are allowed (True); None stops all of them (design 4.4)."""
     args = ["app-server"]
     for feature in ISOLATED_FEATURES:
         args += ["--disable", feature]
+    args += feature_args(features)
     for name in disabled_mcp:
         if name != MCP_NAME:
             args += ["-c", f"mcp_servers.{_toml_key(name)}.enabled=false"]
@@ -70,24 +73,46 @@ def _text(text: str) -> list[dict]:
 
 class AppServer:
     def __init__(self, codex_cmd: list[str], host_url: str, token: str, workdir: Path,
-                 disabled_mcp: list[str] | tuple = ()) -> None:
+                 disabled_mcp: list[str] | tuple = (), features: dict | None = None) -> None:
         self.codex_cmd = list(codex_cmd)
         self.disabled_mcp = list(disabled_mcp)
         self.host_url = host_url
         self.token = token
         self.workdir = Path(workdir)
+        self.features = {**defaults()["features"], **(features or {})}  # True = allowed; see settings.py
         self.events: asyncio.Queue[dict] = asyncio.Queue()
         self.proc: asyncio.subprocess.Process | None = None
         self._ids = itertools.count(1)
         self._pending: dict[int, asyncio.Future] = {}
         self._reader: asyncio.Task | None = None
         self._write_lock = asyncio.Lock()
+        self._lifecycle = asyncio.Lock()  # start / restart never overlap (the watchdog also starts it)
+        self._planned_exit = False
 
     async def start(self) -> None:
+        async with self._lifecycle:
+            if not self.running:
+                await self._start()
+
+    async def restart(self, features: dict | None = None, workdir: Path | None = None) -> None:
+        """Stop and start again, with new features / work folder. The planned exit is not reported as a crash."""
+        async with self._lifecycle:
+            if features is not None:
+                self.features = {**defaults()["features"], **features}
+            if workdir is not None:
+                self.workdir = Path(workdir)
+            self._planned_exit = True
+            try:
+                await self._stop()
+            finally:
+                self._planned_exit = False
+            await self._start()
+
+    async def _start(self) -> None:
         env = {**os.environ, TOKEN_ENV: self.token}
         self.proc = await asyncio.create_subprocess_exec(
-            *self.codex_cmd, *launch_args(self.host_url, self.disabled_mcp), cwd=str(self.workdir), env=env,
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            *self.codex_cmd, *launch_args(self.host_url, self.disabled_mcp, self.features), cwd=str(self.workdir),
+            env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             limit=64 * 1024 * 1024, creationflags=CREATE_NO_WINDOW)
         self._reader = asyncio.create_task(self._read_loop())
         await self.request("initialize", {"clientInfo": {"name": "codex-bridge-agent", "version": __version__},
@@ -95,6 +120,10 @@ class AppServer:
         await self._write({"method": "initialized"})
 
     async def stop(self) -> None:
+        async with self._lifecycle:
+            await self._stop()
+
+    async def _stop(self) -> None:
         if self.proc and self.proc.returncode is None:
             # Kill the whole tree: codex may be a .cmd wrapper around node.
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.proc.pid)], capture_output=True,
@@ -105,6 +134,7 @@ class AppServer:
                 self.proc.kill()
         if self._reader:
             self._reader.cancel()
+            await asyncio.gather(self._reader, return_exceptions=True)  # its "exited" report is settled now
 
     @property
     def running(self) -> bool:
@@ -149,7 +179,8 @@ class AppServer:
             for fut in self._pending.values():
                 if not fut.done():
                     fut.set_exception(AppServerError("app-server が終了しました"))
-            await self.events.put({"method": "_exited", "params": {}})
+            if not self._planned_exit:
+                await self.events.put({"method": "_exited", "params": {}})
 
     async def _answer_server_request(self, msg: dict) -> None:
         method, params = msg["method"], msg.get("params") or {}
@@ -168,10 +199,12 @@ class AppServer:
         await self._write({"id": msg["id"], "result": result})
 
     # ---- typed helpers -------------------------------------------------
-    async def thread_start(self, developer_instructions: str) -> str:
-        r = await self.request("thread/start", {
-            "cwd": str(self.workdir), "sandbox": "read-only", "approvalPolicy": "never",
-            "developerInstructions": developer_instructions, "serviceName": "codex-bridge"})
+    async def thread_start(self, developer_instructions: str, ephemeral: bool = False) -> str:
+        params = {"cwd": str(self.workdir), "sandbox": "read-only", "approvalPolicy": "never",
+                  "developerInstructions": developer_instructions, "serviceName": "codex-bridge"}
+        if ephemeral:  # disposable session (design 4.6): no conversation record is written under ~/.codex
+            params["ephemeral"] = True
+        r = await self.request("thread/start", params)
         return r["thread"]["id"]
 
     async def thread_resume(self, thread_id: str, developer_instructions: str) -> str:
