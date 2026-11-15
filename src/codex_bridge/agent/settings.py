@@ -466,7 +466,7 @@ class SettingsApplier:
             try:
                 await self.app.stop()
                 try:
-                    left = await asyncio.to_thread(self._move, Path(new))
+                    left = await asyncio.to_thread(self._move, Path(new), current=self.root)  # from where the data is now
                 except BaseException:
                     await self.app.start()  # back on the original, which was not touched
                     raise

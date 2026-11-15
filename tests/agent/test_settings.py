@@ -741,6 +741,7 @@ async def test_a_failing_restart_is_logged_and_tried_again_at_the_next_check(rig
 
 async def test_moving_the_data_needs_an_idle_agent_and_stops_codex_while_it_copies(rig, home, tmp_path):
     build_root(home)
+    rig.applier.root = home  # the running data root (here: the default place, no location.txt)
     rig.env.runner.cur = Current(task_id="t1", thread_id="th1")
     with pytest.raises(ValueError, match="作業中"):
         await rig.applier.move_data(tmp_path / "new")
@@ -758,8 +759,26 @@ async def test_moving_the_data_needs_an_idle_agent_and_stops_codex_while_it_copi
 
 async def test_a_failed_move_starts_codex_again_and_changes_nothing(rig, home, tmp_path):
     build_root(home)
+    rig.applier.root = home
     before = snapshot(home)
     rig.applier._move = lambda new, **k: st.move_data_root(new, copy=_fail_after_first_file)
     with pytest.raises(OSError):
         await rig.applier.move_data(tmp_path / "new")
     assert rig.env.fake.app.running and snapshot(home) == before and setup.data_root() == home
+
+
+async def test_the_data_is_moved_from_the_running_root_even_when_location_txt_says_another_place(rig, home, tmp_path):
+    # location.txt names a place that is not the one in use (edited by hand, or an earlier move that only half
+    # worked): the source of the move is where the data is now, not where location.txt points.
+    running, stale = rig.root, tmp_path / "stale"
+    build_root(running)
+    stale.mkdir()
+    (stale / "decoy.txt").write_text("not the data", encoding="utf-8")
+    st._write_location(home, stale)
+    before = snapshot(running)
+    new = tmp_path / "new"
+    left = await rig.applier.move_data(new)
+    assert left == [] and not running.exists()
+    assert snapshot(new) == before  # what was in use is what arrived
+    assert (stale / "decoy.txt").read_text(encoding="utf-8") == "not the data"  # the other place is untouched
+    assert setup.data_root() == new  # and location.txt now says where the data is
