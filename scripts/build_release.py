@@ -1,8 +1,9 @@
 """Build both exes and assemble the two release zips into release/.
 
 Run from the repo root:  uv run python scripts/build_release.py
-  release/codex-bridge-admin-v<ver>.zip   for the owner (unzip, run setup.bat)
-  release/codex-bridge-friend-v<ver>.zip  for the friend (unzip, run the exe)
+  release/codex-bridge-admin-v0.2.0.zip   for the owner (unzip, run setup.bat)
+  release/codex-bridge-friend-v0.2.0.zip  for the friend (unzip, run the exe)
+The release version comes from pyproject.toml.
 """
 
 import shutil
