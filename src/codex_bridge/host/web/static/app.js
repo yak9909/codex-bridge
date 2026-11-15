@@ -81,18 +81,20 @@ function drawLenders(rows, th) {
   }));
 }
 
-// "自動" and every lender by name; those who cannot take a request now are shown but cannot be chosen.
+// "自動" and every lender by name; those who cannot take a request now say why and cannot be picked.
+// The one already chosen stays chosen whatever becomes of it (busy, stopped, gone from the list): a
+// request must never go to somebody else than the person named, so the host is left to refuse it.
 function drawTargets(rows) {
-  const sel = $("req-lender"), keep = sel.value;
+  const sel = $("req-lender"), chosen = sel.value;
   const why = (l) => (!l.connected ? "未接続" : !l.ready ? "準備中" : l.current_task_id ? "作業中"
     : l.usage.blocked_until ? "上限のため停止中" : "");
-  const html = '<option value="">自動（使用量に余裕のある人）</option>' + rows.map((l) => {
-    const w = why(l);
-    return `<option value="${esc(l.name)}"${w ? " disabled" : ""}>${esc(l.name)}${w ? `（${w}）` : ""}</option>`;
-  }).join("");
+  const option = (name, w) =>
+    `<option value="${esc(name)}"${w && name !== chosen ? " disabled" : ""}>${esc(name)}${w ? `（${w}）` : ""}</option>`;
+  const html = '<option value="">自動（使用量に余裕のある人）</option>' + rows.map((l) => option(l.name, why(l))).join("")
+    + (chosen && !rows.some((l) => l.name === chosen) ? option(chosen, "一覧にいません") : "");
   if (sel._html === html) return;
   sel.innerHTML = sel._html = html;
-  sel.value = [...sel.options].some((o) => o.value === keep && !o.disabled) ? keep : "";
+  sel.value = chosen;
 }
 
 $("lenders").onclick = (ev) => {
