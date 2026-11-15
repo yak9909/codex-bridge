@@ -6,7 +6,7 @@ from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from codex_bridge.host.control import add_control_route
-from codex_bridge.host.tasks import TaskManager
+from codex_bridge.host.tasks import TaskManager, TaskRecord
 from codex_bridge.host.tokens import TokenStore
 
 
@@ -39,6 +39,30 @@ def test_hello_gets_settings_and_events_are_acked(env):
         assert json.loads(ws.receive_text()) == {"type": "ack", "seq": 1}
     assert mgr.agent_info()["connected"] is False
     assert mgr.usage()["five_hour"]["used_percent"] == 10
+
+
+def test_numbers_json_cannot_carry_do_not_get_past_the_socket(env):
+    # NaN, Infinity and 1e999 (which reads as infinity) in what an agent sends: replaced on receipt, so
+    # that nothing kept from the message can break a page or a file later.
+    mgr, tokens, tok, client = env
+    mgr.tasks["t0"] = TaskRecord(task_id="t0", prompt="p", created=0, state="running", lender="friend")
+    with client.websocket_connect("/agent/ws", headers={"Authorization": f"Bearer {tok}"}) as ws:
+        ws.send_text('{"type": "hello", "agent_version": "0.2", "codex_version": NaN, "auth_mode": "chatgpt", '
+                     '"protocol": 1e999, "current_task_id": "t0"}')
+        assert json.loads(ws.receive_text())["type"] == "settings"
+        ws.send_text('{"type": "event", "seq": 1, "task_id": "t0", "kind": "status", "data": {"text": NaN, "n": [1e999, -1e999]}}')
+        assert json.loads(ws.receive_text()) == {"type": "ack", "seq": 1}
+        ws.send_text('{"type": "task_state", "seq": 2, "task_id": "t0", "state": NaN, "report": Infinity}')
+        assert json.loads(ws.receive_text()) == {"type": "ack", "seq": 2}
+        ws.send_text('{"type": "usage", "five_hour": {"used_percent": 10, "resets_at": 1e999}, "weekly": null, "ts": -Infinity}')
+        ws.send_text('{"type": "task_state", "seq": 3, "task_id": "t0", "state": "running", "resume_at": 1e999}')
+        assert json.loads(ws.receive_text()) == {"type": "ack", "seq": 3}  # the connection is still alive
+        assert mgr.status("t0")["state"] == "running" and mgr.result("t0")["report"] is None
+    assert mgr.events("t0")[0]["data"] == {"text": None, "n": [None, None]}
+    for value in (mgr.list_tasks(), mgr.result("t0"), mgr.status("t0"), mgr.events("t0"), mgr.lenders(), mgr.usage()):
+        json.dumps(value, allow_nan=False)
+    again = TaskManager(mgr.dir.parent, touched_fn=lambda t: [])  # and nothing of it was written to disk
+    json.dumps([again.list_tasks(), again.events("t0")], allow_nan=False)
 
 
 def test_each_token_connects_as_its_own_lender(env):

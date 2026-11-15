@@ -1,7 +1,9 @@
 import asyncio
+import json
 
 import pytest
 
+from codex_bridge.common import protocol
 from codex_bridge.host.paths import ToolError
 from codex_bridge.host.tasks import TaskManager
 
@@ -198,3 +200,118 @@ async def test_reconnected_agent_with_task_restores_state(mgr, agent):
 async def test_usage_shows_friend_limits(mgr, agent):
     await agent.push("usage", **usage(five_hour=10), friend_limits={"five_hour": 70, "weekly": None, "force": True})
     assert mgr.usage()["friend_limits"] == {"five_hour": 70, "weekly": None, "force": True}
+
+
+# ---- what an agent sends about a task is checked before it is kept ---------------------------
+# (review I1: one NaN in a state or an event kept the task list of the admin page at an error, also after a restart)
+NAN, INF = float("nan"), float("inf")
+
+
+def as_json(value):
+    """Fails the way the admin API does when a value cannot be sent as JSON."""
+    return json.loads(json.dumps(value, allow_nan=False))
+
+
+def everything(mgr: TaskManager, tid: str):
+    return as_json([mgr.list_tasks(), mgr.result(tid), mgr.status(tid), mgr.events(tid), mgr.lenders(), mgr.usage()])
+
+
+@pytest.mark.parametrize("state", [NAN, INF, None, 5, True, "", "done", "RUNNING", ["running"], {"s": "running"}])
+async def test_task_state_with_an_unknown_state_is_ignored(mgr, agent, state):
+    tid = await mgr.start("a")
+    await agent.push("task_state", task_id=tid, state="running", thread_id="th1")
+    await agent.push("task_state", task_id=tid, state=state, thread_id="th2", report="not this")
+    assert mgr.status(tid)["state"] == "running" and mgr.result(tid)["thread_id"] == "th1"
+    assert mgr.result(tid)["report"] is None and mgr.current_task_id() == tid
+    assert everything(mgr, tid)[0][0]["state"] == "running"
+    assert agent.last("ack")["seq"] == agent.seq  # acknowledged all the same, or it would be sent again for ever
+    assert "th2" not in (mgr.dir / f"{tid}.json").read_text(encoding="utf-8")
+
+
+async def test_task_state_keeps_only_values_of_the_right_kind(mgr, agent):
+    tid = await mgr.start("a")
+    await agent.push("task_state", task_id=tid, state="running", thread_id="th1", report="so far")
+    await agent.push("task_state", task_id=tid, state="suspended_quota", thread_id=NAN, report={"x": NAN}, resume_at=INF)
+    r = mgr.result(tid)
+    assert (r["state"], r["thread_id"], r["report"], r["resume_at"]) == ("suspended_quota", "th1", "so far", None)
+    for bad in (NAN, "soon", 1e300, True, [1]):
+        await agent.push("task_state", task_id=tid, state="suspended_quota", resume_at=bad)
+        assert mgr.result(tid)["resume_at"] is None and mgr.status(tid)["resume_at"] is None
+    await agent.push("task_state", task_id=tid, state="suspended_quota", resume_at=1_800_000_000)
+    assert mgr.result(tid)["resume_at"].startswith("2027-01-1")
+    everything(mgr, tid)
+
+
+@pytest.mark.parametrize("task_id", [NAN, None, 5, ["t"], {"t": 1}])
+async def test_messages_about_no_task_in_words_are_ignored(mgr, agent, task_id):
+    tid = await mgr.start("a")
+    await agent.push("event", task_id=task_id, kind="status", data={"text": "x"})
+    await agent.push("task_state", task_id=task_id, state="completed", report="x")
+    assert mgr.events(tid) == [] and mgr.status(tid)["state"] == "queued"
+
+
+async def test_event_data_is_kept_without_the_numbers_json_cannot_carry(tmp_path, mgr, agent):
+    tid = await mgr.start("a")
+    await agent.push("event", task_id=tid, kind="status", data={"text": NAN, "more": [INF, {"deep": -INF}], "ok": 1.5})
+    # the same from the wire: 1e999 is a number JSON allows, and it reads as infinity
+    wire = ('{"type": "event", "seq": 99, "task_id": "%s", "kind": "token_usage", '
+            '"data": {"input": 1e999, "output": NaN, "note": [-Infinity]}}' % tid)
+    await mgr.on_agent_message(agent.link, protocol.decode(wire))
+    assert [e["data"] for e in mgr.events(tid)] == [
+        {"text": None, "more": [None, {"deep": None}], "ok": 1.5}, {"input": None, "output": None, "note": [None]}]
+    everything(mgr, tid)
+    on_disk = (mgr.dir / f"{tid}.jsonl").read_text(encoding="utf-8")
+    assert "NaN" not in on_disk and "Infinity" not in on_disk
+    again = TaskManager(tmp_path / "data", touched_fn=lambda t: [])
+    assert [e["data"] for e in again.events(tid)] == [e["data"] for e in mgr.events(tid)]
+
+
+@pytest.mark.parametrize("kind", [NAN, None, 5, "", ["status"], {"k": "status"}])
+async def test_event_without_a_kind_in_words_is_dropped(mgr, agent, kind):
+    tid = await mgr.start("a")
+    await agent.push("event", task_id=tid, kind=kind, data={"text": "x"})
+    assert mgr.events(tid) == [] and agent.last("ack")["seq"] == agent.seq
+
+
+async def test_records_spoilt_before_these_checks_do_not_break_the_lists(tmp_path):
+    # Written by a host that kept whatever an agent sent (NaN as the state, the report, the times),
+    # or cut off while being written: the host must start, and every list must still be JSON.
+    tasks = tmp_path / "data" / "tasks"
+    tasks.mkdir(parents=True)
+    (tasks / "bad.json").write_text(
+        '{"task_id": "bad", "prompt": "p", "created": 5.0, "state": NaN, "thread_id": NaN, "report": Infinity, '
+        '"resume_at": "soon", "continue_task_id": null, "state_before_offline": NaN, "lender": "alice", '
+        '"finished": NaN, "added_by_a_later_version": 1}', encoding="utf-8")
+    (tasks / "bad.jsonl").write_text(
+        '{"ts": 1.0, "kind": "status", "data": {"text": NaN}}\nnot json\n[1]\n'
+        '{"ts": NaN, "kind": "agent_message", "data": {"text": "hi"}}\n', encoding="utf-8")
+    (tasks / "times.json").write_text(
+        '{"task_id": "times", "prompt": "p", "created": NaN, "state": "completed", "resume_at": Infinity}', encoding="utf-8")
+    (tasks / "torn.json").write_text('{"task_id": "torn", "prom', encoding="utf-8")
+    (tasks / "list.json").write_text("[1, 2]", encoding="utf-8")
+    (tasks / "nameless.json").write_text('{"task_id": NaN, "prompt": "p", "created": 1.0, "state": "completed"}', encoding="utf-8")
+    (tasks / "good.json").write_text(
+        '{"task_id": "good", "prompt": "p", "created": 9.0, "state": "completed", "report": "ok", "thread_id": "th"}',
+        encoding="utf-8")
+    mgr = TaskManager(tmp_path / "data", touched_fn=lambda t: [])
+    assert [t["task_id"] for t in as_json(mgr.list_tasks())] == ["good", "bad", "times"]  # newest first
+    bad = as_json(mgr.result("bad"))
+    assert bad["state"] == "failed" and "記録が壊れて" in bad["report"]  # its real state is not known any more
+    assert (bad["thread_id"], bad["resume_at"], bad["finished"], bad["lender"]) == (None, None, None, "alice")
+    assert as_json(mgr.events("bad")) == [{"ts": 1.0, "kind": "status", "data": {"text": None}},
+                                          {"ts": None, "kind": "agent_message", "data": {"text": "hi"}}]
+    assert as_json(mgr.result("times"))["created"] == 0 and mgr.result("times")["state"] == "completed"
+    assert mgr.result("good")["report"] == "ok" and mgr.result("good")["thread_id"] == "th"
+    for tid in ("good", "bad", "times"):
+        everything(mgr, tid)
+    assert (tasks / "torn.json").exists()  # nothing is deleted
+    # and the host works on: a new task, and the answer of an agent to the spoilt one
+    async def drop(m):
+        pass
+    link = mgr.attach("alice", drop)
+    await mgr.on_agent_message(link, {"type": "hello", "agent_version": "0.2.0", "codex_version": "x", "auth_mode": "chatgpt"})
+    await mgr.on_agent_message(link, {"type": "task_state", "seq": 1, "task_id": "bad", "state": "completed",
+                                      "thread_id": "th9", "report": "done after all"})
+    assert mgr.result("bad")["state"] == "completed" and mgr.result("bad")["report"] == "done after all"
+    assert await mgr.start("next")
+    assert '"state": "completed"' in (tasks / "bad.json").read_text(encoding="utf-8")

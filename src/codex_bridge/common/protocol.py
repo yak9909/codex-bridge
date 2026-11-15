@@ -18,6 +18,7 @@ Messages with "seq" are re-sent by the agent after a reconnect until acked; the 
 from __future__ import annotations
 
 import json
+import math
 
 HOST_TO_AGENT = {"task_start", "task_followup", "task_cancel", "session_list", "session_read",
                  "session_delete", "settings", "ack"}
@@ -39,10 +40,27 @@ def encode(m: dict) -> str:
     return json.dumps(m, ensure_ascii=False)
 
 
+def finite(v):
+    """`v` with every number JSON cannot carry (NaN, Infinity, -Infinity) replaced by None, at any depth.
+
+    Python's json reads and writes those three although they are not JSON, and reads a number too
+    large for a float (1e999) as infinity. Kept as they are, they end up in the files and in the
+    answers of the admin API, where one of them makes the whole answer an error."""
+    if isinstance(v, float):
+        return v if math.isfinite(v) else None
+    if isinstance(v, dict):
+        return {k: finite(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [finite(x) for x in v]
+    return v
+
+
 def decode(s: str) -> dict:
+    """A message from the other side; ValueError when it is not one. Numbers JSON cannot carry
+    arrive as None (see `finite`), so nothing taken from a message can hold one."""
     try:
-        m = json.loads(s)
-    except json.JSONDecodeError as e:
+        m = finite(json.loads(s))
+    except (ValueError, RecursionError) as e:  # not JSON, a number with too many digits, nested too deep
         raise ValueError(f"bad message: {e}") from e
     if not isinstance(m, dict) or m.get("type") not in TYPES:
         raise ValueError(f"unknown message: {str(s)[:80]}")

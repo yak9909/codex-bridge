@@ -4,6 +4,7 @@ import httpx
 import pytest
 import yaml
 
+from codex_bridge.common import protocol
 from codex_bridge.common.invite import parse_invite
 from codex_bridge.host.app import build_host, create_local_app, create_public_app
 from codex_bridge.host.config import load_host_config
@@ -13,8 +14,7 @@ H = {"X-Codex-Bridge": "1"}
 VALID_OFF = "default: read\nrules: []\nexec: {mode: \"off\"}\n"
 
 
-@pytest.fixture
-def host(tmp_path):
+def make_host(tmp_path):
     share = tmp_path / "share"
     (share / "raw").mkdir(parents=True)
     cfg = tmp_path / "host.yaml"
@@ -25,10 +25,19 @@ def host(tmp_path):
     return build_host(load_host_config(cfg), config_path=cfg)
 
 
+def admin_client(host) -> httpx.AsyncClient:
+    t = httpx.ASGITransport(app=create_local_app(host), client=("127.0.0.1", 5000))
+    return httpx.AsyncClient(transport=t, base_url="http://127.0.0.1:8770")
+
+
+@pytest.fixture
+def host(tmp_path):
+    return make_host(tmp_path)
+
+
 @pytest.fixture
 async def admin(host):
-    t = httpx.ASGITransport(app=create_local_app(host), client=("127.0.0.1", 5000))
-    async with httpx.AsyncClient(transport=t, base_url="http://127.0.0.1:8770") as c:
+    async with admin_client(host) as c:
         yield c
 
 
@@ -246,6 +255,51 @@ async def test_task_detail_has_what_the_page_shows(admin, host):
     from codex_bridge.host.tasks import TaskManager
     again = TaskManager(host.config.data_dir, touched_fn=lambda t: [])  # kept across a host restart
     assert again.result(tid)["finished"] == ended and again.result(tid)["created"] == t["created"]
+
+
+async def test_task_apis_answer_whatever_a_lender_sends_about_a_task(admin, host):
+    # review I1: a NaN in a state or an event must not turn the task list or a task's detail into an error
+    link = await join(host.mgr, "alice")
+    tid = (await admin.post("/admin/api/tasks", json={"prompt": "hello"}, headers=H)).json()["task_id"]
+    nan = float("nan")
+    for text in (
+        '{"type": "event", "seq": 1, "task_id": "%s", "kind": "status", "data": {"text": NaN, "n": 1e999}}',
+        '{"type": "event", "seq": 2, "task_id": "%s", "kind": NaN, "data": {}}',
+        '{"type": "task_state", "seq": 3, "task_id": "%s", "state": NaN}',
+        '{"type": "task_state", "seq": 4, "task_id": "%s", "state": 1e999, "report": "x"}',
+        '{"type": "task_state", "seq": 5, "task_id": "%s", "state": "running", "thread_id": NaN, "report": -Infinity, "resume_at": 1e999}',
+    ):
+        await host.mgr.on_agent_message(link, protocol.decode(text % tid))
+    # the same handed over as numbers (not through the wire decoder)
+    await host.mgr.on_agent_message(link, {"type": "event", "seq": 6, "task_id": tid, "kind": "status", "data": {"text": nan}})
+    await host.mgr.on_agent_message(link, {"type": "task_state", "seq": 7, "task_id": tid, "state": nan, "report": nan})
+    r = await admin.get("/admin/api/tasks")
+    assert r.status_code == 200 and [(t["task_id"], t["state"]) for t in r.json()] == [(tid, "running")]
+    r = await admin.get(f"/admin/api/tasks/{tid}")
+    assert r.status_code == 200
+    t = r.json()
+    assert (t["state"], t["thread_id"], t["report"], t["resume_at"]) == ("running", None, None, None)
+    assert [e["data"] for e in t["events"]] == [{"text": None, "n": None}, {"text": None}]
+    for path in ("/admin/api/lenders", "/admin/api/overview", "/admin/api/usage"):
+        assert (await admin.get(path)).status_code == 200, path
+
+
+async def test_task_apis_work_again_after_a_record_was_saved_with_nan(tmp_path):
+    # what a host before this check wrote to disk: the list must not stay at an error after the update
+    tasks = tmp_path / "data" / "tasks"
+    tasks.mkdir(parents=True)
+    (tasks / "t1.json").write_text('{"task_id": "t1", "prompt": "p", "created": 5.0, "state": NaN, "report": NaN, '
+                                   '"thread_id": "th", "resume_at": NaN, "lender": "alice"}', encoding="utf-8")
+    (tasks / "t1.jsonl").write_text('{"ts": 1.0, "kind": "status", "data": {"text": NaN}}\n', encoding="utf-8")
+    (tasks / "t2.json").write_text('{"task_id": "t2", "prompt": "q", "created": 6.0, "state": "completed", "report": "ok"}',
+                                   encoding="utf-8")
+    async with admin_client(make_host(tmp_path)) as admin:
+        r = await admin.get("/admin/api/tasks")
+        assert r.status_code == 200 and [(t["task_id"], t["state"]) for t in r.json()] == [("t2", "completed"), ("t1", "failed")]
+        r = await admin.get("/admin/api/tasks/t1")
+        assert r.status_code == 200 and r.json()["events"] == [{"ts": 1.0, "kind": "status", "data": {"text": None}}]
+        assert (await admin.get("/admin/api/tasks/t2")).json()["report"] == "ok"
+        assert (await admin.get("/admin/api/lenders")).status_code == 200
 
 
 def window(percent: int) -> dict:

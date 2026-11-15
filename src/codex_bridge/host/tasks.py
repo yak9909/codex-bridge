@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from ..common import protocol
-from ..common.protocol import FINAL_STATES, LOG_VISIBILITY
-from .lenders import (Lender, SendFn, as_protocol, as_text, blocked_until, normalize_capabilities,
+from ..common.protocol import FINAL_STATES, LOG_VISIBILITY, TASK_STATES
+from .lenders import (Lender, SendFn, as_protocol, as_text, blocked_until, moment, normalize_capabilities,
                       normalize_limits, normalize_window, number, pick_lender)
 from .paths import ToolError
 
@@ -26,6 +26,7 @@ QUOTA = "使用量の上限のため受け付けません。再開可能: {}"
 # A continuation can only go to the lender whose Codex holds the session (design §3.3).
 RETRY_FRESH = "続きとしては送れないので、前回の報告を添えて新しく依頼してください。"
 NOT_READY = "「{}」の agent は接続したばかりで、まだ準備ができていません。数秒待ってからやり直してください。"
+SPOILT = "記録が壊れていたため、このタスクがどう終わったかは分かりません。"
 
 
 def iso_local(ts: float | None) -> str | None:
@@ -47,6 +48,43 @@ class TaskRecord:
     state_before_offline: str | None = None
     lender: str | None = None  # invite name of the lender doing the task (None: a v0.1 record)
     finished: float | None = None  # when it reached a final state (None: still going, or an older record)
+
+
+def _known_state(v) -> str | None:
+    return v if isinstance(v, str) and v in TASK_STATES else None
+
+
+def _record(raw) -> TaskRecord | None:
+    """A task record as read from disk, every value checked again: a file written before the values
+    from an agent were checked on receipt may hold anything (NaN as the state, ...), and a later
+    version may have added values this one does not know. None when it is not a record at all."""
+    if not isinstance(raw, dict) or not as_text(raw.get("task_id")):
+        return None
+    state = _known_state(raw.get("state"))
+    return TaskRecord(
+        task_id=raw["task_id"], prompt=as_text(raw.get("prompt")) or "", created=number(raw.get("created")) or 0.0,
+        state=state or "failed", thread_id=as_text(raw.get("thread_id")),
+        report=as_text(raw.get("report")) or (None if state else SPOILT), resume_at=moment(raw.get("resume_at")),
+        continue_task_id=as_text(raw.get("continue_task_id")),
+        state_before_offline=_known_state(raw.get("state_before_offline")), lender=as_text(raw.get("lender")),
+        finished=number(raw.get("finished")))
+
+
+def _read_events(path: Path) -> list[dict]:
+    """The events of a task from disk; lines that cannot be read are left out."""
+    out: list[dict] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    except (ValueError, OSError):
+        return out
+    for line in lines:
+        try:
+            ev = protocol.finite(json.loads(line))
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(ev, dict):
+            out.append(ev)
+    return out
 
 
 class TaskManager:
@@ -74,13 +112,16 @@ class TaskManager:
     # ---- persistence ---------------------------------------------------
     def _load(self) -> None:
         for f in sorted(self.dir.glob("*.json")):
-            rec = TaskRecord(**json.loads(f.read_text(encoding="utf-8")))
+            try:
+                rec = _record(protocol.finite(json.loads(f.read_text(encoding="utf-8"))))
+            except (ValueError, RecursionError, OSError):
+                rec = None
+            if rec is None:
+                continue  # not readable (cut off while being written, ...): left on disk, not listed
             if rec.state in ACTIVE_STATES:
                 rec.state = "agent_offline"
             self.tasks[rec.task_id] = rec
-            ev = f.with_suffix(".jsonl")
-            self._events[rec.task_id] = [json.loads(l) for l in ev.read_text(encoding="utf-8").splitlines()] \
-                if ev.exists() else []
+            self._events[rec.task_id] = _read_events(f.with_suffix(".jsonl"))
 
     def _save(self, rec: TaskRecord) -> None:
         rec.finished = (rec.finished or time.time()) if rec.state in FINAL_STATES else None
@@ -234,20 +275,24 @@ class TaskManager:
                 lender.limits = limits
             self._changed()
         elif t == "event":
-            if self._own_task(lender, m["task_id"]):
-                self._append_event(m["task_id"], {"ts": time.time(), "kind": m["kind"], "data": m.get("data")})
+            # kept and shown as it comes, so: a kind in words, and no number in the data that JSON cannot carry
+            task_id, kind = as_text(m.get("task_id")), as_text(m.get("kind"))
+            if kind and self._own_task(lender, task_id):
+                self._append_event(task_id, {"ts": time.time(), "kind": kind, "data": protocol.finite(m.get("data"))})
         elif t == "task_state":
-            rec = self._own_task(lender, m["task_id"])
-            if rec is None:
+            rec = self._own_task(lender, as_text(m.get("task_id")))
+            state = _known_state(m.get("state"))
+            if rec is None or state is None:  # a state this host does not know is not a state: nothing changes
                 return
             rec.lender = lender.name
-            rec.state = m["state"]
+            rec.state = state
             rec.state_before_offline = None
-            rec.thread_id = m.get("thread_id") or rec.thread_id
-            if m.get("report") is not None:
-                rec.report = m["report"]
-            if m.get("resume_at") is not None:
-                rec.resume_at = m["resume_at"]
+            rec.thread_id = as_text(m.get("thread_id")) or rec.thread_id
+            report, resume_at = as_text(m.get("report")), moment(m.get("resume_at"))
+            if report is not None:
+                rec.report = report
+            if resume_at is not None:
+                rec.resume_at = resume_at
             self._save(rec)
         elif t == "reply":
             owner, fut = self._pending.get(m.get("req_id"), (None, None))

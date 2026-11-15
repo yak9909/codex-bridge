@@ -73,7 +73,7 @@ def normalize_capabilities(raw) -> dict:
     return {k: raw[k] if isinstance(raw.get(k), bool) else default for k, default in V1_CAPABILITIES.items()}
 
 
-def _moment(v) -> float | None:
+def moment(v) -> float | None:
     """Seconds since the epoch, if a clock can show that moment; else None."""
     try:
         datetime.fromtimestamp(number(v), timezone.utc).astimezone()
@@ -88,7 +88,7 @@ def normalize_window(raw) -> dict | None:
     value cannot make a lender look like the one with the most room."""
     if not isinstance(raw, dict) or (used := number(raw.get("used_percent"))) is None or not 0 <= used <= 100:
         return None
-    return {"used_percent": used, "resets_at": _moment(raw.get("resets_at"))}
+    return {"used_percent": used, "resets_at": moment(raw.get("resets_at"))}
 
 
 def effective_limits(lender: Lender, thresholds: dict) -> dict:
