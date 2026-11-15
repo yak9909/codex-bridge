@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 
 import pytest
 
@@ -49,13 +50,20 @@ def test_tasks_lists_each_task_newest_first(tmp_path):
                            {"task_id": "old", "started": 1_000_000.0, "updated": 1_000_000.0, "count": 1}]
 
 
+def touched(path, at: float) -> None:
+    """The file was last written at `at` (the file system's modification time is what prune() goes by)."""
+    os.utime(path, (at, at))
+
+
 def test_prune_removes_what_is_older_than_the_retention_period(tmp_path):
     clock = Clock()
     log = WorkLog(tmp_path, retention_days=30, clock=clock)
     log.add("old", "started", {})
+    touched(tmp_path / "old.jsonl", clock.now)
     clock.now += 20 * DAY
     log.add("recent", "started", {})
-    clock.now += 11 * DAY  # old: 31 days since its last record, recent: 11
+    touched(tmp_path / "recent.jsonl", clock.now)
+    clock.now += 11 * DAY  # old: 31 days since its last write, recent: 11
     assert log.prune() == 1
     assert [t["task_id"] for t in log.tasks()] == ["recent"] and log.task_events("old") == []
     clock.now += 19 * DAY  # recent: exactly 30 days: kept; one second more: gone
@@ -68,9 +76,53 @@ def test_a_task_still_being_written_is_not_pruned_for_its_first_record(tmp_path)
     clock = Clock()
     log = WorkLog(tmp_path, retention_days=1, clock=clock)
     log.add("long", "started", {})
+    touched(tmp_path / "long.jsonl", clock.now)
     clock.now += 2 * DAY
-    log.add("long", "status", {"text": "still going"})  # the age is that of the last record
+    log.add("long", "status", {"text": "still going"})  # the age is that of the last write
+    touched(tmp_path / "long.jsonl", clock.now)
     assert log.prune() == 0
+
+
+def test_prune_decides_by_the_file_time_without_reading_the_files(tmp_path, monkeypatch):
+    # it runs at every task start: it must not parse every record of every task
+    clock = Clock()
+    log = WorkLog(tmp_path, retention_days=30, clock=clock)
+    log.add("old", "started", {})
+    log.add("new", "started", {})
+    touched(tmp_path / "old.jsonl", clock.now - 40 * DAY)
+    touched(tmp_path / "new.jsonl", clock.now - 1 * DAY)
+    reads = []
+    monkeypatch.setattr("codex_bridge.agent.worklog._read", lambda p: reads.append(p) or [])
+    assert log.prune() == 1
+    assert reads == [] and not (tmp_path / "old.jsonl").exists() and (tmp_path / "new.jsonl").exists()
+
+
+def test_a_file_with_invalid_bytes_still_shows_its_lines_and_is_still_pruned(tmp_path):
+    clock = Clock()
+    log = WorkLog(tmp_path, retention_days=30, clock=clock)
+    log.add("t1", "started", {})
+    with open(tmp_path / "t1.jsonl", "ab") as f:
+        f.write(b'{"ts": 1.0, "kind": "status", "data": {"text": "caf\xe9"}}\n\xff\xfe not json\n')
+    log.add("t1", "status", {"text": "after"})
+    kinds = [e["kind"] for e in log.task_events("t1")]
+    assert kinds == ["started", "status", "status"]  # the line with a bad byte keeps its other characters
+    assert log.task_events("t1")[1]["data"]["text"].startswith("caf")
+    assert [t["task_id"] for t in log.tasks()] == ["t1"]
+    touched(tmp_path / "t1.jsonl", clock.now - 31 * DAY)
+    assert log.prune() == 1 and not (tmp_path / "t1.jsonl").exists()
+
+
+def test_a_cut_off_last_line_does_not_swallow_the_next_record(tmp_path):
+    log = WorkLog(tmp_path)
+    log.add("t1", "started", {})
+    with open(tmp_path / "t1.jsonl", "ab") as f:
+        f.write(b'{"ts": 5.0, "kind": "sta')  # a crash in the middle of a line: no newline
+    log.add("t1", "status", {"text": "after the crash"})
+    log.add("t1", "status", {"text": "and again"})
+    assert [(e["kind"], e["data"].get("text")) for e in log.task_events("t1")] == [
+        ("started", None), ("status", "after the crash"), ("status", "and again")]
+    raw = (tmp_path / "t1.jsonl").read_bytes()
+    assert raw.count(b"\n") == 4 and not raw.endswith(b"\n\n")  # exactly one line break was added
 
 
 def test_clear_removes_every_record_and_nothing_else(tmp_path):
@@ -312,6 +364,7 @@ async def test_followups_are_recorded(env):
 async def test_the_runner_prunes_old_records_when_it_starts(tmp_path):
     e = Env(tmp_path, {}, retention_days=30)
     e.worklog.add("ancient", "started", {})
+    touched(tmp_path / "logs" / "tasks" / "ancient.jsonl", e.wall.now)
     e.wall.now += 31 * DAY
     await e.fake.app.start()
     await e.runner.start()

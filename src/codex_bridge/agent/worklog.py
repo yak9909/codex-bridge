@@ -9,6 +9,7 @@ them by `clear()`.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -21,8 +22,10 @@ DAY = 86400
 
 def _read(path: Path) -> list[dict]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, ValueError):
+        # errors="replace": a stray bad byte costs that one line, not the whole file (which would then be
+        # neither shown nor pruned)
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
         return []
     out = []
     for line in lines:
@@ -49,8 +52,14 @@ class WorkLog:
     def add(self, task_id: str, kind: str, data) -> None:
         path = self._path(task_id)
         self.dir.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps({"ts": self.clock(), "kind": kind, "data": data}, ensure_ascii=False) + "\n")
+        line = json.dumps({"ts": self.clock(), "kind": kind, "data": data}, ensure_ascii=False) + "\n"
+        with open(path, "a+b") as f:
+            size = f.seek(0, os.SEEK_END)
+            if size:
+                f.seek(size - 1)
+                if f.read(1) != b"\n":  # cut off by a crash: this record must not join that line
+                    line = "\n" + line
+            f.write(line.encode("utf-8"))
 
     def task_events(self, task_id: str) -> list[dict]:
         return _read(self._path(task_id))
@@ -66,11 +75,16 @@ class WorkLog:
         return sorted(rows, key=lambda r: r["updated"], reverse=True)
 
     def prune(self) -> int:
-        """Remove the tasks whose latest record is older than the retention period; how many were removed."""
+        """Remove the tasks last written longer ago than the retention period; how many were removed.
+        It runs at every task start, so it goes by the file's modification time and reads nothing."""
         limit = self.clock() - self.retention_days * DAY
         gone = 0
-        for row in self.tasks():
-            if row["updated"] < limit and self._remove(row["task_id"]):
+        for path in list(self.dir.glob("*.jsonl")) if self.dir.exists() else ():
+            try:
+                old = path.stat().st_mtime < limit
+            except OSError:
+                continue
+            if old and _SAFE_ID.fullmatch(path.stem) and self._remove(path.stem):
                 gone += 1
         return gone
 
