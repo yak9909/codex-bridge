@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-import os
 import secrets
 import shlex
 import subprocess
@@ -180,20 +179,14 @@ class CommandRunner:
     def _write_area_state(self) -> dict[str, tuple[int, int]]:
         """(mtime, size) of every writable file in every shared folder."""
         state: dict[str, tuple[int, int]] = {}
-        main = self.paths.root
+        display = self.paths.display_formatter()
         for root in self.paths.root_paths():
-            for dirpath, dirnames, filenames in os.walk(root):
-                d = Path(dirpath)
-                dirnames[:] = [n for n in dirnames if self.paths.visible(d / n)
-                               and not (d == main and n.lower() == OUTPUTS_TOP)]
-                for name in filenames:
-                    fp = d / name
-                    if self.paths.level_of(fp) == "write" and self.paths.visible(fp):
-                        try:
-                            st = fp.stat()
-                        except OSError:
-                            continue
-                        state[self.paths.to_rel(fp)] = (st.st_mtime_ns, st.st_size)
+            for _, entry in self.paths.walk(root, "write"):
+                try:
+                    st = entry.stat()
+                except OSError:
+                    continue
+                state[display(entry.path)] = (st.st_mtime_ns, st.st_size)
         return state
 
     async def _execute(self, job: Job, real_cwd: Path, timeout: int) -> None:

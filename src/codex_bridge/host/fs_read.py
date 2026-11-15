@@ -86,19 +86,15 @@ class ReadTools:
             self.paths.check_running()
             bases = self.paths.root_paths()
         found: list[str] = []
+        display = self.paths.display_formatter()
         for base in bases:
-            if not self.paths.discoverable(base):
-                continue
-            for dirpath, dirnames, filenames in os.walk(base):
-                d = Path(dirpath)
-                dirnames[:] = sorted(n for n in dirnames if self.paths.discoverable(d / n))
-                for name in sorted(filenames):
-                    fp = d / name
-                    rel_to_base = Path(os.path.relpath(fp, base)).as_posix()
-                    if glob_match(pattern, rel_to_base) and self.paths.discoverable(fp):
-                        found.append(self.paths.to_rel(fp))
-                        if len(found) >= limit:
-                            return found
+            prefix_length = len(str(base).rstrip(os.sep)) + 1
+            for _, entry in self.paths.walk(base, "read"):
+                rel_to_base = entry.path[prefix_length:].replace(os.sep, "/")
+                if glob_match(pattern, rel_to_base):
+                    found.append(display(entry.path))
+                    if len(found) >= limit:
+                        return found
         return found
 
     def stat(self, path: str) -> dict:
