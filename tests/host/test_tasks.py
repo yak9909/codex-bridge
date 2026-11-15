@@ -527,3 +527,62 @@ async def test_hello_naming_a_task_whose_state_the_agent_already_said_leaves_it_
     await agent2.push("task_state", seq=50, task_id=tid, state="awaiting_lender")  # sent again, before hello
     await agent2.push("hello", agent_version="x", codex_version="x", auth_mode="chatgpt", current_task_id=tid)
     assert mgr.status(tid)["state"] == "awaiting_lender"  # not "running"
+
+
+# ---- a v0.1 agent says hello first and sends what the host missed after it ----------------------------------
+async def test_v01_order_hello_first_then_the_resent_result_still_ends_as_completed(mgr, agent):
+    tid = await mgr.start("a")
+    await agent.push("task_state", task_id=tid, state="running", thread_id="th1")
+    mgr.detach(agent.link)  # the task ends while the link is down
+    agent2 = FakeAgent(mgr)
+    agent2.seq = 100
+    await agent2.push("hello", agent_version="0.1.0", codex_version="x", auth_mode="chatgpt", current_task_id=None)
+    assert mgr.status(tid)["state"] == "failed"  # all the host knows at this moment
+    await agent2.push("task_state", task_id=tid, state="running", thread_id="th1")  # resent in the order sent
+    assert mgr.status(tid)["state"] == "failed"
+    await agent2.push("task_state", task_id=tid, state="completed", thread_id="th1", report="できました")
+    r = mgr.result(tid)
+    assert r["state"] == "completed" and r["report"] == "できました" and r["finished"]
+    assert "再起動" not in r["report"] and mgr.current_task_id() is None
+    await agent2.push("task_state", task_id=tid, state="failed", report="late")  # now it is a genuine final
+    assert mgr.status(tid)["state"] == "completed"
+
+
+@pytest.mark.parametrize("final", ["completed", "cancelled", "suspended_quota", "rejected_by_lender", "failed"])
+async def test_any_final_state_from_the_agent_replaces_the_host_s_own_guess(mgr, agent, final):
+    tid = await mgr.start("a")
+    await agent.push("task_state", task_id=tid, state="running")
+    mgr.detach(agent.link)
+    agent2 = FakeAgent(mgr)
+    agent2.seq = 100
+    await agent2.push("hello", agent_version="0.1.0", codex_version="x", auth_mode="chatgpt", current_task_id=None)
+    await agent2.push("task_state", task_id=tid, state=final, thread_id="th1", report="the real one")
+    r = mgr.result(tid)
+    assert r["state"] == final and r["report"] == "the real one"
+
+
+async def test_the_host_s_guess_stays_when_the_agent_never_says_more_and_survives_a_restart(tmp_path, mgr, agent):
+    tid = await mgr.start("a")
+    await agent.push("task_state", task_id=tid, state="running")
+    mgr.detach(agent.link)
+    agent2 = FakeAgent(mgr)
+    await agent2.push("hello", agent_version="0.1.0", codex_version="x", auth_mode="chatgpt", current_task_id=None)
+    assert "再起動" in mgr.result(tid)["report"]
+    mgr2 = TaskManager(tmp_path / "data", touched_fn=lambda t: [])  # the guess is still a guess after a restart
+    a3 = FakeAgent(mgr2)
+    await a3.push("task_state", seq=9, task_id=tid, state="completed", report="done after all")
+    assert mgr2.status(tid)["state"] == "completed" and mgr2.result(tid)["report"] == "done after all"
+
+
+async def test_a_failed_the_agent_reported_itself_is_not_a_guess(mgr, agent):
+    tid = await mgr.start("a")
+    await agent.push("task_state", task_id=tid, state="failed", report="Codex crashed")
+    await agent.push("task_state", task_id=tid, state="completed", report="no")
+    assert mgr.status(tid)["state"] == "failed" and mgr.result(tid)["report"] == "Codex crashed"
+
+
+async def test_a_task_in_the_other_lenders_hello_is_not_guessed_failed_at_all(mgr, agent):
+    tid = await mgr.start("a", lender="friend")
+    other = FakeAgent(mgr, "zed")
+    await other.push("hello", agent_version="0.1.0", codex_version="x", auth_mode="chatgpt", current_task_id=None)
+    assert mgr.status(tid)["state"] == "queued"

@@ -51,6 +51,7 @@ class TaskRecord:
     state_before_offline: str | None = None
     lender: str | None = None  # invite name of the lender doing the task (None: a v0.1 record)
     finished: float | None = None  # when it reached a final state (None: still going, or an older record)
+    guessed: bool = False  # "failed" is the host's own guess (the agent did not name the task in hello): the agent may still say how it ended
 
 
 def _known_state(v) -> str | None:
@@ -70,7 +71,7 @@ def _record(raw) -> TaskRecord | None:
         report=as_text(raw.get("report")) or (None if state else SPOILT), resume_at=moment(raw.get("resume_at")),
         continue_task_id=as_text(raw.get("continue_task_id")),
         state_before_offline=_known_state(raw.get("state_before_offline")), lender=as_text(raw.get("lender")),
-        finished=number(raw.get("finished")))
+        finished=number(raw.get("finished")), guessed=raw.get("guessed") is True and state == "failed")
 
 
 def _read_events(path: Path) -> list[dict]:
@@ -299,9 +300,14 @@ class TaskManager:
             state = _known_state(m.get("state"))
             if rec is None or state is None:  # a state this host does not know is not a state: nothing changes
                 return
-            if rec.state in FINAL_STATES and state != rec.state and rec.report != SPOILT:
+            if rec.state in FINAL_STATES and state != rec.state and rec.report != SPOILT and not (
+                    rec.guessed and state in FINAL_STATES):
                 return  # over is over (a message sent again after a reconnect must not bring a task back);
-                #         a record that was spoilt only says "failed" for want of knowing: the agent's word counts
+                #         a record that was spoilt only says "failed" for want of knowing: the agent's word counts,
+                #         and so does its final word on a task the host only guessed was lost (v0.1 says hello first)
+            if rec.guessed and state in FINAL_STATES:
+                rec.report = None  # the guess is replaced, not added to
+            rec.guessed = False
             rec.lender = lender.name
             rec.state = state
             rec.state_before_offline = None
@@ -337,6 +343,7 @@ class TaskManager:
                     rec.state = rec.state_before_offline or "running"
             else:
                 rec.state = "failed"
+                rec.guessed = True  # until the agent says how the task really ended (see task_state)
                 rec.report = rec.report or ("知人側の agent が再起動したため、このタスクは中断されました。"
                                              "続けるなら send_task の continue_task_id を使ってください。")
             rec.state_before_offline = None

@@ -149,3 +149,22 @@ async def test_a_hello_about_changed_settings_while_a_task_starts_does_not_fail_
     await until(lambda: mgr.status(tid)["state"] == "completed")
     assert "failed" not in seen
     assert mgr.agent_info()["ready"]
+
+
+@pytest.mark.parametrize("live", [{"after": {"turn/start": [TURN_STARTED],
+                                             "turn/steer": [MSG, DONE]}}], indirect=True)
+async def test_a_v01_agent_that_says_hello_before_resending_still_gets_its_result_through(live):
+    mgr, runner, client = live
+
+    async def v01_order():  # a v0.1 exe: hello first, then what the host missed
+        await client.send_hello()
+        await runner.resend_unacked()
+    client.on_connected = v01_order
+    tid = await mgr.start("x")
+    await until(lambda: mgr.status(tid)["state"] == "running")
+    await asyncio.sleep(0.2)
+    await client.drop()
+    await until(lambda: mgr.status(tid)["state"] == "agent_offline")
+    await runner.handle({"type": "task_followup", "task_id": tid, "text": "続けて"})  # ends while the link is down
+    await until(lambda: mgr.status(tid)["state"] == "completed")
+    assert mgr.result(tid)["report"] == "完了" and mgr.current_task_id() is None
