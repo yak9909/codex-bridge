@@ -394,6 +394,12 @@ $("th-save").onclick = async () => {
 
 // ---- invites -------------------------------------------------------------------------
 let invites = [];
+let inviteCopyTimer;
+function resetInviteCopy() {
+  clearTimeout(inviteCopyTimer);
+  $("inv-copy").textContent = "コピー";
+  $("inv-copy-msg").textContent = "";
+}
 async function refreshInvites() {
   invites = await api("GET", "/invites");
   $("invites").innerHTML = invites.map((i) => `<li><span>${esc(i.name)} <span class="small">${new Date(i.created * 1000).toLocaleString()}</span></span>
@@ -405,11 +411,31 @@ $("inv-issue").onclick = async () => {
       && !confirm(`「${name}」の招待コードは発行済みです。発行し直すと、前のコードは使えなくなります。よろしいですか？`)) return;
   try {
     const r = await api("POST", "/invites", { name });
+    resetInviteCopy();
     $("inv-code").textContent = r.code; $("inv-out").hidden = false;
     refreshInvites(); refreshTop();
   } catch (e) { alert(e.message); }
 };
-$("inv-copy").onclick = () => navigator.clipboard.writeText($("inv-code").textContent);
+$("inv-copy").onclick = async () => {
+  const code = $("inv-code").textContent;
+  resetInviteCopy();
+  try {
+    await navigator.clipboard.writeText(code);
+    if ($("inv-code").textContent !== code) return;
+    clearTimeout(inviteCopyTimer);
+    $("inv-copy").textContent = "コピーしました ✓";
+    inviteCopyTimer = setTimeout(resetInviteCopy, 2000);
+  } catch (e) {
+    if ($("inv-code").textContent !== code) return;
+    resetInviteCopy();
+    const range = document.createRange();
+    range.selectNodeContents($("inv-code"));
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    $("inv-copy-msg").textContent = "選択しました。Ctrl+C でコピーしてください";
+  }
+};
 $("invites").onclick = async (ev) => {
   const b = ev.target.closest("button[data-revoke]");
   if (!b) return;

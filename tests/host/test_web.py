@@ -99,6 +99,12 @@ async def test_admin_page_served(admin):
     assert r.status_code == 200 and "codex-bridge" in r.text
 
 
+async def test_invite_copy_feedback_is_served(admin):
+    r = await admin.get("/admin/static/app.js")
+    assert r.status_code == 200
+    assert "コピーしました" in r.text
+
+
 async def test_shared_ui_parts_are_served_next_to_the_admin_page(admin, public):
     for name in ("ui.js", "ui.css", "demo.html"):
         assert (await admin.get(f"/admin/common/{name}")).status_code == 200, name

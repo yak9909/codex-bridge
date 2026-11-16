@@ -187,22 +187,26 @@ const UI = (() => {
         <button type="button" data-mode="simple">簡易</button><button type="button" data-mode="advanced">詳細</button></div></div>
     <div class="td-sum" data-td="sum"></div>
     <dl class="kv" data-td="meta"></dl>
-    <h3>依頼文</h3><div class="report" data-td="prompt"></div>
-    <div data-td="working"></div>
+    <h3>依頼文</h3><div class="report"><div class="td-text" data-td="prompt"></div></div>
+    <button type="button" class="link" data-td="prompt-more" aria-expanded="false">すべて表示</button>
+    <details class="working" data-td="working"><summary>作業中の様子</summary><div data-td="working-body"></div></details>
     <div class="followup" data-td="actions">
       <input data-td="fu" placeholder="作業中の Codex への追加の指示">
       <button type="button" class="mini" data-td="fu-send">送る</button>
       <button type="button" class="bad mini" data-td="cancel">中止</button></div>
-    <h3>最終報告</h3><div class="report" data-td="report"></div>
+    <h3>最終報告</h3><div class="report"><div class="td-text" data-td="report"></div></div>
+    <button type="button" class="link" data-td="report-more" aria-expanded="false">すべて表示</button>
     <div class="row" data-td="undo-row"><button type="button" class="ghost" data-td="undo">このタスクのファイル変更を取り消す</button></div>
     <h3>記録（新しい順）<span class="small" data-td="count"></span></h3>
     <div class="td-filter" data-td="filter"><span class="chips" data-td="chips"></span>
       <input type="search" data-td="q" placeholder="記録を検索"></div>
-    <div class="events" data-td="events"></div>`;
+    <div class="events" data-td="events"></div>
+    <button type="button" class="ghost mini" data-td="more">さらに表示</button>`;
 
   // opts: {mode: "simple" | "advanced" (the view to start with), onMode?(mode), showLender?,
   //        onFollowup?(text) -> promise (the text is cleared when it resolves), onCancel?(), onUndo?()}
   function taskDetail(el, task, opts = {}) {
+    el.classList.add("task-detail");
     if (!task) {
       el._td = null;
       setHtml(el, '<h2>タスクの詳細</h2><p class="empty">左の一覧から選んでください。</p>');
@@ -211,7 +215,8 @@ const UI = (() => {
     let st = el._td;
     if (!st || st.id !== task.task_id) {  // another task: new skeleton, filters back to "everything"
       st = el._td = { id: task.task_id, mode: (st && st.mode) || (opts.mode === "advanced" ? "advanced" : "simple"),
-        off: new Set(), q: "" };
+        off: new Set(), q: "", visible: 20, expanded: new Set() };
+      el.scrollTop = 0;
       el.innerHTML = SKELETON;
       el._html = null;
       wireDetail(el);
@@ -227,6 +232,7 @@ const UI = (() => {
       const b = ev.target.closest("button[data-mode]");
       if (!b || el._td.mode === b.dataset.mode) return;
       el._td.mode = b.dataset.mode;
+      el._td.visible = 20;
       if (el._td.opts.onMode) el._td.opts.onMode(el._td.mode);
       drawDetail(el);
     };
@@ -235,9 +241,18 @@ const UI = (() => {
       if (!b) return;
       const off = el._td.off;
       off.has(b.dataset.kind) ? off.delete(b.dataset.kind) : off.add(b.dataset.kind);
+      el._td.visible = 20;
       drawDetail(el);
     };
-    part("q").oninput = (ev) => { el._td.q = ev.target.value; drawDetail(el); };
+    part("q").oninput = (ev) => { el._td.q = ev.target.value; el._td.visible = 20; drawDetail(el); };
+    for (const name of ["prompt", "report"]) {
+      part(`${name}-more`).onclick = () => {
+        const expanded = el._td.expanded;
+        expanded.has(name) ? expanded.delete(name) : expanded.add(name);
+        drawDetail(el);
+      };
+    }
+    part("more").onclick = () => { el._td.visible += 20; drawDetail(el); };
     const send = async () => {
       const value = part("fu").value.trim();
       if (!value || !el._td.opts.onFollowup) return;
@@ -254,7 +269,7 @@ const UI = (() => {
   }
 
   function drawDetail(el) {
-    const { task: t, opts, mode, off, q } = el._td;
+    const { task: t, opts, mode, off, q, visible, expanded } = el._td;
     const part = (name) => el.querySelector(`[data-td="${name}"]`);
     const active = ACTIVE_STATES.includes(t.state);
     const events = Array.isArray(t.events) ? t.events : [];
@@ -280,6 +295,13 @@ const UI = (() => {
 
     setText(part("prompt"), t.prompt || "");
     setText(part("report"), t.report || "（まだありません）");
+    for (const name of ["prompt", "report"]) {
+      const content = part(name), button = part(`${name}-more`), open = expanded.has(name);
+      content.classList.toggle("expanded", open);
+      button.hidden = !open && content.scrollHeight <= content.clientHeight;
+      button.setAttribute("aria-expanded", String(open));
+      setText(button, open ? "折りたたむ" : "すべて表示");
+    }
 
     // working: the latest plan and the message being written
     const plan = events.findLast((e) => e.kind === "plan");
@@ -288,12 +310,16 @@ const UI = (() => {
       : t.progress || (lastProgress && lastProgress.data && lastProgress.data.text), 8000);
     const waiting = own(WAITING, t.state);
     const steps = plan ? planSteps(plan.data) : [];
-    setHtml(part("working"), !active ? "" : `<div class="working"><h3>作業中の様子</h3>
+    if (el._td.workingState !== t.state) {
+      part("working").open = t.state === "running";
+      el._td.workingState = t.state;
+    }
+    setHtml(part("working-body"), `
       ${waiting ? `<p class="empty">${esc(waiting)}</p>` : ""}
       ${steps.length ? `<div class="w-label">計画</div><ul class="plan">${steps.map((s) =>
         `<li class="${s.cls}"><span class="p-mark">${PLAN_MARK[s.cls]}</span><span>${esc(s.step)}</span></li>`).join("")}</ul>` : ""}
       ${writing ? `<div class="w-label">書きかけの発言</div><div class="progress">${esc(writing)}</div>` : ""}
-      ${!waiting && !steps.length && !writing ? '<p class="empty">まだ途中経過は届いていません。</p>' : ""}</div>`);
+      ${!waiting && !steps.length && !writing ? '<p class="empty">まだ途中経過は届いていません。</p>' : ""}`);
     const live = part("working").querySelector(".progress");
     if (live) live.scrollTop = live.scrollHeight;  // the newest words are at the end
 
@@ -315,9 +341,10 @@ const UI = (() => {
     part("filter").hidden = !lines.length;
     const needle = q.trim().toLowerCase();
     const shown = lines.filter((l) => !off.has(l.kind) && (!needle || l.text.toLowerCase().includes(needle))).reverse();
-    setText(part("count"), ` ${shown.length} 件` + (t.event_count > events.length
+    setText(part("count"), ` ${Math.min(visible, shown.length)} / ${shown.length} 件` + (t.event_count > events.length
       ? `（全 ${t.event_count} 件のうち、新しい ${events.length} 件から）` : ""));
-    setHtml(part("events"), shown.map((l) => `
+    part("more").hidden = visible >= shown.length;
+    setHtml(part("events"), shown.slice(0, visible).map((l) => `
       <div class="ev k-${l.kind}${l.bad ? " bad" : ""}"><span class="ev-t">${fmtClock(l.ts)}</span>
         <span class="ev-k">${KIND_JA[l.kind]}</span><span class="ev-x">${esc(l.text)}</span></div>`).join("")
       || `<p class="empty">${lines.length ? "条件に合う記録はありません。" : "まだ記録はありません。"}</p>`);

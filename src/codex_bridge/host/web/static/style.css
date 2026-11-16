@@ -64,5 +64,8 @@ details.adv summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .code-box { display: flex; gap: 8px; align-items: center; background: var(--soft); border: 1px solid var(--line);
   border-radius: 6px; padding: 8px; }
 .code-box code { flex: 1; word-break: break-all; font-size: 12px; }
+#inv-copy { flex-shrink: 0; white-space: nowrap; }
+#inv-copy-msg { margin: 6px 0 0; }
+#inv-copy-msg:empty { display: none; }
 .invites { list-style: none; margin: 0; padding: 0; max-width: 520px; }
 .invites li { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; }

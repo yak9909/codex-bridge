@@ -129,7 +129,8 @@
     <div class="row"><input id="inv-name" placeholder="名前（例: friend）" value="friend"><button id="inv-issue">発行</button></div>
     <div id="inv-out" hidden>
       <p class="small">このコードを、Codex を貸してくれる人に渡してください（再表示できません）。</p>
-      <div class="code-box"><code id="inv-code"></code><button id="inv-copy" class="ghost">コピー</button></div>
+      <div class="code-box"><code id="inv-code"></code><button id="inv-copy" class="ghost" aria-live="polite">コピー</button></div>
+      <p id="inv-copy-msg" class="small" role="status"></p>
     </div>
     <h3>発行済み</h3>
     <ul class="invites" id="invites"></ul>
