@@ -9,7 +9,7 @@ from pathlib import Path
 import uvicorn
 
 from .app import build_host, create_local_app, create_public_app
-from .config import load_host_config
+from .config import configured_folder, load_host_config
 from .policy_form import yaml_from_form
 
 SAMPLE_HOST = """\
@@ -27,7 +27,8 @@ rg_path: "vendor/rg.exe"
 
 def sample_policy(share_root: Path | None) -> str:
     """First policy: the chosen folder, read-only, as the main folder."""
-    share = Path(share_root).as_posix() if share_root else None
+    folder = configured_folder(Path(share_root)) if share_root is not None else None
+    share = folder.as_posix() if folder is not None else None
     return yaml_from_form({
         "main": share,
         "folders": [{"path": share, "level": "read"}] if share else [],

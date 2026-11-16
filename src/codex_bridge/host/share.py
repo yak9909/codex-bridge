@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
@@ -67,15 +69,39 @@ def remove_shared_folder(host, path: str) -> Path:
     return p
 
 
+def _save_share_root(path: Path, root: Path) -> None:
+    """Update only the setting's line, retaining UTF-8 bytes and original newlines."""
+    text = path.read_bytes().decode("utf-8")
+    value = json.dumps(root.as_posix(), ensure_ascii=False)
+    match = re.search(
+        r"(?m)^(?:\ufeff)?(?:share_root|\"share_root\"|'share_root')[ \t]*:[^\r\n]*", text)
+    if match:
+        line = match.group()
+        tokens = iter(yaml.scan(line))
+        colon = next(t for t in tokens if isinstance(t, yaml.tokens.ValueToken))
+        content = [t for t in tokens
+                   if not isinstance(t, (yaml.tokens.BlockEndToken, yaml.tokens.StreamEndToken))]
+        start = content[0].start_mark.index if content else colon.end_mark.index
+        end = content[-1].end_mark.index if content else start
+        if start == colon.end_mark.index:
+            value = " " + value
+        line = line[:start] + value + line[end:]
+        text = text[:match.start()] + line + text[match.end():]
+    else:
+        ending = re.search(r"\r\n|\n|\r", text)
+        newline = ending.group() if ending else "\n"
+        separator = "" if not text or text.endswith(("\n", "\r")) else newline
+        text += separator + f"share_root: {value}" + newline
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(text.encode("utf-8"))
+    os.replace(tmp, path)
+
+
 def set_main_shared_folder(host, path: str) -> Path:
     p = _guard(host, path)
     set_main_folder(host.policy, p.as_posix())
     if host.config_path is not None:
-        raw = yaml.safe_load(host.config_path.read_text(encoding="utf-8")) or {}
-        raw["share_root"] = p.resolve().as_posix()
-        tmp = host.config_path.with_suffix(".tmp")
-        tmp.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8", newline="\n")
-        os.replace(tmp, host.config_path)
+        _save_share_root(host.config_path, p.resolve())
     host.config = replace(host.config, share_root=p.resolve())
     host.paths.set_root(p)
     host.policy.share_root = p.resolve()
@@ -88,9 +114,14 @@ def change_share_root(host, new_path: str) -> Path:
     p = _guard(host, new_path)
     if not p.is_dir():
         raise ValueError(f"フォルダが見つかりません: {p}")
+    was_unset = host.paths.root is None
     if host.policy.current().level_for_abs(p) != "write":
         add_folder(host.policy, p.as_posix(), "write")
     set_main_shared_folder(host, p.as_posix())
+    if was_unset:
+        for folder in host.policy.current().folders:
+            if folder.path.as_posix().rstrip("/").lower() == "c:/path/to/your/folder":
+                remove_folder(host.policy, folder.path.as_posix())
     return p.resolve()
 
 

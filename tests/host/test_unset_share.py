@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import httpx
 import pytest
@@ -53,6 +54,90 @@ def test_ensure_config_does_not_invent_a_shared_folder(tmp_path):
     policy = yaml.safe_load((tmp_path / "data/policy.yaml").read_text(encoding="utf-8"))
     assert not policy.get("main") and policy["folders"] == []
     assert "C:/path/to/your/folder" not in cfg.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("share", [None, "C:/path/to/your/folder", "missing"])
+def test_unset_start_never_adds_the_sample_folder(tmp_path, share):
+    candidate = Path(share) if share is not None else None
+    if share == "missing":
+        candidate = tmp_path / share
+    raw = yaml.safe_load(main.sample_policy(candidate))
+    assert raw["main"] is None and raw["folders"] == []
+
+    cfg = config_file(tmp_path, share)
+    main.ensure_config(cfg)
+    host = build_host(load_host_config(cfg), config_path=cfg)
+    assert host.paths.root is None
+    assert host.policy.as_dict()["folders"] == []
+
+
+@pytest.mark.parametrize("main_kind", ["sample", "missing", "absent", "existing"])
+async def test_choose_folder_drops_only_sample_when_main_is_unset(tmp_path, main_kind):
+    host = legacy_host(tmp_path)
+    chosen = tmp_path / "chosen"
+    existing = tmp_path / "existing"
+    chosen.mkdir()
+    existing.mkdir()
+    sample = "C:/path/to/your/folder"
+    missing = (tmp_path / "unplugged-drive").as_posix()
+    retained = [
+        {"path": missing, "level": "read"},
+        {"path": sample + "-backup", "level": "read"},
+        {"path": sample + "/private", "level": "hidden"},
+        {"path": existing.as_posix(), "level": "read"},
+    ]
+    raw = {"main": {"sample": sample, "missing": missing, "absent": None,
+                    "existing": existing.as_posix()}[main_kind],
+           "folders": [{"path": sample, "level": "write"}, *retained],
+           "exec": {"mode": "ask"}, "paused": True}
+    host.policy.path.write_text(yaml.safe_dump(raw), encoding="utf-8", newline="\n")
+    assert (host.paths.root is None) == (main_kind != "existing")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_local_app(host)),
+                                 base_url="http://127.0.0.1") as client:
+        response = await client.put("/admin/api/share-root", json={"path": str(chosen)}, headers=H)
+        assert response.status_code == 200, response.text
+        rows = (await client.get("/admin/api/folders")).json()["folders"]
+    saved = yaml.safe_load(host.policy.path.read_text(encoding="utf-8"))
+    expected = ([{"path": sample, "level": "write"}] if main_kind == "existing" else [])
+    expected += [*retained, {"path": chosen.as_posix(), "level": "write"}]
+    assert saved["folders"] == expected
+    assert saved["main"] == chosen.as_posix()
+    assert saved["paused"] is True and saved["exec"]["mode"] == "ask"
+    assert any(f["path"] == sample for f in rows) == (main_kind == "existing")
+
+
+@pytest.mark.parametrize("ending", ["\n", "\r\n"])
+@pytest.mark.parametrize("share_line", [
+    'share_root: "C:/path/to/your/folder"  # 選択する場所',
+    "share_root:  # 選択する場所",
+    None,
+])
+@pytest.mark.parametrize("final_newline", [False, True])
+async def test_share_change_preserves_host_yaml_bytes(tmp_path, ending, share_line, final_newline):
+    host = legacy_host(tmp_path)
+    chosen = tmp_path / "選んだフォルダ #1"
+    chosen.mkdir()
+    lines = ["# codex-bridge host settings", "# 共有フォルダの説明"]
+    if share_line is not None:
+        lines.append(share_line)
+    lines += ["", "data_dir: 'data' # 記録", 'public_bind: "127.0.0.1:8765"',
+              "local_port: 8770", "# 最後のコメント", ""]
+    original = ending.join(lines) + (ending if final_newline else "")
+    # Exercise the no-final-newline case without discarding existing blank lines.
+    if not final_newline:
+        original = original.rstrip("\r\n")
+    host.config_path.write_bytes(original.encode("utf-8"))
+    value = json.dumps(chosen.as_posix(), ensure_ascii=False)
+    if share_line is not None:
+        expected = original.replace(share_line, f"share_root: {value}  # 選択する場所")
+    else:
+        expected = original + ("" if original.endswith(ending) else ending) + f"share_root: {value}" + ending
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_local_app(host)),
+                                 base_url="http://127.0.0.1") as client:
+        response = await client.put("/admin/api/share-root", json={"path": str(chosen)}, headers=H)
+        assert response.status_code == 200, response.text
+    assert host.config_path.read_bytes() == expected.encode("utf-8")
+    assert load_host_config(host.config_path).share_root == chosen.resolve()
 
 
 @pytest.mark.parametrize("version", [1, 2])
