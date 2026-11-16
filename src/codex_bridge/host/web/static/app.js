@@ -23,6 +23,26 @@ let thresholdsDirty = false;
 let detailMode = localStorage.getItem(MODE_KEY) === "advanced" ? "advanced" : "simple";
 
 // ---- top bar, the table of lenders, where a request goes ---------------------
+function renderPolicyProblems(problems) {
+  const banner = $("policy-problem");
+  const html = (problems || []).map((p) => `<div>
+    <span>共有フォルダの設定に、codex-bridge 自身のデータ（設定と記録）を含むフォルダがあります: ${esc(p.folder)}。このままでは安全のため一部の操作ができないことがあります。</span>
+    <button type="button" class="ghost mini" data-remove-folder="${esc(p.folder)}">このフォルダを共有から外す</button>
+  </div>`).join("");
+  // Keep the focused button while overview refreshes in the background.
+  if (banner.innerHTML !== html) banner.innerHTML = html;
+  banner.hidden = !problems || !problems.length;
+}
+$("policy-problem").onclick = async (ev) => {
+  const button = ev.target.closest("button[data-remove-folder]");
+  if (!button) return;
+  try {
+    if (!permForm) await loadPermissions();
+    const path = button.dataset.removeFolder;
+    if (await folderOp("remove", { path }, removeQuestion(path))) await refreshTop();
+  } catch (e) { folderSay("できませんでした: " + e.message); }
+};
+
 async function refreshTop() {
   const [o, rows] = await Promise.all([api("GET", "/overview"), api("GET", "/lenders")]);
   paused = o.paused;
@@ -33,6 +53,7 @@ async function refreshTop() {
   $("pause-btn").classList.toggle("active", paused);
   $("pause-btn").textContent = paused ? "一時停止を解除" : "全体を一時停止";
   $("paused-banner").hidden = !paused;
+  renderPolicyProblems(o.policy_problem);
   $("policy-error").hidden = !o.policy_error;
   $("policy-error").textContent = o.policy_error ? "policy.yaml を読めません（前の設定のまま動いています）: " + o.policy_error : "";
   $("s-bind").textContent = "http://" + o.public_bind;
@@ -293,7 +314,9 @@ async function folderOp(op, body, question) {
   if (isDirty()) { folderSay("権限に未保存の変更があります。先に「保存して反映」か「元に戻す」を押してください。"); return false; }
   if (question && !confirm(question)) return false;
   try {
-    await api("POST", "/folders/" + op, body);
+    const result = await api("POST", "/folders/" + op, body);
+    $("folder-warning").textContent = result.warning || "";
+    $("folder-warning").hidden = !result.warning;
     folderSay("");
     await loadPermissions();
     return true;

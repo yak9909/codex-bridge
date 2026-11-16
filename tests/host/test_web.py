@@ -1,4 +1,8 @@
 import time
+import json
+from pathlib import Path
+import shutil
+import subprocess
 
 import httpx
 import pytest
@@ -9,6 +13,7 @@ from codex_bridge.common.invite import parse_invite
 from codex_bridge.host.app import build_host, create_local_app, create_public_app
 from codex_bridge.host.config import load_host_config
 from codex_bridge.host.main import ensure_config
+from mcp_helpers import running
 
 H = {"X-Codex-Bridge": "1"}
 VALID_OFF = "default: read\nrules: []\nexec: {mode: \"off\"}\n"
@@ -148,6 +153,149 @@ async def test_pause_and_thresholds_and_visibility(admin, host):
 async def test_overview(admin):
     o = (await admin.get("/admin/api/overview")).json()
     assert o["agent"]["connected"] is False and o["paused"] is False and "share_root" in o
+
+
+def store_bad_folder(host):
+    bad = host.config.data_dir.parent
+    good = host.config.share_root
+    host.policy.path.write_text(yaml.safe_dump({"main": good.as_posix(), "folders": [
+        {"path": bad.as_posix(), "level": "write"},
+        {"path": good.as_posix(), "level": "read"}], "exec": {"mode": "ask"}}), encoding="utf-8")
+    return bad.as_posix()
+
+
+async def claude_call(admin, name, args):
+    response = await admin.post("/claude/mcp", headers={"Accept": "application/json, text/event-stream"},
+                                json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                      "params": {"name": name, "arguments": args}})
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert not result.get("isError"), result
+    return json.loads(result["content"][0]["text"])
+
+
+async def test_overview_reports_policy_problem(admin, host):
+    bad = store_bad_folder(host)
+    async with running(host.claude_ep):
+        for expected in ([{"folder": bad, "reason": "contains_data_dir"}], []):
+            assert (await admin.get("/admin/api/overview")).json()["policy_problem"] == expected
+            assert (await claude_call(admin, "get_overview", {}))["policy_problem"] == expected
+            if expected:
+                await claude_call(admin, "remove_shared_folder", {"path": bad})
+
+
+@pytest.mark.parametrize("operation", ["remove", "hidden", "inherit", "pause", "exec_mode"])
+async def test_bad_folder_can_be_removed_or_hidden(admin, host, operation):
+    bad = store_bad_folder(host)
+    if operation == "remove":
+        response = await admin.post("/admin/api/folders/remove", headers=H, json={"path": bad})
+    elif operation in ("hidden", "inherit"):
+        form = (await admin.get("/admin/api/policy-form")).json()
+        form["folders"][0]["level"] = operation
+        response = await admin.put("/admin/api/policy-form", headers=H, json=form)
+    elif operation == "pause":
+        response = await admin.post("/admin/api/pause", headers=H, json={"paused": True})
+    else:
+        response = await admin.put("/admin/api/exec-mode", headers=H, json={"mode": "off"})
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.parametrize("writable, level", [(False, "write"), (True, "write"), (False, "read")])
+async def test_register_unwritable_folder_warns(admin, host, tmp_path, monkeypatch, writable, level):
+    from codex_bridge.host import share as share_ops
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    checked = []
+
+    def probe(folder):
+        checked.append(folder)
+        return writable
+
+    monkeypatch.setattr(share_ops, "folder_is_writable", probe)
+    response = await admin.post("/admin/api/folders/add", headers=H,
+                                json={"path": extra.as_posix(), "level": level})
+    assert response.status_code == 200, response.text
+    expected = "このフォルダは、今のユーザーの権限では書き込めません。Codex が書こうとしても Windows に断られます。"
+    assert response.json().get("warning") == (expected if not writable and level == "write" else None)
+    assert host.policy.current().level_for_abs(extra / "x") == level
+    assert checked == ([extra] if level == "write" else [])
+
+
+def test_folder_write_probe_creates_and_removes_a_file(tmp_path, monkeypatch):
+    from codex_bridge.host.share import folder_is_writable
+    assert folder_is_writable(tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+    def denied(*args, **kwargs):
+        raise PermissionError(13, "Access is denied", str(tmp_path))
+
+    monkeypatch.setattr("tempfile.TemporaryFile", denied)
+    assert not folder_is_writable(tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_policy_problem_and_write_warning_banners(admin):
+    page = (await admin.get("/admin/")).text
+    assert 'class="banner" id="policy-problem" role="alert" hidden' in page
+    assert 'class="banner warn" id="folder-warning" role="status" hidden' in page
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to exercise the admin JavaScript without a browser")
+    script = r'''
+const fs = require("node:fs"), vm = require("node:vm"), assert = require("node:assert/strict");
+const elements = new Map(), calls = [];
+let confirmed = false, warning = "";
+const element = (id) => {
+  if (!elements.has(id)) elements.set(id, {hidden: true, textContent: "", innerHTML: "", addEventListener() {}});
+  return elements.get(id);
+};
+const context = vm.createContext({
+  document: {getElementById: element, querySelectorAll: () => []},
+  localStorage: {getItem: () => null},
+  UI: {esc: (s) => String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}[c]))},
+  confirm: () => confirmed,
+  fetch: async (url, options) => { calls.push([url, JSON.parse(options.body)]); return {ok:true, json: async () => ({warning})}; },
+  console, setTimeout, clearTimeout,
+});
+vm.runInContext(fs.readFileSync(process.argv[2], "utf8").split("// ---- start ")[0], context);
+vm.runInContext(`
+  permForm = {folders: []}; collectForm = () => permForm; permSaved = JSON.stringify(permForm);
+  loadPermissions = async () => {}; refreshTop = async () => {};
+`, context);
+(async () => {
+  const problems = [{folder:'C:/work/<img src=x onerror="oops">', reason:'contains_data_dir'},
+                    {folder:'D:/other', reason:'contains_data_dir'}];
+  context.problems = problems;
+  vm.runInContext("renderPolicyProblems(problems)", context);
+  const banner = element("policy-problem");
+  assert.equal(banner.hidden, false);
+  assert.ok(banner.innerHTML.includes("共有フォルダの設定に、codex-bridge 自身のデータ（設定と記録）を含むフォルダがあります: "));
+  assert.ok(banner.innerHTML.includes("。このままでは安全のため一部の操作ができないことがあります。"));
+  assert.equal((banner.innerHTML.match(/このフォルダを共有から外す/g) || []).length, 2);
+  assert.ok(!banner.innerHTML.includes("<img"));
+  const click = {target:{closest: () => ({dataset:{removeFolder:problems[1].folder}})}};
+  await banner.onclick(click);
+  assert.equal(calls.length, 0);
+  confirmed = true;
+  await banner.onclick(click);
+  assert.equal(calls[0][0], "/admin/api/folders/remove");
+  assert.equal(calls[0][1].path, problems[1].folder);
+  vm.runInContext("renderPolicyProblems([])", context);
+  assert.equal(banner.hidden, true);
+  assert.equal(banner.innerHTML, "");
+  warning = "このフォルダは、今のユーザーの権限では書き込めません。Codex が書こうとしても Windows に断られます。";
+  await vm.runInContext('folderOp("add", {path:"D:/other", level:"write"})', context);
+  assert.equal(element("folder-warning").hidden, false);
+  assert.equal(element("folder-warning").textContent, warning);
+  warning = "";
+  await vm.runInContext('folderOp("add", {path:"D:/safe", level:"write"})', context);
+  assert.equal(element("folder-warning").hidden, true);
+})().catch((e) => { console.error(e); process.exitCode = 1; });
+'''
+    source = Path(__file__).resolve().parents[2] / "src/codex_bridge/host/web/static/app.js"
+    result = subprocess.run([node, "-", str(source)], input=script, text=True, encoding="utf-8",
+                            capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr
 
 
 def test_first_run_writes_sample_configs(tmp_path):

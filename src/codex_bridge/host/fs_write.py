@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import shutil
+import stat
+import threading
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -49,9 +52,68 @@ class WriteTools:
         self.audit = audit
         self.task_id_fn = task_id_fn
         self.approve_fn = approve_fn
+        self._change_lock = threading.Lock()
 
-    def _before(self, rel: str, real: Path) -> None:
-        self.snapshots.before_change(self.task_id_fn(), rel, real)
+    @staticmethod
+    def _same_contents(left: Path, right: Path) -> bool:
+        if left.is_dir() and right.is_dir():
+            names = {p.name for p in left.iterdir()}
+            return names == {p.name for p in right.iterdir()} and all(
+                WriteTools._same_contents(left / name, right / name) for name in names)
+        if not left.is_file() or not right.is_file() or left.stat().st_size != right.stat().st_size:
+            return False
+        with left.open("rb") as original, right.open("rb") as saved:
+            while chunk := original.read(64 * 1024):
+                if chunk != saved.read(len(chunk)):
+                    return False
+            return not saved.read(1)
+
+    @contextmanager
+    def _changing(self, *paths: tuple[str, Path]):
+        """Keep originals before changing them, but discard new records for a failed no-op.
+
+        Serialize writers so cleanup cannot remove another call's snapshot. If a move or
+        recursive delete partly succeeded, keep its originals so it can still be undone.
+        """
+        with self._change_lock:
+            task_id = self.task_id_fn()
+            snapshots = self.snapshots
+            directory = snapshots._dir(task_id)
+            previous = snapshots._manifest(directory)
+            try:
+                for rel, real in paths:
+                    snapshots.before_change(task_id, rel, real)
+                yield
+            except (OSError, ToolError):
+                try:
+                    with snapshots._lock:
+                        manifest = snapshots._manifest(directory)
+                        added = {key: entry for key, entry in manifest.items() if key not in previous}
+                        unchanged = all(
+                            self._same_contents(Path(entry["abs"]), directory / entry["copy"])
+                            if entry["existed"] else not Path(entry["abs"]).exists()
+                            for entry in added.values())
+                        if added and unchanged:
+                            snapshots._save_manifest(directory, previous)
+                            for entry in added.values():
+                                if entry["copy"]:
+                                    copy = directory / entry["copy"]
+                                    if copy.is_dir():
+                                        shutil.rmtree(copy, onexc=self._remove_readonly_copy)
+                                    else:
+                                        copy.chmod(copy.stat().st_mode | stat.S_IWRITE)
+                                        copy.unlink()
+                except OSError:
+                    pass  # Preserve the original failure and keep any originals we cannot verify.
+                raise
+
+    @staticmethod
+    def _remove_readonly_copy(function, path, error) -> None:
+        if not isinstance(error, PermissionError):
+            raise error
+        saved = Path(path)
+        saved.chmod(saved.stat().st_mode | stat.S_IWRITE)
+        function(path)
 
     def _log(self, op: str, rel: str, **extra) -> None:
         self.audit.write("file_change", op=op, path=rel, task_id=self.task_id_fn(), **extra)
@@ -65,8 +127,8 @@ class WriteTools:
             _, enc, newline = read_text_preserving(real)
         else:
             enc, newline = "utf-8", "\r\n" if "\r\n" in content else "\n"
-        self._before(rel, real)
-        write_text_preserving(real, content, enc, newline)
+        with self._changing((rel, real)):
+            write_text_preserving(real, content, enc, newline)
         self._log("write_file", rel, bytes=len(content))
         return {"status": "done", "path": rel, "encoding": "utf-8" if enc == "utf-8-sig" else enc}
 
@@ -84,8 +146,8 @@ class WriteTools:
             raise ToolError(f"一致する箇所がありません: {rel}")
         if count > 1 and not replace_all:
             raise ToolError(f"{count} か所で一致しました。前後を含めて一意にするか、replace_all を指定してください: {rel}")
-        self._before(rel, real)
-        write_text_preserving(real, text.replace(old_n, new.replace("\r\n", "\n")), enc, newline)
+        with self._changing((rel, real)):
+            write_text_preserving(real, text.replace(old_n, new.replace("\r\n", "\n")), enc, newline)
         self._log("edit_file", rel, replacements=count)
         return {"status": "done", "path": rel, "replacements": count}
 
@@ -98,10 +160,9 @@ class WriteTools:
         if real_dst.exists():
             raise ToolError(f"移動先が既にあります: {rd}")
         self.paths.check_subtree_writable(real_src, "移動")
-        self._before(rs, real_src)
-        self._before(rd, real_dst)
-        real_dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(real_src), str(real_dst))
+        with self._changing((rs, real_src), (rd, real_dst)):
+            real_dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(real_src), str(real_dst))
         self._log("move_path", rs, to=rd)
         return {"status": "done", "from": rs, "to": rd}
 
@@ -129,9 +190,9 @@ class WriteTools:
         if not real.exists():
             raise not_found(path)
         self.paths.check_subtree_writable(real, "削除")
-        self._before(rel, real)
-        if real.is_dir():
-            shutil.rmtree(real)
-        else:
-            real.unlink()
+        with self._changing((rel, real)):
+            if real.is_dir():
+                shutil.rmtree(real)
+            else:
+                real.unlink()
         self._log("delete_path", rel)

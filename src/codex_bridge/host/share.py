@@ -3,8 +3,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tempfile
 
 from .policy_form import _abs, add_folder, remove_folder, set_main_folder
+
+UNWRITABLE_WARNING = "このフォルダは、今のユーザーの権限では書き込めません。Codex が書こうとしても Windows に断られます。"
+
+
+def folder_is_writable(folder: Path) -> bool:
+    """Probe as the current user; closing the temporary file also removes it."""
+    try:
+        with tempfile.TemporaryFile(dir=folder):
+            pass
+    except OSError:
+        return False
+    return True
 
 
 class ShareBusy(Exception):
@@ -13,7 +26,6 @@ class ShareBusy(Exception):
 
 def _guard(host, path: str, *, busy_check: bool = True) -> Path:
     p = Path(_abs(path))
-    host.policy.guard_shared_folder(p)
     if busy_check and host.mgr.current_task_id():
         raise ShareBusy("作業中のタスクがあるため、共有フォルダは変えられません。終わってから変えてください")
     return p

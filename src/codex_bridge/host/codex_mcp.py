@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextvars import ContextVar
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from mcp.server.mcpserver import MCPServer
@@ -78,9 +79,21 @@ def build_codex_mcp(s: HostServices, match_token: Callable[[str], str | None]) -
     async def run(name: str, args: dict, fn, *, blocking: bool) -> CallToolResult:
         try:
             result = await (asyncio.to_thread(fn) if blocking else fn())
-        except ToolError as e:
-            s.audit.write("tool_call", tool=name, args=_summarize(args), ok=False, error=str(e), task_id=s.task_id_fn())
-            return error_result(str(e))
+        except (ToolError, OSError) as e:
+            if isinstance(e, PermissionError):
+                # Use the caller's path, never an internal snapshot/temporary filename.
+                path = args.get("path") or args.get("src") or "指定されたファイル"
+                failed = e.filename2 or e.filename
+                if not args.get("path") and isinstance(failed, str) and s.paths.visible(Path(failed)):
+                    path = s.paths.display(Path(failed))
+                message = "Windows がこの操作を断りました（管理者の権限が要る場所か、ほかのプログラムが使用中の可能性があります）: " + path
+            elif isinstance(e, OSError):
+                # OSError.__str__ includes filenames, which can belong to our private data.
+                message = f"ファイルの操作に失敗しました: {e.strerror or str(e)}"
+            else:
+                message = str(e)
+            s.audit.write("tool_call", tool=name, args=_summarize(args), ok=False, error=message, task_id=s.task_id_fn())
+            return error_result(message)
         s.audit.write("tool_call", tool=name, args=_summarize(args), ok=True, task_id=s.task_id_fn())
         return json_result(result)
 

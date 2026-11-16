@@ -1,6 +1,8 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from pathlib import Path
+import stat
 from types import SimpleNamespace
 
 import httpx
@@ -14,7 +16,7 @@ from codex_bridge.host.app import build_host, create_public_app
 from codex_bridge.host.codex_mcp import HostServices, build_codex_mcp, current_lender
 from codex_bridge.host.config import HostConfig
 from codex_bridge.host.mcp_util import BearerAuth
-from conftest import RG_PATH
+from conftest import ORIGINAL_A, RG_PATH
 from mcp_helpers import running
 
 TOKEN = "tok-123"
@@ -146,6 +148,127 @@ async def test_every_call_is_audited(mcp, share):
     await call(mcp, "list_dir", {"path": "raw"})
     last = json.loads((share.data_dir / "audit.jsonl").read_text(encoding="utf-8").splitlines()[-1])
     assert last["kind"] == "tool_call" and last["tool"] == "list_dir" and last["ok"] is True
+
+
+@pytest.mark.parametrize("name", ["write_file", "edit_file", "delete_path", "move_path"])
+@pytest.mark.parametrize("prior", [False, True])
+async def test_permission_denied_is_reported_plainly(mcp, share, monkeypatch, name, prior):
+    import codex_bridge.host.fs_write as writes
+    target = share.root / "raw" / "a.txt"
+    share.task("denied")
+    if prior:
+        share.write.write_file("raw/a.txt", "earlier successful write\n")
+    original = target.read_bytes()
+    before = share.snapshots.touched("denied")
+    args = {"path": "raw/a.txt"}
+
+    def denied(*unused, **kwargs):
+        raise PermissionError(13, "Access is denied", str(target))
+
+    if name in ("write_file", "edit_file"):
+        monkeypatch.setattr(writes, "atomic_write_bytes", denied)
+        args.update({"content": "changed"} if name == "write_file" else {"old": "line1" if not prior else "earlier", "new": "changed"})
+    elif name == "move_path":
+        monkeypatch.setattr(writes.shutil, "move", denied)
+        args = {"src": "raw/a.txt", "dst": "out/moved.txt"}
+    else:
+        unlink = Path.unlink
+
+        def deny_target(path, *args, **kwargs):
+            if path == target:
+                return denied()
+            return unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", deny_target)
+    result = await call(mcp, name, args)
+    expected = "Windows がこの操作を断りました（管理者の権限が要る場所か、ほかのプログラムが使用中の可能性があります）: raw/a.txt"
+    assert result.get("isError") and result["content"][0]["text"] == expected
+    last = json.loads(share.audit.path.read_text(encoding="utf-8").splitlines()[-1])
+    assert last["kind"] == "tool_call" and last["tool"] == name and last["ok"] is False
+    assert last["error"] == expected and last["task_id"] == "denied"
+    assert target.read_bytes() == original
+    assert share.snapshots.touched("denied") == before
+    assert not (share.root / "out" / "moved.txt").exists()
+    monkeypatch.undo()
+    if prior:
+        assert share.snapshots.undo("denied") == ["raw/a.txt"]
+        assert target.read_text(encoding="utf-8") == ORIGINAL_A
+
+
+async def test_other_oserror_is_reported_and_audited(mcp, share, monkeypatch):
+    def failed(*args):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("codex_bridge.host.fs_write.atomic_write_bytes", failed)
+    result = await call(mcp, "write_file", {"path": "out/new.txt", "content": "x"})
+    assert result.get("isError")
+    assert result["content"][0]["text"] == "ファイルの操作に失敗しました: No space left on device"
+    last = json.loads(share.audit.path.read_text(encoding="utf-8").splitlines()[-1])
+    assert last["ok"] is False and last["tool"] == "write_file"
+    assert share.snapshots.touched(None) == []
+
+
+async def test_oserror_does_not_expose_internal_snapshot_path(mcp, share, monkeypatch):
+    def failed(*args):
+        raise OSError(28, "No space left on device", str(share.data_dir / "snapshots" / "private"))
+
+    monkeypatch.setattr("codex_bridge.host.fs_write.atomic_write_bytes", failed)
+    result = await call(mcp, "write_file", {"path": "out/new.txt", "content": "x"})
+    assert result.get("isError")
+    assert result["content"][0]["text"] == "ファイルの操作に失敗しました: No space left on device"
+    assert str(share.data_dir) not in json.dumps(result)
+
+
+async def test_move_permission_error_names_the_destination(mcp, share, monkeypatch):
+    target = share.root / "out" / "moved.txt"
+
+    def denied(*args):
+        raise PermissionError(13, "Access is denied", str(target))
+
+    monkeypatch.setattr("codex_bridge.host.fs_write.shutil.move", denied)
+    result = await call(mcp, "move_path", {"src": "raw/a.txt", "dst": "out/moved.txt"})
+    assert result.get("isError")
+    assert result["content"][0]["text"].endswith(": out/moved.txt")
+    assert share.snapshots.touched(None) == []
+
+
+async def test_partial_delete_keeps_original_for_undo(mcp, share, monkeypatch):
+    import codex_bridge.host.fs_write as writes
+    folder = share.root / "out" / "partial"
+    folder.mkdir()
+    (folder / "first.txt").write_bytes(b"first")
+    (folder / "second.txt").write_bytes(b"second")
+    rmtree = writes.shutil.rmtree
+
+    def partially_delete(path, *args, **kwargs):
+        if Path(path) == folder:
+            (folder / "first.txt").unlink()
+            raise PermissionError(13, "Access is denied", str(folder / "second.txt"))
+        return rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(writes.shutil, "rmtree", partially_delete)
+    result = await call(mcp, "delete_path", {"path": "out/partial"})
+    assert result.get("isError")
+    assert share.snapshots.touched(None) == ["out/partial"]
+    monkeypatch.undo()
+    assert share.snapshots.undo(None) == ["out/partial"]
+    assert (folder / "first.txt").read_bytes() == b"first"
+    assert (folder / "second.txt").read_bytes() == b"second"
+
+
+async def test_readonly_write_can_be_retried_after_permission_is_fixed(mcp, share):
+    target = share.root / "raw" / "a.txt"
+    target.chmod(stat.S_IREAD)
+    try:
+        result = await call(mcp, "write_file", {"path": "raw/a.txt", "content": "denied"})
+        assert result.get("isError") and "Windows がこの操作を断りました" in result["content"][0]["text"]
+        assert share.snapshots.touched(None) == []
+    finally:
+        target.chmod(stat.S_IREAD | stat.S_IWRITE)
+    result = await call(mcp, "write_file", {"path": "raw/a.txt", "content": "allowed"})
+    assert not result.get("isError"), result
+    assert share.snapshots.undo(None) == ["raw/a.txt"]
+    assert target.read_text(encoding="utf-8") == ORIGINAL_A
 
 
 async def test_write_content_not_dumped_in_audit(mcp, share):

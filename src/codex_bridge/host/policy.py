@@ -287,10 +287,18 @@ class PolicyStore:
         except yaml.YAMLError as e:
             raise ValueError(f"YAML の書式が正しくありません: {e}") from e
         parsed = parse_policy(raw)
-        for folder in parsed.folders:
-            self.guard_shared_folder(folder.path)
         if not parsed.v2 and self.share_root:
-            self.guard_shared_folder(self.share_root)
+            from .policy_migrate import migrate_v1
+            parsed = parse_policy(migrate_v1(raw, self.share_root))
+        previous = {}
+        for folder in self.current().folders:
+            previous[folder.key] = max(previous.get(folder.key, "hidden"), folder.level, key=LEVELS.index)
+        for folder in parsed.folders:
+            # Existing broad rules must not trap the owner: removing, hiding, lowering,
+            # or keeping a rule is safe. SafePaths still protects the data on every use.
+            old_level = previous.get(folder.key, "hidden")
+            if LEVELS.index(folder.level) > LEVELS.index(old_level):
+                self.guard_shared_folder(folder.path)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, self.path)
@@ -299,6 +307,12 @@ class PolicyStore:
     def guard_shared_folder(self, path: Path) -> None:
         if self.path.parent.resolve().is_relative_to(Path(path).resolve()):
             raise ValueError(DATA_SHARE_MSG)
+
+    def problems(self) -> list[dict]:
+        data_dir = self.path.parent.resolve()
+        return [{"folder": folder.path.as_posix(), "reason": "contains_data_dir"}
+                for folder in self.current().folders
+                if folder.level in ("read", "write") and data_dir.is_relative_to(folder.path.resolve())]
 
     def update(self, **changes) -> None:
         """Change top-level keys (e.g. paused) or exec keys via exec_<name>."""

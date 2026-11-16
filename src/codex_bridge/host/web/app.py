@@ -14,13 +14,14 @@ from fastapi.staticfiles import StaticFiles
 from ...common.invite import make_invite
 from ..paths import ToolError
 from ..policy import OUTPUTS_TOP, normalize_rel
-from ..policy_form import form_from_raw, save_form
+from ..policy_form import _abs, form_from_raw, save_form
 
 
 def _key(p) -> str:
     return os.path.normcase(os.path.abspath(str(p)))
 from ..share import (ShareBusy, add_shared_folder, change_share_root, pick_folder_dialog,
                      remove_shared_folder, set_main_shared_folder)
+from .. import share as share_ops
 
 STATIC = Path(__file__).parent / "static"
 COMMON = Path(__file__).parents[2] / "common" / "web"  # UI parts shared with the lender's page
@@ -51,6 +52,7 @@ def admin_router(host) -> APIRouter:
         return {
             "share_root": str(host.paths.root), "folders": host.paths.roots(), "public_bind": host.config.public_bind,
             "paused": p.paused, "exec_mode": p.exec_mode, "policy_error": host.policy.last_error,
+            "policy_problem": host.policy.problems(),
             "agent": host.mgr.agent_info(), "current_task": host.mgr.current_task_id(),
             "pending_approvals": len(host.approvals.pending()), "usage": host.mgr.usage(),
             "log_visibility": host.mgr.settings["log_visibility"],
@@ -126,7 +128,11 @@ def admin_router(host) -> APIRouter:
 
     @r.post("/api/folders/add")
     async def folders_add(body: dict):
-        return _folder_op(lambda: add_shared_folder(host, body.get("path"), body.get("level", "read")))
+        level = body.get("level", "read")
+        result = _folder_op(lambda: add_shared_folder(host, body.get("path"), level))
+        if level == "write" and not await asyncio.to_thread(share_ops.folder_is_writable, Path(_abs(body["path"]))):
+            result["warning"] = share_ops.UNWRITABLE_WARNING
+        return result
 
     @r.post("/api/folders/remove")
     async def folders_remove(body: dict):

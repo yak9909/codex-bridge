@@ -3,8 +3,9 @@ from pathlib import Path
 import yaml
 import pytest
 
-from codex_bridge.host.policy import PolicyStore, parse_policy
+from codex_bridge.host.policy import Folder, PolicyStore, parse_policy
 from codex_bridge.host.policy_migrate import migrate_v1
+from codex_bridge.host.policy_form import set_folder_level
 
 
 def v2(tmp_path: Path) -> dict:
@@ -109,3 +110,68 @@ def test_final_review_migration_preserves_original_bytes(tmp_path, existing):
     store = PolicyStore(path, share_root=tmp_path / "share")
     assert store.current().v2
     assert backup.read_bytes() == (b"earlier backup" if existing else original)
+
+
+def stored_bad_folder(tmp_path, level="write"):
+    data = tmp_path / "data"
+    data.mkdir()
+    path = data / "policy.yaml"
+    path.write_text(yaml.safe_dump({"folders": [{"path": tmp_path.as_posix(), "level": level}],
+                                    "exec": {"mode": "ask"}}), encoding="utf-8")
+    return PolicyStore(path)
+
+
+def test_pause_and_exec_mode_work_with_a_bad_folder_stored(tmp_path):
+    store = stored_bad_folder(tmp_path)
+    store.update(paused=True)
+    assert store.current().paused
+    store.update(exec_mode="off")
+    assert store.current().exec_mode == "off"
+    store.update(paused=False)
+    assert not store.current().paused
+
+
+@pytest.mark.parametrize("level", ["hidden", "inherit"])
+def test_bad_folder_can_be_removed_or_hidden(tmp_path, level):
+    store = stored_bad_folder(tmp_path)
+    set_folder_level(store, tmp_path.as_posix(), level)
+    assert store.current().folders == (() if level == "inherit" else (Folder(tmp_path, "hidden"),))
+    assert store.problems() == []
+
+
+@pytest.mark.parametrize("previous", [None, "hidden", "read"])
+@pytest.mark.parametrize("level", ["read", "write"])
+def test_adding_a_folder_that_contains_data_dir_is_still_refused(tmp_path, previous, level):
+    store = stored_bad_folder(tmp_path, previous or "hidden")
+    if previous is None:
+        store.path.write_text("folders: []\n", encoding="utf-8")
+    before = store.path.read_bytes()
+    if previous == level:
+        store.save({"folders": [{"path": tmp_path.as_posix(), "level": level}]})
+        return  # unchanged stored rule does not prevent saving unrelated settings
+    with pytest.raises(ValueError, match="データフォルダ"):
+        store.save({"folders": [{"path": tmp_path.as_posix(), "level": level}]})
+    assert store.path.read_bytes() == before
+
+
+def test_changing_bad_folder_path_is_refused(tmp_path):
+    store = stored_bad_folder(tmp_path)
+    with pytest.raises(ValueError, match="データフォルダ"):
+        store.save({"folders": [{"path": tmp_path.parent.as_posix(), "level": "write"}]})
+
+
+def test_bad_folder_downgrade_and_normalized_path_are_allowed(tmp_path):
+    store = stored_bad_folder(tmp_path)
+    store.save({"folders": [{"path": str(tmp_path).upper(), "level": "read"}]})
+    assert store.current().folders[0].level == "read"
+    assert store.problems() == [{"folder": store.current().folders[0].path.as_posix(),
+                                 "reason": "contains_data_dir"}]
+
+
+def test_unchanged_duplicate_bad_folders_do_not_block_pause(tmp_path):
+    store = stored_bad_folder(tmp_path)
+    store.path.write_text(yaml.safe_dump({"folders": [
+        {"path": tmp_path.as_posix(), "level": "read"},
+        {"path": tmp_path.as_posix(), "level": "hidden"}]}), encoding="utf-8")
+    store.update(paused=True)
+    assert store.current().paused

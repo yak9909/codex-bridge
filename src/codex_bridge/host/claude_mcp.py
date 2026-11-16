@@ -379,6 +379,7 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
             return {"share_root": str(share_root()), "folders": roots(), "public_bind": public_bind,
                     "agent": mgr.agent_info(),
                     "paused": p.paused, "exec_mode": p.exec_mode, "policy_error": policy.last_error,
+                    "policy_problem": policy.problems(),
                     "current_task": mgr.current_task_id(), "pending_approvals": len(approvals.pending()),
                     "usage": mgr.usage(), "log_visibility": mgr.settings["log_visibility"]}
         return await run(f)
