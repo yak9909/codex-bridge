@@ -49,10 +49,11 @@ class WorkLog:
             raise ValueError(f"not a task id: {str(task_id)[:40]!r}")
         return self.dir / f"{task_id}.jsonl"
 
-    def add(self, task_id: str, kind: str, data) -> None:
+    def add(self, task_id: str, kind: str, data, *, connection_id=None, host_name=None) -> None:
         path = self._path(task_id)
         self.dir.mkdir(parents=True, exist_ok=True)
-        line = json.dumps({"ts": self.clock(), "kind": kind, "data": data}, ensure_ascii=False) + "\n"
+        fields = {"connection_id": connection_id, "host_name": host_name} if connection_id else {}
+        line = json.dumps({"ts": self.clock(), "kind": kind, "data": data, **fields}, ensure_ascii=False) + "\n"
         with open(path, "a+b") as f:
             size = f.seek(0, os.SEEK_END)
             if size:

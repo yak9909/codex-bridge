@@ -75,7 +75,7 @@ function lenderRow(l, i) {
   const pct = (v) => (v == null ? "なし" : `${esc(v)}%`);
   const limits = !lim ? "—" : lim.five_hour == null && lim.weekly == null ? "なし"
     : `5 時間枠 ${pct(lim.five_hour)}<br>週間枠 ${pct(lim.weekly)}<div class="small">超えたら${lim.force ? "すぐ止める" : "区切りで止める"}</div>`;
-  const task = l.current_task_id
+  const task = l.busy_elsewhere ? "ほかの依頼主の作業中" : l.current_task_id
     ? `<button type="button" class="link" data-task="${esc(l.current_task_id)}">${esc(l.current_task_id)}</button>`
     : seen ? "なし" : "—";
   const caps = l.capabilities;
@@ -107,7 +107,7 @@ function drawLenders(rows, th) {
 // request must never go to somebody else than the person named, so the host is left to refuse it.
 function drawTargets(rows) {
   const sel = $("req-lender"), chosen = sel.value;
-  const why = (l) => (!l.connected ? "未接続" : !l.ready ? "準備中" : l.current_task_id ? "作業中"
+  const why = (l) => (!l.connected ? "未接続" : !l.ready ? "準備中" : l.busy_elsewhere ? "ほかの依頼主の作業中" : l.current_task_id ? "作業中"
     : l.usage.blocked_until ? "上限のため停止中" : "");
   const option = (name, w) =>
     `<option value="${esc(name)}"${w && name !== chosen ? " disabled" : ""}>${esc(name)}${w ? `（${w}）` : ""}</option>`;

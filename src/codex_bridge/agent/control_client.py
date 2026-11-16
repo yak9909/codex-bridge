@@ -34,6 +34,7 @@ class ControlClient:
         self.on_status = on_status or (lambda s: None)
         self.ws = None
         self.paused = False
+        self.invite_problem: str | None = None
         runner.send = self.send
 
     async def send(self, m: dict) -> None:
@@ -67,6 +68,10 @@ class ControlClient:
         await self.runner.resend_unacked()
         await self.send_hello()
         await self.runner.resend_pending()
+        await self.runner.send_busy_status()
+        if self.runner.slot and self.runner.slot.last_usage:
+            snap = self.runner.slot.last_usage
+            await self.send(protocol.msg("usage", **snap.to_message(), friend_limits=self.runner.friend_limits))
 
     async def drop(self) -> None:
         """Close the current connection (used by tests and on shutdown)."""
@@ -85,6 +90,7 @@ class ControlClient:
                         ws_url(self.invite.url), max_size=None, ping_interval=20, ping_timeout=60,
                         additional_headers={"Authorization": f"Bearer {self.invite.token}"}) as ws:
                     self.ws = ws
+                    self.invite_problem = None
                     backoff = self.initial_backoff
                     self.on_status("接続しました")
                     await self.on_connected()
@@ -98,6 +104,8 @@ class ControlClient:
                         except Exception as e:  # keep the connection loop alive whatever happens
                             self.on_status(f"処理中にエラー: {type(e).__name__}")
             except InvalidStatus as e:
+                if e.response.status_code in (401, 403):
+                    self.invite_problem = "rejected"
                 self.on_status(f"接続を断られました（{e.response.status_code}）。招待コードが失効していないか確かめてください")
             except (OSError, ConnectionClosed, asyncio.TimeoutError) as e:
                 self.on_status(f"接続できません: {type(e).__name__}")

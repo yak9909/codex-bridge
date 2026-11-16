@@ -110,7 +110,8 @@ async def test_final_review_orphaned_worklog_task_shows_interrupted(env, state):
 
 
 @pytest.mark.parametrize("path", ["/", "/static/app.js", "/admin/common/ui.js", "/api/overview", "/api/tasks",
-                                  "/api/tasks/t1", "/api/pending", "/api/sessions", "/api/settings"])
+                                  "/api/tasks/t1", "/api/pending", "/api/sessions", "/api/settings",
+                                  "/api/connections", "/api/connections/missing/settings"])
 async def test_every_read_checks_host(env, path):
     assert (await env.http.get(path, headers={"Host": "evil.invalid:8766"})).status_code == 403
 
@@ -130,6 +131,8 @@ async def test_nonlocal_peer_is_rejected_even_with_good_host(env):
     ("PUT", "/api/settings", {"disposable": True}), ("POST", "/api/settings/data-root", {"path": "D:/new"}),
     ("POST", "/api/logs/clear", {}), ("POST", "/api/pause", {"paused": True}),
     ("POST", "/api/pending", {"task_id": "t1", "approve": True}), ("DELETE", "/api/sessions/s1", None),
+    ("POST", "/api/connections", {"code": "bad"}), ("PUT", "/api/connections/a/invite", {"code": "bad"}),
+    ("DELETE", "/api/connections/a", None), ("PUT", "/api/connections/a/settings", {}),
 ])
 async def test_every_write_requires_header_and_checks_host(env, method, path, body):
     for headers in ({}, {"X-Codex-Bridge": "0"}, {**WRITE, "Host": "evil:8766"}):

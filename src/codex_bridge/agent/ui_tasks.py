@@ -46,7 +46,10 @@ def task_view(runner: AgentRunner, task_id: str, *, detail: bool = True) -> dict
     if not events:
         return None
     task = {"task_id": task_id, "created": events[0]["ts"], "finished": None, "state": "queued",
-            "prompt": "", "report": None, "thread_id": None, "resume_at": None}
+            "prompt": "", "report": None, "thread_id": None, "resume_at": None,
+            **runner.connection_fields()}
+    if events[0].get("connection_id"):
+        task.update(connection_id=events[0]["connection_id"], host_name=events[0].get("host_name"))
     for event in events:
         data = event.get("data")
         data = data if isinstance(data, dict) else {}

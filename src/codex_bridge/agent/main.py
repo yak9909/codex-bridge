@@ -12,19 +12,21 @@ import time
 import traceback
 import webbrowser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import uvicorn
 
 from .. import __version__
-from ..common.invite import Invite, parse_invite
+from ..common.invite import Invite, make_invite, parse_invite
 from .appserver import AppServer, codex_command
 from .control_client import ControlClient
+from .connections import ConnectionStore
 from .logview import LogStore
-from .runner import AgentRunner
+from .runner import AgentRunner, TaskSlot
 from .sessions import SessionRegistry
-from .settings import SettingsApplier, SettingsStore, hello_fields, resolve_workdir
-from .setup import (MIN_CODEX_VERSION, choose_codex, data_root, download_codex, load_invite, make_guard, run_login,
-                    save_invite, user_mcp_names)
+from .settings import SettingsApplier, SettingsStore, hello_fields, resolve_workdir, move_data_root
+from .setup import (MIN_CODEX_VERSION, choose_codex, data_root, download_codex, make_guard, run_login,
+                    user_mcp_names)
 from .ui import create_ui_app
 from .worklog import WorkLog
 
@@ -122,111 +124,276 @@ def codex_version(cmd: list[str]) -> str:
         return "?"
 
 
-async def run_agent(invite: Invite, codex: Path, home: Path) -> bool:
-    """Runs until the user quits. True when the data was moved to another place: the exe must start again."""
-    cmd = codex_command(codex)
-    settings = SettingsStore(home / "settings.json", legacy_limits=home / "limits.json")
-    current = settings.get()
-    # Our sessions use only the bridge tools: the friend's own MCP servers are switched off for them.
-    app = AppServer(cmd, invite.url, invite.token, resolve_workdir(current, home), disabled_mcp=user_mcp_names(),
-                    features=current["features"])
-    await app.start()
-    mode = await app.auth_mode()
-    if mode == "none":
-        await app.stop()
-        show_info("Codex にログインします。開いた画面の案内に従って ChatGPT でログインしてください。")
-        await asyncio.to_thread(run_login, cmd)
-        await app.start()
-        mode = await app.auth_mode()
-        if mode == "none":
-            show_info("Codex にログインできませんでした。もう一度起動してください。", error=True)
-            return False
+class AgentConnections:
+    """Live objects for each stored host; all task admission goes through the runner's shared slot."""
 
+    def __init__(self, home: Path, *, app_factory, versions: dict, initial_backoff=1.0, on_log=None):
+        self.home = Path(home)
+        self.store = ConnectionStore(home)  # migrate with legacy settings before projecting the shared store
+        self.settings = SettingsStore(home / "settings.json", legacy_limits=home / "limits.json", shared=True)
+        self.settings.update({})
+        self.app_factory, self.versions = app_factory, versions
+        self.initial_backoff = initial_backoff
+        self.on_log = on_log or (lambda m: None)
+        self.slot = TaskSlot()
+        self.runners, self.clients, self.links = {}, {}, {}
+        self.started, self.paused, self.moving = False, False, False
+        self.appliers = {}
+        for connection in self.store.list():
+            self._install(connection)
+
+    def _install(self, connection):
+        current = {**self.settings.get(), **connection.settings}
+        app = self.app_factory(connection, current)
+        root = self.home / "connections" / connection.id
+
+        async def prepare():
+            if self.moving:
+                raise RuntimeError("保存場所を移動中です")
+            # Launch only when a task/session operation arrives. A change to launch arguments waits for idle.
+            desired = runner.settings["features"]
+            wd = resolve_workdir(runner.settings, self.home)
+            if (app.running and (app.features != desired or Path(app.workdir) != wd)
+                    and runner.cur and runner.cur.thread_id is None):
+                await app.restart(features=desired, workdir=wd)
+            elif not app.running:
+                app.features = dict(desired)
+                app.workdir = wd
+            await app.start()
+            await runner.refresh_usage()
+
+        runner = AgentRunner(app, make_guard(self.versions.get("auth_mode", "chatgpt")),
+                             SessionRegistry(root / "sessions.json"), send=None, slot=self.slot,
+                             connection_id=connection.id, host_name=urlsplit(connection.invite.url).netloc,
+                             prepare=prepare, on_log=lambda m: self.on_log({**m, **runner.connection_fields()}),
+                             worklog=WorkLog(root / "logs" / "tasks", current["log_retention_days"]))
+        runner.apply_settings(current)
+        runner.last_usage = self.slot.last_usage
+        runner.log_visibility = current["log_visibility"]
+        client = ControlClient(connection.invite, runner,
+                               hello=lambda: {**self.versions, **hello_fields(runner.settings)},
+                               initial_backoff=self.initial_backoff)
+        client.paused = self.paused
+        self.runners[connection.id], self.clients[connection.id] = runner, client
+        # The existing applier handles a deferred restart, using the combined settings of this connection.
+        class Combined:
+            def get(inner):
+                return runner.settings
+        self.appliers[connection.id] = SettingsApplier(Combined(), app, runner, self.home,
+                                                      refresh_hello=client.refresh_hello, on_log=self.on_log)
+
+    async def _activate(self, id):
+        await self.runners[id].start()
+        self.links[id] = asyncio.create_task(self.clients[id].run_forever())
+
+    async def start(self):
+        self.started = True
+        for id in self.runners:
+            await self._activate(id)
+
+    async def _stop_connection(self, id):
+        link = self.links.pop(id, None)
+        if link:
+            link.cancel()
+            await asyncio.gather(link, return_exceptions=True)
+        runner = self.runners[id]
+        await runner.stop()
+        await runner.app.stop()
+
+    async def stop(self):
+        for runner in self.runners.values():
+            await runner.shutdown()
+        for id in list(self.runners):
+            await self._stop_connection(id)
+        self.started = False
+
+    async def add(self, code):
+        connection = self.store.add(code)
+        self._install(connection)
+        if self.started:
+            await self._activate(connection.id)
+        return connection
+
+    def _require_idle(self, id):
+        if self.runners[id].active_task_id() is not None:
+            raise RuntimeError("作業中・承認待ちの接続先は変更できません")
+
+    async def replace_invite(self, id, code):
+        async with self.slot.lock:
+            self._require_idle(id)
+            connection = self.store.replace_invite(id, code)
+            await self._stop_connection(id)
+            runner, client = self.runners[id], self.clients[id]
+            same_host = (client.invite.url, client.invite.name) == (connection.invite.url, connection.invite.name)
+            if not same_host:
+                # Never send another requester's events or sessions to the replacement host.
+                runner._unacked.clear()
+                runner.sessions = SessionRegistry(self.home / "connections" / id / "sessions.json")
+                runner.guard = make_guard(self.versions.get("auth_mode", "chatgpt"))
+                runner.apply_settings({**self.settings.get(), **connection.settings})
+            runner.host_name = urlsplit(connection.invite.url).netloc
+            runner.app.host_url, runner.app.token = connection.invite.url, connection.invite.token
+            client.invite, client.invite_problem = connection.invite, None
+            if self.started:
+                await self._activate(id)
+            return connection
+
+    async def remove(self, id):
+        async with self.slot.lock:
+            self._require_idle(id)
+            await self._stop_connection(id)
+            self.store.remove(id)
+            self.slot.runners.remove(self.runners.pop(id))
+            self.clients.pop(id)
+            self.appliers.pop(id)
+
+    async def update_settings(self, id, patch):
+        saved = self.store.update_settings(id, patch)
+        runner = self.runners[id]
+        runner.apply_settings({**self.settings.get(), **saved})
+        await self.clients[id].refresh_hello()
+        if runner.app.running:
+            await self.appliers[id].settle()
+        runner.log_visibility = saved["log_visibility"]
+        return saved
+
+    async def apply_shared(self, saved):
+        for id, runner in self.runners.items():
+            runner.apply_settings({**runner.settings, **saved})
+            if runner.app.running:
+                await self.appliers[id].settle()
+            await self.clients[id].refresh_hello()  # limits also appear in hello even when Codex is still lazy
+
+    async def settle(self):
+        if self.moving:
+            return
+        for id, runner in self.runners.items():
+            # Do not turn an idle, never-used app-server on just to settle settings.
+            if runner.app.running:
+                await self.appliers[id].settle()
+
+    async def set_paused(self, paused):
+        self.paused = paused
+        for client in self.clients.values():
+            client.paused = paused
+            if paused:
+                await client.drop()
+
+    async def move_data(self, new):
+        async with self.slot.lock:
+            if self.slot.owner is not None:
+                raise ValueError("作業中・承認待ちは保存場所を変えられません")
+            was_paused = self.paused
+            await self.set_paused(True)
+            self.moving = True
+            try:
+                for id in self.runners:
+                    await self._stop_connection(id)
+                return await asyncio.to_thread(move_data_root, new, current=self.home)
+            except BaseException:
+                self.moving = False
+                if self.started:
+                    for id in self.runners:
+                        await self._activate(id)
+                await self.set_paused(was_paused)
+                raise
+
+    def rows(self):
+        return [{"id": id, "host_name": runner.host_name, "connected": self.clients[id].ws is not None,
+                 "invite_problem": self.clients[id].invite_problem, "busy": runner.active_task_id() is not None}
+                for id, runner in self.runners.items()]
+
+
+async def run_agent(invite: Invite | None, codex: Path, home: Path) -> bool:
+    """Runs all saved hosts until quit; True asks the exe to relaunch after moving its data."""
+    cmd = codex_command(codex)
     store = LogStore(home / "logs")
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    relaunch = False
     notified = None
 
-    def on_log(message: dict) -> None:
+    def factory(connection, current):
+        app = AppServer(cmd, connection.invite.url, connection.invite.token, resolve_workdir(current, home),
+                        disabled_mcp=user_mcp_names(), features=current["features"])
+        original_start = app.start
+
+        async def authenticated_start():
+            await original_start()
+            mode = await app.auth_mode()
+            if mode == "none":
+                await app.stop()
+                show_info("Codex にログインします。開いた画面の案内に従って ChatGPT でログインしてください。")
+                await asyncio.to_thread(run_login, cmd)
+                await original_start()
+                mode = await app.auth_mode()
+                if mode == "none":
+                    raise RuntimeError("Codex にログインできませんでした。もう一度起動してください。")
+            runtime.versions["auth_mode"] = mode
+            for runner in runtime.runners.values():
+                runner.guard.enabled = mode == "chatgpt"
+            for client in runtime.clients.values():
+                await client.refresh_hello()
+        app.start = authenticated_start
+        return app
+
+    def on_log(message):
         nonlocal notified
         if message.get("type") in {"settings", "error"}:
-            store.add(message)  # task records belong only to WorkLog, without a second unfiltered copy
+            store.add(message)
         if message.get("type") == "task_state" and message.get("state") == "awaiting_lender":
-            pending = runner.pending_approval
-            key = (pending["task_id"], pending["kind"], pending["created"]) if pending else None
+            runner = runtime.runners.get(message.get("connection_id"))
+            pending = runner.pending_approval if runner else None
+            key = (runner.connection_id, pending["task_id"], pending["created"]) if pending else None
             if key is not None and key != notified:
                 notified = key
                 tray.notify_pending(pending["prompt"])
 
-    runner = AgentRunner(app, make_guard(mode), SessionRegistry(home / "sessions.json"), send=None,
-                         on_log=on_log,
-                         worklog=WorkLog(home / "logs" / "tasks", retention_days=current["log_retention_days"]))
-    runner.apply_settings(current)
-    runner.log_visibility = store.visibility
-    loop = asyncio.get_running_loop()
-    stop = asyncio.Event()
-    relaunch = False
+    versions = {"agent_version": __version__, "codex_version": codex_version(cmd), "auth_mode": "unknown"}
+    runtime = AgentConnections(home, app_factory=factory, versions=versions, on_log=on_log)
+    if invite is not None and not runtime.runners:
+        await runtime.add(make_invite(invite.url, invite.token, invite.name))
 
-    async def set_paused(paused: bool) -> None:
-        client.paused = paused
+    async def set_paused(paused):
+        await runtime.set_paused(paused)
         tray.paused = paused
         tray.icon.update_menu()
-        if paused:
-            await client.drop()
 
-    def toggle_pause() -> None:
-        asyncio.run_coroutine_threadsafe(set_paused(not client.paused), loop)
+    def toggle_pause():
+        asyncio.run_coroutine_threadsafe(set_paused(not runtime.paused), loop)
 
     tray = Tray(on_quit=lambda: loop.call_soon_threadsafe(stop.set), on_pause_toggle=toggle_pause)
-    versions = {"agent_version": __version__, "codex_version": codex_version(cmd), "auth_mode": mode}
-    client = ControlClient(invite, runner, hello=lambda: {**versions, **hello_fields(runner.settings)},
-                           on_status=lambda s: tray.set_status(s))
     tray.run_detached()
-    applier = SettingsApplier(settings, app, runner, home, refresh_hello=client.refresh_hello, on_log=store.add)
 
-    async def move_data(new: Path) -> list[Path]:
+    async def move_data(new):
         nonlocal relaunch
-        was_paused = client.paused
-        await set_paused(True)  # stop routing before the stores start moving
-        try:
-            left = await applier.move_data(new)
-        except BaseException:
-            await set_paused(was_paused)
-            raise
-        relaunch = True  # the stores in this process still point at the old place: start again on the new one
+        left = await runtime.move_data(new)
+        relaunch = True
         loop.call_later(1.0, stop.set)
         return left
 
-    logview = make_ui_server(runner, settings, client, versions=versions, data_root=home,
-                             on_settings=applier.apply, on_move=move_data, on_pause=set_paused)
+    logview = make_ui_server(None, runtime.settings, None, versions=versions, data_root=home,
+                             connections=runtime, on_settings=runtime.apply_shared, on_move=move_data,
+                             on_pause=set_paused)
 
-    async def watchdog() -> None:
+    async def watchdog():
         while True:
             await asyncio.sleep(5)
-            if applier.moving:
-                continue
             try:
-                await applier.settle()  # a change that had to wait for the running task
+                await runtime.settle()
             except Exception as e:
                 store.add({"type": "error", "text": f"設定を反映できませんでした: {type(e).__name__}: {e}"})
-            if not app.running and not applier.moving:
-                tray.set_status("Codex を再起動しています")
-                try:
-                    await app.start()
-                except Exception:
-                    pass
+            tray.set_status("一時停止中" if runtime.paused else
+                            "作業中" if runtime.slot.owner else
+                            f"接続中 {sum(row['connected'] for row in runtime.rows())} 件")
 
-    await runner.start()
-    tasks = [asyncio.create_task(client.run_forever()), asyncio.create_task(logview.serve()),
-             asyncio.create_task(watchdog())]
+    await runtime.start()
+    tasks = [asyncio.create_task(logview.serve()), asyncio.create_task(watchdog())]
     await stop.wait()
-    try:
-        await asyncio.wait_for(runner.shutdown(), 5)  # a request waiting for the lender is refused while the host is still connected
-    except Exception as e:
-        store.add({"type": "error", "text": f"終了の知らせを送れませんでした: {type(e).__name__}: {e}"})
+    await runtime.stop()
     logview.should_exit = True
-    for t in tasks[:1] + tasks[2:]:
-        t.cancel()
-    await runner.stop()
-    await app.stop()
+    tasks[1].cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
     tray.icon.stop()
     return relaunch
 
@@ -277,12 +444,13 @@ def start_again() -> None:
 
 
 def _main(home: Path) -> bool:
-    invite = load_invite(home)
-    if invite is None:
+    connections = ConnectionStore(home)
+    invite = None
+    if not connections.list():
         invite = ask_invite()
         if invite is None:
             return False
-        save_invite(home, invite)
+        connections.add(make_invite(invite.url, invite.token, invite.name))
     on_path = shutil.which("codex")
     bundled = home / "bin" / "codex.exe"
     codex = choose_codex(Path(on_path) if on_path else None, bundled if bundled.exists() else None)

@@ -5,6 +5,7 @@ import asyncio
 import pytest
 import uvicorn
 from fastapi import FastAPI
+from starlette.websockets import WebSocket
 
 from codex_bridge.agent.control_client import ControlClient
 from codex_bridge.agent.runner import AgentRunner
@@ -15,6 +16,7 @@ from codex_bridge.host.control import add_control_route
 from codex_bridge.host.tasks import TaskManager
 from codex_bridge.host.tokens import TokenStore
 from fake_helpers import Fake
+from codex_bridge.common.invite import make_invite
 
 TURN_STARTED = {"method": "turn/started", "params": {"threadId": "th1", "turn": {"id": "u1"}}}
 MSG = {"method": "item/completed", "params": {"threadId": "th1", "turnId": "u1", "completedAtMs": 0,
@@ -28,6 +30,131 @@ async def until(pred, timeout=10):
             return
         await asyncio.sleep(0.05)
     raise AssertionError("timed out")
+
+
+@pytest.fixture
+async def multiple(tmp_path):
+    from codex_bridge.agent.main import AgentConnections
+    managers, servers, serving, codes, messages, fakes = [], [], [], [], [], {}
+    for i in range(2):
+        home = tmp_path / f"host-{i}"
+        mgr = TaskManager(home, touched_fn=lambda t: [])
+        token = TokenStore(home)
+        code_token = token.issue("friend")
+        app = FastAPI()
+        add_control_route(app, mgr, token)
+        observed = []
+        original = mgr.on_agent_message
+
+        async def observe(link, message, original=original, observed=observed):
+            observed.append(message)
+            await original(link, message)
+
+        mgr.on_agent_message = observe
+        server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
+        serving.append(asyncio.create_task(server.serve()))
+        await until(lambda: server.started)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        codes.append(make_invite(f"http://127.0.0.1:{port}", code_token, "friend"))
+        managers.append(mgr)
+        servers.append(server)
+        messages.append(observed)
+
+    def factory(connection, settings):
+        root = tmp_path / ("fake-" + connection.id)
+        root.mkdir()
+        fake = fakes[connection.id] = Fake(root, {"after": {"turn/start": [TURN_STARTED], "turn/steer": [MSG, DONE]}})
+        fake.app.features = settings["features"]
+        return fake.app
+
+    runtime = AgentConnections(tmp_path / "agent", app_factory=factory, versions={"auth_mode": "chatgpt"},
+                               initial_backoff=0.1)
+    await runtime.start()
+    connections = [await runtime.add(code) for code in codes]
+    try:
+        await until(lambda: all(mgr.agent_info().get("ready") for mgr in managers))
+        yield runtime, connections, managers, messages
+    finally:
+        await runtime.stop()
+        for server in servers:
+            server.should_exit = True
+        await asyncio.gather(*serving)
+
+
+async def test_add_two_connections_and_both_connect(multiple):
+    runtime, connections, managers, messages = multiple
+    assert len(runtime.store.list()) == 2
+    assert all(any(m["type"] == "hello" for m in stream) for stream in messages)
+    assert all(not r.app.running for r in runtime.runners.values())
+
+
+@pytest.mark.parametrize("pending", [False, True])
+async def test_only_one_task_at_a_time(multiple, pending):
+    runtime, connections, (a, b), (_, b_messages) = multiple
+    ar, br = (runtime.runners[c.id] for c in connections)
+    await runtime.update_settings(connections[0].id, {"pre_approval": {"enabled": pending, "timeout_min": None}})
+    tid = await a.start("work")
+    await until(lambda: a.status(tid)["state"] == ("awaiting_lender" if pending else "running"))
+    await until(lambda: any(m["type"] == "lender_status" and m["busy_elsewhere"] for m in b_messages))
+    # B's host would now refuse routing, so inject a request that was already in flight.
+    await br.handle({"type": "task_start", "task_id": "in-flight", "prompt": "other"})
+    await br.handle({"type": "task_followup", "task_id": "followup-flight", "text": "other"})
+    await until(lambda: len([m for m in b_messages if m.get("state") == "rejected_by_lender"]) == 2)
+    rejected = [m for m in b_messages if m.get("state") == "rejected_by_lender"]
+    assert all(m["report"] == "貸している人は、ほかの依頼主の作業をしています。あとでもう一度頼むか、ほかの人に頼んでください。" for m in rejected)
+    if pending:
+        client = runtime.clients[connections[0].id]
+        since = a.agent_info()["since"]
+        await client.drop()
+        await until(lambda: a.agent_info()["since"] != since and a.agent_info()["ready"])
+        assert a.status(tid)["state"] == "awaiting_lender"
+        await ar.decide_pending(False)
+    else:
+        await ar.handle({"type": "task_followup", "task_id": tid, "text": "finish"})
+        await until(lambda: a.status(tid)["state"] == "completed")
+    await until(lambda: [m for m in b_messages if m["type"] == "lender_status"][-1]["busy_elsewhere"] is False)
+    assert b.lenders()[0]["busy_elsewhere"] is False
+
+
+async def test_rejected_invite_is_reported(tmp_path):
+    from codex_bridge.agent.main import AgentConnections
+    app = FastAPI()
+
+    @app.websocket("/agent/ws")
+    async def socket(ws: WebSocket):
+        if ws.headers.get("authorization") != "Bearer valid":
+            await ws.close()  # before accept: HTTP 403
+            return
+        await ws.accept()
+        from starlette.websockets import WebSocketDisconnect
+        try:
+            while True:
+                await ws.receive_text()
+        except WebSocketDisconnect:
+            pass
+
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
+    serve = asyncio.create_task(server.serve())
+    await until(lambda: server.started)
+    port = server.servers[0].sockets[0].getsockname()[1]
+
+    def factory(connection, settings):
+        root = tmp_path / ("fake-" + connection.id)
+        root.mkdir(exist_ok=True)
+        return Fake(root).app
+
+    runtime = AgentConnections(tmp_path / "agent", app_factory=factory, versions={}, initial_backoff=0.1)
+    await runtime.start()
+    try:
+        connection = await runtime.add(make_invite(f"http://127.0.0.1:{port}", "bad", "friend"))
+        await until(lambda: runtime.rows()[0]["invite_problem"] == "rejected")
+        await runtime.replace_invite(connection.id, make_invite(f"http://127.0.0.1:{port}", "valid", "friend"))
+        await until(lambda: runtime.rows()[0]["connected"])
+        assert runtime.rows()[0]["invite_problem"] is None
+    finally:
+        await runtime.stop()
+        server.should_exit = True
+        await serve
 
 
 @pytest.fixture

@@ -1,6 +1,18 @@
 /* Page-specific layout; the visual parts are shared with the host. */
 .brand .sub { font-size: 13px; }
 .grid2 { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); }
+.usage-connections { display: grid; gap: 16px; }
+.connection-add { border-top: 1px solid var(--line); margin-top: 14px; padding-bottom: 16px; }
+#connections td:last-child { white-space: normal; text-align: left; width: 46%; min-width: 290px; }
+#connections td:first-child { min-width: 170px; font-weight: 600; }
+#connections td:nth-child(2), #connections td:nth-child(3) { white-space: nowrap; }
+#connections .row { margin-top: 0; }
+.replace-invite { margin-top: 8px; }
+.invite-rejected { background: var(--bad-bg); }
+.invite-error { color: var(--bad); font-size: 13px; max-width: 520px; }
+.connection-filter { margin-top: 0; }
+#connection-settings-form > .row { margin-top: 16px; }
+#connection-settings-region { scroll-margin-top: 70px; }
 .usage-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 14px; }
 .usage-limit { display: flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 13px; }
 .usage-limit span { white-space: nowrap; }

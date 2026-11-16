@@ -169,6 +169,7 @@ class TaskManager:
         self._links[link_id] = self._last = lender
         lender.send, lender.connected, lender.since = send, True, time.time()
         lender.ready = False  # until this connection's hello
+        lender.busy_elsewhere = False
         self._changed()
         return link_id
 
@@ -241,7 +242,8 @@ class TaskManager:
         connected since: not connected, no usage, and what it can do is not known (capabilities None)."""
         def row(l: Lender) -> dict:
             return {**self._info(l), "limits": l.limits, "usage": self._usage_of(l),
-                    "current_task_id": l.current_task_id, "last_assigned": l.last_assigned}
+                    "current_task_id": l.current_task_id, "last_assigned": l.last_assigned,
+                    "busy_elsewhere": l.busy_elsewhere}
         never = [{**row(Lender(name=n, current_task_id=self.current_task_id(n))), "capabilities": None}
                  for n in dict.fromkeys(invited) if n not in self._lenders]
         return [row(l) for l in self._lenders.values()] + never
@@ -276,6 +278,10 @@ class TaskManager:
             lender.ready = True
             await lender.send(self._settings_msg())
             self._changed()
+        elif t == "lender_status":
+            if isinstance(m.get("busy_elsewhere"), bool):
+                lender.busy_elsewhere = m["busy_elsewhere"]
+                self._changed()
         elif t == "usage":
             # numbers from the other PC are checked here, so that nothing computed from them later can fail
             limits = normalize_limits(m.get("friend_limits"))
@@ -417,6 +423,8 @@ class TaskManager:
         return rec
 
     def _require_free(self, lender: Lender, now: float, advice: str = "") -> None:
+        if lender.busy_elsewhere:
+            raise ToolError(BUSY.format("ほかの依頼主の作業中") + advice)
         if lender.current_task_id:
             raise ToolError(BUSY.format(lender.current_task_id) + advice)
         blocked = blocked_until(lender, self.settings["thresholds"], now)
@@ -433,10 +441,11 @@ class TaskManager:
         # or the only ones left have just connected and not said hello yet
         ready = [l for l in online if l.ready]
         waits = [t for l in ready
-                 if l.current_task_id is None and (t := blocked_until(l, self.settings["thresholds"], now))]
+                 if l.current_task_id is None and not l.busy_elsewhere
+                 and (t := blocked_until(l, self.settings["thresholds"], now))]
         if waits:
             raise ToolError(QUOTA.format(iso_local(min(waits))))
-        busy = [l.current_task_id for l in ready if l.current_task_id]
+        busy = [l.current_task_id or "ほかの依頼主の作業中" for l in ready if l.current_task_id or l.busy_elsewhere]
         if busy:
             raise ToolError(BUSY.format(", ".join(busy)))
         raise ToolError(NOT_READY.format("、".join(l.name for l in online)))

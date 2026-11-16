@@ -55,86 +55,36 @@ def test_crash_is_written_to_log_and_reported(tmp_path, monkeypatch):
 @pytest.mark.parametrize("fails,already_paused", [(False, False), (True, False), (True, True)])
 async def test_final_review_move_pauses_before_copy_and_restores_on_failure(tmp_path, monkeypatch,
                                                                          fails, already_paused):
-    from codex_bridge.common.invite import Invite
-    observed, refs = [], {}
+    from codex_bridge.common.invite import make_invite
+    from fake_helpers import Fake
+    observed = []
 
-    class App:
-        def __init__(self, *args, **kwargs):
-            pass
+    def factory(connection, settings):
+        root = tmp_path / ("fake-" + connection.id)
+        root.mkdir()
+        return Fake(root).app
 
-        async def start(self):
-            pass
+    runtime = agent_main.AgentConnections(tmp_path / "home", app_factory=factory, versions={})
+    await runtime.add(make_invite("http://a.invalid", "tok", "friend"))
+    await runtime.add(make_invite("http://b.invalid", "tok", "friend"))
+    await runtime.set_paused(already_paused)
 
-        async def stop(self):
-            pass
+    def move(*args, **kwargs):
+        observed.append((runtime.paused, all(c.paused for c in runtime.clients.values()),
+                         all(not r.app.running for r in runtime.runners.values())))
+        if fails:
+            raise OSError("copy failed")
+        return []
 
-        async def auth_mode(self):
-            return "chatgpt"
-
-    class Runner:
-        def __init__(self, *args, **kwargs):
-            self.settings = {}
-
-        def apply_settings(self, settings):
-            self.settings = settings
-
-        async def start(self):
-            pass
-
-        async def shutdown(self):
-            pass
-
-        async def stop(self):
-            pass
-
-    class Client:
-        def __init__(self, *args, **kwargs):
-            self.paused = already_paused
-            refs["client"] = self
-
-        async def drop(self):
-            observed.append("drop")
-
-        async def refresh_hello(self):
-            pass
-
-        async def run_forever(self):
-            await asyncio.Future()
-
-    class Applier:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def apply(self, settings):
-            pass
-
-        async def move_data(self, path):
-            observed.append(("move", refs["client"].paused))
-            if fails:
-                raise OSError("copy failed")
-            return []
-
-    def tray(on_quit, on_pause_toggle):
-        refs["quit"] = on_quit
-        return SimpleNamespace(icon=SimpleNamespace(update_menu=lambda: None, stop=lambda: None),
-                               run_detached=lambda: None, set_status=lambda s: None)
-
-    def server(*args, on_move, **kwargs):
-        async def serve():
-            try:
-                await on_move(tmp_path / "new")
-            except OSError:
-                pass
-            observed.append(("after", refs["client"].paused))
-            refs["quit"]()
-        return SimpleNamespace(serve=serve, should_exit=False)
-
-    for name, value in {"AppServer": App, "AgentRunner": Runner, "ControlClient": Client,
-                        "SettingsApplier": Applier, "Tray": tray, "make_ui_server": server,
-                        "resolve_workdir": lambda *a: tmp_path / "wd", "user_mcp_names": lambda: [],
-                        "codex_version": lambda cmd: "test"}.items():
-        monkeypatch.setattr(agent_main, name, value)
-    result = await agent_main.run_agent(Invite("http://test", "tok", "friend"), tmp_path / "codex.exe", tmp_path)
-    assert ("move", True) in observed
-    assert ("after", already_paused if fails else True) in observed
-    assert result is (not fails)
+    monkeypatch.setattr(agent_main, "move_data_root", move)
+    try:
+        if fails:
+            with pytest.raises(OSError, match="copy failed"):
+                await runtime.move_data(tmp_path / "new")
+        else:
+            assert await runtime.move_data(tmp_path / "new") == []
+        assert observed == [(True, True, True)]
+        assert runtime.paused is (already_paused if fails else True)
+        assert runtime.moving is (not fails)
+    finally:
+        await runtime.stop()

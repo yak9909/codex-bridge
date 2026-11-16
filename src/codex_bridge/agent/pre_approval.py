@@ -127,6 +127,7 @@ class PreApproval:
         r = self.runner
         if p.kind == START:
             await r._state("rejected_by_lender", report=report, task_id=p.task_id)
+            await r._release_slot()
         elif r.cur is not None and r.cur.task_id == p.task_id:
             await r._event("status", text=f"追加の指示は渡しませんでした（{report}）")
             await r._state("running")

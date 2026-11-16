@@ -10,6 +10,30 @@ from codex_bridge.host.paths import ToolError
 from codex_bridge.host.tasks import TaskManager
 
 TH = {"five_hour": 80, "weekly": 80}
+
+
+async def test_busy_elsewhere_lender_is_skipped_by_auto_routing(mgr):
+    alice, bob = await FakeAgent.join(mgr, "alice"), await FakeAgent.join(mgr, "bob")
+    await alice.push("usage", **usage(five_hour=0))
+    await bob.push("usage", **usage(five_hour=70))
+    await alice.push("lender_status", busy_elsewhere=True)
+    assert mgr.lenders()[0]["busy_elsewhere"] is True
+    assert mgr.tasks[await mgr.start("one")].lender == "bob"
+    await alice.push("lender_status", busy_elsewhere=False)
+    assert mgr.tasks[await mgr.start("two")].lender == "alice"
+
+
+async def test_named_busy_elsewhere_lender_gets_busy_answer(mgr):
+    alice = await FakeAgent.join(mgr, "alice")
+    await alice.push("lender_status", busy_elsewhere=True)
+    with pytest.raises(ToolError, match="作業中"):
+        await mgr.start("one", lender="alice")
+    assert not alice.all("task_start")
+    await alice.push("lender_status", busy_elsewhere="false")
+    assert mgr.lenders()[0]["busy_elsewhere"] is True  # malformed status cannot clear it
+    mgr.detach(alice.link)
+    await FakeAgent.join(mgr, "alice")  # a v0.1 replacement starts with the old behaviour
+    assert mgr.lenders()[0]["busy_elsewhere"] is False
 RETRY_ADVICE = "前回の報告を添えて新しく依頼してください"
 NOT_READY = "まだ準備ができていません"
 

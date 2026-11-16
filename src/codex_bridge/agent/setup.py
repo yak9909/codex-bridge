@@ -60,7 +60,11 @@ def _dpapi(data: bytes, protect: bool) -> bytes:
 
 def save_invite(directory: Path, invite: Invite) -> None:
     data = json.dumps({"url": invite.url, "token": invite.token, "name": invite.name}).encode("utf-8")
-    (Path(directory) / "invite.bin").write_bytes(_dpapi(data, protect=True))
+    encrypted = _dpapi(data, protect=True)  # encrypt before touching an existing invite
+    path = Path(directory) / "invite.bin"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(encrypted)
+    os.replace(tmp, path)
 
 
 def load_invite(directory: Path) -> Invite | None:

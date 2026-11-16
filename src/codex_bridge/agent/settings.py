@@ -40,6 +40,8 @@ LOCATION_FILE = "location.txt"
 WORKDIR_MEMO = "workdir.txt"
 MAX_TIMEOUT_MIN = 24 * 60
 MAX_RETENTION_DAYS = 3650
+SHARED_KEYS = frozenset({"limits", "workdir", "log_retention_days"})
+CONNECTION_KEYS = frozenset({"features", "pre_approval", "disposable", "log_visibility"})
 
 
 def defaults() -> dict:
@@ -130,10 +132,11 @@ def _put(target: dict, name: str, value, check, label: str, strict: bool) -> Non
 class SettingsStore:
     """settings.json: a missing or damaged file reads as the defaults, a bad field falls back by itself."""
 
-    def __init__(self, path: Path, legacy_limits: Path | None = None) -> None:
+    def __init__(self, path: Path, legacy_limits: Path | None = None, *, shared: bool = False) -> None:
         self.path = Path(path)
         self.legacy_limits = Path(legacy_limits) if legacy_limits else None  # v0.1's limits.json
         self._lock = threading.Lock()
+        self.shared = shared
 
     def _load(self) -> dict:
         try:
@@ -147,7 +150,8 @@ class SettingsStore:
                     pass
         except (OSError, ValueError):
             raw = {}
-        return _merge(defaults(), raw, strict=False)
+        loaded = _merge(defaults(), raw, strict=False)
+        return {k: loaded[k] for k in SHARED_KEYS} if self.shared else loaded
 
     def get(self) -> dict:
         with self._lock:
@@ -156,7 +160,11 @@ class SettingsStore:
     def update(self, patch: dict) -> dict:
         """Validated as a whole before anything is written; returns all the settings."""
         with self._lock:
-            new = _merge(self._load(), patch, strict=True)
+            if self.shared and (not isinstance(patch, dict) or set(patch) - SHARED_KEYS):
+                raise ValueError("共通の設定は limits、workdir、log_retention_days だけです")
+            new = _merge({**defaults(), **self._load()}, patch, strict=True)
+            if self.shared:
+                new = {k: new[k] for k in SHARED_KEYS}
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_name(self.path.name + ".tmp")
             tmp.write_text(json.dumps(new, ensure_ascii=False, indent=1), encoding="utf-8")

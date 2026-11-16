@@ -24,6 +24,7 @@ class Lender:
     send: SendFn | None = None
     connected: bool = False
     ready: bool = False  # hello arrived on this connection; until then what the lender can do is unknown
+    busy_elsewhere: bool = False
     agent_version: str | None = None
     codex_version: str | None = None
     auth_mode: str | None = None
@@ -123,7 +124,7 @@ def headroom(lender: Lender, thresholds: dict) -> float | None:
 def pick_lender(lenders: Iterable[Lender], thresholds: dict, now: float | None = None) -> Lender | None:
     """Among connected (hello received), idle, not blocked lenders: most headroom;
     ties go to the least recently used."""
-    free = [l for l in lenders if l.connected and l.ready and l.current_task_id is None
+    free = [l for l in lenders if l.connected and l.ready and not l.busy_elsewhere and l.current_task_id is None
             and blocked_until(l, thresholds, now) is None]
 
     def order(l: Lender) -> tuple[float, float]:

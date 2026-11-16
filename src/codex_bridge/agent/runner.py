@@ -35,6 +35,28 @@ TOOL_ITEMS = ("mcpToolCall", "dynamicToolCall", "commandExecution", "fileChange"
 PROGRESS_INTERVAL = 2.0  # the half-written message goes to the host at most this often (seconds)
 PROGRESS_MAX = 20_000
 INTERRUPTED = "アプリが終了したため、タスクは中断されました。"
+BUSY_ELSEWHERE = "貸している人は、ほかの依頼主の作業をしています。あとでもう一度頼むか、ほかの人に頼んでください。"
+
+
+class TaskSlot:
+    """One lock and one owner across every host, including a request awaiting approval."""
+
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.owner = None
+        self.runners = []
+        self.last_usage = None
+
+    async def announce(self):
+        for runner in list(self.runners):
+            await runner.send_busy_status()
+
+    async def usage(self, snapshot):
+        self.last_usage = snapshot
+        for runner in list(self.runners):
+            runner.last_usage = snapshot
+            await runner._safe_send(protocol.msg("usage", **snapshot.to_message(), friend_limits=runner.friend_limits))
+            await runner._apply(runner.guard.on_usage(snapshot))
 
 
 @dataclass
@@ -100,7 +122,9 @@ class AgentRunner:
     def __init__(self, app: AppServer, guard: QuotaGuard, sessions: SessionRegistry, send: SendFn,
                  usage_interval: float = 60, tick_interval: float = 5,
                  on_log: Callable[[dict], None] | None = None, worklog: WorkLog | None = None,
-                 progress_interval: float = PROGRESS_INTERVAL, clock: Callable[[], float] = time.monotonic) -> None:
+                 progress_interval: float = PROGRESS_INTERVAL, clock: Callable[[], float] = time.monotonic,
+                 slot: TaskSlot | None = None, connection_id: str | None = None, host_name: str | None = None,
+                 prepare: Callable[[], Awaitable[None]] | None = None) -> None:
         self.app = app
         self.guard = guard
         self.sessions = sessions
@@ -120,7 +144,28 @@ class AgentRunner:
         self._seq = itertools.count(int(time.time() * 1000))
         self._unacked: dict[int, dict] = {}
         self._tasks: list[asyncio.Task] = []
-        self._lock = asyncio.Lock()
+        self.slot = slot
+        self.connection_id, self.host_name, self.prepare = connection_id, host_name, prepare
+        self._lock = slot.lock if slot else asyncio.Lock()
+        if slot:
+            slot.runners.append(self)
+
+    def connection_fields(self) -> dict:
+        return {"connection_id": self.connection_id, "host_name": self.host_name} if self.connection_id else {}
+
+    async def send_busy_status(self) -> None:
+        if self.slot:
+            await self._safe_send(protocol.msg("lender_status", busy_elsewhere=self.slot.owner not in (None, self)))
+
+    async def _claim_slot(self) -> None:
+        if self.slot and self.slot.owner is not self:
+            self.slot.owner = self
+            await self.slot.announce()
+
+    async def _release_slot(self) -> None:
+        if self.slot and self.slot.owner is self and self.active_task_id() is None:
+            self.slot.owner = None
+            await self.slot.announce()
 
     # ---- lifecycle -----------------------------------------------------
     async def start(self) -> None:
@@ -133,7 +178,7 @@ class AgentRunner:
     def pending_approval(self) -> dict | None:
         """The request waiting for the lender's decision: task_id, prompt, kind (start | followup), created."""
         p = self.approval.pending
-        return p.view() if p is not None else None
+        return {**p.view(), **self.connection_fields()} if p is not None else None
 
     async def decide_pending(self, approve: bool, reason: str = "", task_id: str | None = None) -> bool:
         """The lender's answer. False when nothing waits (decided already, timed out, or the task is over)."""
@@ -176,7 +221,7 @@ class AgentRunner:
     async def exclusive(self):
         """No task can start inside; yields whether the agent is idle (to restart Codex or move the data)."""
         async with self._lock:
-            yield self.cur is None
+            yield self.cur is None and self.approval.pending is None
 
     async def _end(self, app_alive: bool = True) -> None:
         """The task is over (any way): a disposable session is dropped and no longer listed (design 4.6)."""
@@ -190,6 +235,7 @@ class AgentRunner:
                     await asyncio.wait_for(self.app.thread_delete(cur.thread_id), DISCARD_TIMEOUT)
                 except Exception:
                     pass  # an ephemeral thread lives in memory only: nothing on disk to clean up
+        await self._release_slot()
 
     # ---- sending -------------------------------------------------------
     async def _safe_send(self, m: dict) -> None:
@@ -213,7 +259,7 @@ class AgentRunner:
         if self.worklog is None or not task_id:
             return
         try:
-            self.worklog.add(task_id, kind, data)
+            self.worklog.add(task_id, kind, data, **self.connection_fields())
         except Exception as e:
             self.on_log({"type": "error", "text": f"記録に失敗しました: {type(e).__name__}: {e}"})
 
@@ -248,7 +294,8 @@ class AgentRunner:
             self._unacked.pop(m["seq"], None)
         elif t == "settings":
             self.guard.set_thresholds(m.get("thresholds") or {})
-            self.log_visibility = m.get("log_visibility", self.log_visibility)
+            if self.connection_id is None:  # v0.1-style single runner: keep the old host-controlled display
+                self.log_visibility = m.get("log_visibility", self.log_visibility)
             self.on_log({"type": "settings", "log_visibility": self.log_visibility})
             # Re-check usage now so a lowered threshold takes effect without waiting for the next poll.
             asyncio.create_task(self.refresh_usage())
@@ -284,9 +331,13 @@ class AgentRunner:
 
     async def _task_start(self, m: dict) -> None:
         async with self._lock:
+            if self.slot and self.slot.owner not in (None, self):
+                await self._state("rejected_by_lender", report=BUSY_ELSEWHERE, task_id=m["task_id"])
+                return
             if self.cur is not None or self.approval.pending is not None:
                 await self._state("failed", report="別のタスクが作業中です", task_id=m["task_id"])
                 return
+            await self._claim_slot()
             if self.approval.enabled:
                 await self.approval.hold(m, START)
                 return
@@ -302,6 +353,8 @@ class AgentRunner:
         if not shown:
             self.log_prompt(m["task_id"], m["prompt"])
         try:
+            if self.prepare:
+                await self.prepare()
             cont = m.get("continue_thread_id")
             if cont:
                 if self.cur.ephemeral:
@@ -320,6 +373,13 @@ class AgentRunner:
             await self._end()
 
     async def _followup(self, m: dict) -> None:
+        async with self._lock:
+            if self.slot and self.slot.owner not in (None, self):
+                await self._state("rejected_by_lender", report=BUSY_ELSEWHERE, task_id=m["task_id"])
+                return
+            await self._followup_locked(m)
+
+    async def _followup_locked(self, m: dict) -> None:
         if self.approval.holds(m["task_id"]):  # what the lender is deciding on must not change under their hands
             text = {"text": WAITING}
             self._record(m["task_id"], "status", text)
@@ -355,6 +415,7 @@ class AgentRunner:
         held = self.approval.drop(m["task_id"])
         if held is not None and held.kind == START:  # it never began: nothing to interrupt
             await self._state("cancelled", report=CANCELLED, task_id=held.task_id)
+            await self._release_slot()
             return
         cur = self.cur
         if cur is None or cur.task_id != m["task_id"]:
@@ -375,6 +436,8 @@ class AgentRunner:
             await self._reply(m["req_id"], False, error=NOT_OWNED)
             return
         try:
+            if self.prepare:
+                await self.prepare()
             if read:
                 await self._reply(m["req_id"], True, data=await self.app.thread_read(tid))
             else:
@@ -522,6 +585,9 @@ class AgentRunner:
         except Exception:  # app-server restarting, pipe closed, timeout
             return
         self.last_usage = snap
+        if self.slot:
+            await self.slot.usage(snap)
+            return
         await self._safe_send(protocol.msg("usage", **snap.to_message(), friend_limits=self.friend_limits))
         await self._apply(self.guard.on_usage(snap))
 

@@ -16,7 +16,7 @@
 <main>
   <div id="message" role="status" aria-live="polite" hidden></div>
   <div id="paused-banner" class="banner" hidden>一時停止中です。依頼主との接続を止めています。再開すると接続し直します。</div>
-  <section class="grid2" aria-label="使用量と状態">
+  <section class="usage-connections" aria-label="使用量と接続先">
     <div class="card">
       <h2>使用量</h2>
       <form id="limits-form">
@@ -34,12 +34,36 @@
       </form>
     </div>
     <div class="card">
-      <h2>今の状態 <span id="state"></span></h2>
-      <dl class="kv"><dt>接続先の依頼主</dt><dd id="host-name">—</dd>
-        <dt>Codex の版</dt><dd id="codex-version">—</dd><dt>exe の版</dt><dd id="agent-version">—</dd></dl>
+      <h2>接続先 <span id="state"></span></h2>
+      <p class="small">作業は、すべての接続先を合わせて同時に 1 つです。承認待ちのあいだも、ほかの依頼主からの作業は受け付けません。</p>
+      <div class="table-wrap"><table><thead><tr><th>依頼主（接続先のアドレス）</th><th>接続状態</th><th>作業</th><th>操作</th></tr></thead><tbody id="connections"></tbody></table></div>
+      <form id="add-connection" class="connection-add"><h3>接続先を追加</h3>
+        <div class="row"><input class="grow" name="code" aria-label="追加する接続先の招待コード" placeholder="招待コードを貼り付けてください" autocomplete="off" required><button type="submit">追加</button></div>
+      </form>
+      <dl class="kv"><dt>Codex の版</dt><dd id="codex-version">—</dd><dt>exe の版</dt><dd id="agent-version">—</dd></dl>
       <div class="row"><button id="notify-btn" class="ghost mini">承認待ちのブラウザ通知を有効にする</button><span id="notify-state" class="small"></span></div>
     </div>
   </section>
+  <section class="card" id="connection-settings-region" hidden>
+    <h2>接続先の設定: <span id="settings-host"></span></h2>
+    <form id="connection-settings-form"><div class="settings-grid">
+      <fieldset><legend>使える機能の制限</legend>
+        <p class="small">チェックした機能を止めます。作業中の変更は、作業が終わってから Codex を起動し直して反映します。</p>
+        <div id="feature-options"></div>
+      </fieldset>
+      <fieldset><legend>事前承認</legend><div id="pre-choices"></div>
+        <div class="row approval-wait"><label>承認の待ち時間 <input id="approval-timeout" type="number" min="1" max="1440" required> 分</label>
+          <label class="check"><input id="approval-no-timeout" type="checkbox"><span>待ち時間なし（期限なしで待つ）</span></label></div>
+        <p class="small">待ち時間を過ぎると拒否します。待ち時間なしなら、承認か拒否を選ぶまで待ちます。新しい依頼と追加の指示の両方が対象です。</p>
+      </fieldset>
+      <fieldset><legend>セッションの保存</legend><div id="disposable-choices"></div>
+        <p class="small">使い捨てでも作業中の追加の指示は使えます。完了・中止・失敗・使用量による中断のあとは、続きの依頼はできません。作業の記録は残ります。</p>
+      </fieldset>
+      <fieldset><legend>道具の記録の見せ方</legend><label>表示範囲 <select id="log-visibility"><option value="summary">非表示</option><option value="files">道具の名前と対象パス</option><option value="all">結果の本文まで</option></select></label>
+        <p class="small">この画面での表示範囲です。依頼文・発言・計画・最終報告はいつも表示します。</p></fieldset>
+    </div><div class="row"><button type="submit" id="save-connection-settings">設定を保存</button><button type="button" class="ghost" id="close-connection-settings">閉じる</button><span id="connection-settings-message" class="small" role="status"></span></div></form>
+  </section>
+  <div class="row connection-filter"><label>依頼主で絞り込む <select id="connection-filter"><option value="">すべての接続先</option></select></label></div>
   <section id="pending-region" aria-label="事前承認待ち" hidden>
     <div class="card" id="approvals" data-title="事前承認待ち"></div>
     <label class="approval-reason">拒否する理由（任意） <input id="reject-reason" placeholder="例: 今はこの PC を使っています"></label>
@@ -52,27 +76,12 @@
   <section class="card" id="session-region">
     <h2>セッション <span class="count" id="session-count">0</span></h2>
     <p class="small">このツールで作った会話だけを表示します。選ぶと、上のタスク一覧をその会話に絞ります。作業中の会話は削除できません。</p>
-    <div class="table-wrap"><table><thead><tr><th>セッション / 作成日時</th><th>関係するタスク</th><th>状態</th><th>保存</th><th></th></tr></thead><tbody id="sessions"></tbody></table></div>
+    <div class="table-wrap"><table><thead><tr><th>依頼主</th><th>セッション / 作成日時</th><th>関係するタスク</th><th>状態</th><th>保存</th><th></th></tr></thead><tbody id="sessions"></tbody></table></div>
   </section>
   <section class="card" id="settings-region">
-    <h2>設定</h2>
+    <h2>共通の設定</h2>
     <form id="settings-form">
       <div class="settings-grid">
-        <fieldset><legend>使える機能の制限</legend>
-          <p class="small">チェックした機能を止めます。作業中の変更は、作業が終わってから Codex を起動し直して反映します。</p>
-          <div id="feature-options"></div>
-        </fieldset>
-        <fieldset><legend>事前承認</legend>
-          <div id="pre-choices"></div>
-          <div class="row approval-wait">
-            <label>承認の待ち時間 <input id="approval-timeout" type="number" min="1" max="1440" required> 分</label>
-            <label class="check"><input id="approval-no-timeout" type="checkbox"><span>待ち時間なし（期限なしで待つ）</span></label>
-          </div>
-          <p class="small">待ち時間を指定した場合は、時間を過ぎると拒否します。待ち時間なしの場合は、承認か拒否を選ぶまで待ちます。新しい依頼と追加の指示の両方が対象です。</p>
-        </fieldset>
-        <fieldset><legend>セッションの保存</legend><div id="disposable-choices"></div>
-          <p class="small">使い捨てでも作業中の追加の指示は使えます。完了・中止・失敗・使用量による中断のあとは、続きの依頼はできません。作業の記録は残ります。</p>
-        </fieldset>
         <fieldset><legend>作業フォルダの場所</legend>
           <label class="small" for="workdir">指定する場所（空欄なら既定）</label><input class="path" id="workdir" placeholder="例: D:\codex-work">
           <p class="small">現在: <code id="current-workdir"></code></p>
@@ -80,7 +89,7 @@
         </fieldset>
         <fieldset><legend>作業の記録</legend>
           <label class="row">記録の保管 <input id="retention" type="number" min="1" max="3650" required>日</label>
-          <p class="small">依頼文・追加の指示・発言・計画・状態・最終報告はいつも表示します。道具の表示範囲は依頼主が設定します。考えの要約が届いたときは「詳細」で見られます。</p>
+          <p class="small">依頼文・追加の指示・発言・計画・状態・最終報告はいつも表示します。道具の表示範囲は接続先ごとに設定します。考えの要約が届いたときは「詳細」で見られます。</p>
           <button id="clear-logs" type="button" class="bad mini">記録を消す</button>
         </fieldset>
       </div>

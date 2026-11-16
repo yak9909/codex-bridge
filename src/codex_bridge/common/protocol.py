@@ -16,6 +16,7 @@ agent -> host:
   usage{five_hour:{used_percent, resets_at}|null, weekly:{...}|null, ts}
   task_state{seq, task_id, state, thread_id, report, resume_at}
   reply{req_id, ok, data|error}
+  lender_status{busy_elsewhere: bool} (v0.2; omitted by v0.1 agents)
 Messages with "seq" are re-sent by the agent after a reconnect until acked; the host drops duplicates.
 """
 
@@ -26,7 +27,7 @@ import math
 
 HOST_TO_AGENT = {"task_start", "task_followup", "task_cancel", "session_list", "session_read",
                  "session_delete", "settings", "ack"}
-AGENT_TO_HOST = {"hello", "event", "usage", "task_state", "reply"}
+AGENT_TO_HOST = {"hello", "event", "usage", "task_state", "reply", "lender_status"}
 TYPES = HOST_TO_AGENT | AGENT_TO_HOST
 
 TASK_STATES = ("queued", "running", "completed", "suspended_quota", "failed", "cancelled", "agent_offline",
