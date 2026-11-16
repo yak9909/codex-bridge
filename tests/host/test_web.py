@@ -387,9 +387,11 @@ vm.runInContext(`
   await vm.runInContext('folderOp("add", {path:"D:/other", level:"write"})', context);
   assert.equal(element("folder-warning").hidden, false);
   assert.equal(element("folder-warning").textContent, warning);
+  assert.equal(element("fd-msg").textContent, warning + ": D:/other");
   warning = "";
   await vm.runInContext('folderOp("add", {path:"D:/safe", level:"write"})', context);
   assert.equal(element("folder-warning").hidden, true);
+  assert.equal(element("fd-msg").textContent, "");
 })().catch((e) => { console.error(e); process.exitCode = 1; });
 '''
     source = Path(__file__).resolve().parents[2] / "src/codex_bridge/host/web/static/app.js"

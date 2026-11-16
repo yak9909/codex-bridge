@@ -1,5 +1,6 @@
 import sys
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -112,6 +113,84 @@ async def test_run_agent_stops_the_tray_even_if_runtime_cleanup_raises(tmp_path,
     assert await asyncio.wait_for(agent_main.run_agent(None, tmp_path / "fake.exe", tmp_path), 1) is False
     assert stopped == ["tray"]
     assert "cleanup failed" in (tmp_path / "logs" / "log.jsonl").read_text(encoding="utf-8")
+
+
+async def test_login_guide_keeps_event_loop_responsive(tmp_path, monkeypatch):
+    from codex_bridge.agent.settings import defaults
+    from codex_bridge.common.invite import Invite
+
+    opened, released = threading.Event(), threading.Event()
+    dialog_threads, released_in_time, starts, refs = [], [], [], {}
+    loop_thread = threading.get_ident()
+    logged_in = False
+
+    async def start():
+        starts.append(True)
+
+    async def stop():
+        pass
+
+    async def auth_mode():
+        return "chatgpt" if logged_in else "none"
+
+    def show_info(text):
+        dialog_threads.append(threading.get_ident())
+        opened.set()
+        released_in_time.append(released.wait(2))
+
+    def login(cmd):
+        nonlocal logged_in
+        logged_in = True
+
+    class Runtime:
+        def __init__(self, home, *, app_factory, **kwargs):
+            connection = SimpleNamespace(invite=Invite("http://host.invalid", "tok", "friend"))
+            self.app = app_factory(connection, defaults())
+            self.runners, self.settings = {"existing": None}, None
+
+        async def apply_shared(self, saved):
+            pass
+
+        async def start(self):
+            await self.app.start()
+
+        async def stop(self):
+            await self.app.stop()
+
+    def tray(on_quit, on_pause_toggle):
+        refs["quit"] = on_quit
+        return SimpleNamespace(run_detached=lambda: None, icon=SimpleNamespace(stop=lambda: None))
+
+    def server(*args, **kwargs):
+        async def serve():
+            refs["quit"]()
+        return SimpleNamespace(serve=serve, should_exit=False)
+
+    async def respond_while_guide_is_open():
+        while not opened.is_set():
+            await asyncio.sleep(0)
+        released.set()
+
+    monkeypatch.setattr(agent_main, "AppServer", lambda *args, **kwargs:
+                        SimpleNamespace(start=start, stop=stop, auth_mode=auth_mode))
+    monkeypatch.setattr(agent_main, "AgentConnections", Runtime)
+    monkeypatch.setattr(agent_main, "Tray", tray)
+    monkeypatch.setattr(agent_main, "make_ui_server", server)
+    monkeypatch.setattr(agent_main, "codex_version", lambda cmd: "fake")
+    monkeypatch.setattr(agent_main, "user_mcp_names", lambda: [])
+    monkeypatch.setattr(agent_main, "show_info", show_info)
+    monkeypatch.setattr(agent_main, "run_login", login)
+    response = asyncio.create_task(respond_while_guide_is_open())
+    try:
+        assert await asyncio.wait_for(agent_main.run_agent(None, tmp_path / "fake.exe", tmp_path), 5) is False
+        await response
+    finally:
+        released.set()
+        response.cancel()
+        await asyncio.gather(response, return_exceptions=True)
+    assert released_in_time == [True], "the event loop must respond before the modal closes"
+    assert len(dialog_threads) == 1 and dialog_threads[0] != loop_thread
+    assert len(starts) == 2 and logged_in
 
 
 @pytest.mark.parametrize("fails,already_paused", [(False, False), (True, False), (True, True)])

@@ -33,6 +33,14 @@ exec: {mode: allowlist, allow: ["python scripts/**/*.py *"]}
 ORIGINAL_A = "line1\nline2\nthe needle here\nline4\n"
 
 
+@pytest.fixture(autouse=True)
+def isolate_agent_program_data(tmp_path, monkeypatch):
+    from codex_bridge.agent import settings
+
+    base = tmp_path / "ProgramData" / "codex-bridge-agent"
+    monkeypatch.setattr(settings, "program_data_base", lambda: base)
+
+
 def raises_msg(fn) -> str:
     from codex_bridge.host.paths import ToolError
     with pytest.raises(ToolError) as ei:

@@ -317,7 +317,7 @@ async function folderOp(op, body, question) {
     const result = await api("POST", "/folders/" + op, body);
     $("folder-warning").textContent = result.warning || "";
     $("folder-warning").hidden = !result.warning;
-    folderSay("");
+    folderSay(result.warning ? result.warning + ": " + body.path : "");
     await loadPermissions();
     return true;
   } catch (e) { folderSay("できませんでした: " + e.message); return false; }

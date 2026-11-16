@@ -229,6 +229,12 @@ async def test_the_control_client_builds_hello_at_the_time_it_is_sent(tmp_path):
 
 
 # ---- the work folder (design 4.8) -------------------------------------------------------------
+def test_program_data_base_is_isolated_for_tests(tmp_path):
+    base = st.program_data_base().resolve()
+    assert base.is_relative_to(tmp_path.resolve()), f"ProgramData must be isolated for tests: {base}"
+    assert st.resolve_workdir(DEFAULTS, tmp_path / "data").parent == base
+
+
 def test_the_default_work_folder_is_under_program_data_and_is_the_same_every_time(tmp_path):
     base = tmp_path / "ProgramData" / "codex-bridge-agent"
     root = tmp_path / "data"

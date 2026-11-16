@@ -373,7 +373,7 @@ async def run_agent(invite: Invite | None, codex: Path, home: Path) -> bool:
             mode = await app.auth_mode()
             if mode == "none":
                 await app.stop()
-                show_info("Codex にログインします。開いた画面の案内に従って ChatGPT でログインしてください。")
+                await asyncio.to_thread(show_info, "Codex にログインします。開いた画面の案内に従って ChatGPT でログインしてください。")
                 await asyncio.to_thread(run_login, cmd)
                 await original_start()
                 mode = await app.auth_mode()

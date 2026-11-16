@@ -150,6 +150,8 @@ def test_walk_same_results_as_before(tmp_path, legacy):
 @pytest.mark.parametrize("kind", ["junction", "symlink"])
 def test_walk_and_grep_protect_installation_and_case_variants(tmp_path, kind):
     paths, policy = make_paths(tmp_path, broad=True)
+    data = policy.path.parent
+    (data / "secret.txt").write_text("private needle\n", encoding="utf-8", newline="\n")
     install = paths.install_dir
     for name in ("host.yaml", "vendor/rg.exe", "src/main.py", ".venv/python.exe", "scripts/start.py"):
         p = install / name
@@ -162,9 +164,13 @@ def test_walk_and_grep_protect_installation_and_case_variants(tmp_path, kind):
     (install / "allowed/ok.txt").write_text("public needle\n", encoding="utf-8")
     link_to(paths.root / "install-alias", install, kind)
     result = [paths.display(p) for p, _ in paths.walk(tmp_path, "read")]
+    assert not any(Path(p).is_relative_to(data) for p in result)
     assert all("private" not in p and not p.endswith(("host.yaml", "rg.exe", "main.py", "python.exe", "start.py"))
                for p in result)
     assert any(p.endswith("allowed/ok.txt") for p in result)
+    found = ReadTools(paths, policy).find_files("**/*")
+    assert not any(Path(p).is_relative_to(data) for p in found)
+    assert any(p.endswith("allowed/ok.txt") for p in found)
     hits = SearchTools(paths, policy, RG).grep("private")["matches"]
     assert hits == []
 
