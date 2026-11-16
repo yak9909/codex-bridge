@@ -16,8 +16,10 @@ GitHub の **Releases** から 2 つの zip を取得します。v0.2.0 の配�
 
 | zip | 誰が使う | 使い方 |
 |---|---|---|
-| `codex-bridge-admin-v0.2.0.zip` | 依頼主（あなた） | 展開して `setup.bat` → `install-mcp.bat` → 以後は `start.bat` / `stop.bat`。Claude Code か Codex に「codex-bridge で○○を依頼して」と頼むだけで使えます。中の「はじめにお読みください.txt」を参照 |
-| `codex-bridge-friend-v0.2.0.zip` | 知人 | 展開して `codex-bridge-agent.exe` を起動し、自分用の招待コードを貼る。中の「使い方.md」を参照 |
+| `codex-bridge-admin-v0.2.0.zip` | 依頼主（あなた） | 展開して `setup.bat` → `install-mcp.bat` → 以後は `start.bat` / `stop.bat`。初期設定と起動は `codex-bridge.exe` をダブルクリックして「使う側」を選んでもできます。中の「はじめにお読みください.txt」を参照 |
+| `codex-bridge-friend-v0.2.0.zip` | 知人 | 展開して `codex-bridge.exe` をダブルクリックし、「貸す側」を選んで、自分用の招待コードを貼る。中の「使い方.md」を参照 |
+
+exe は両方とも同じ `codex-bridge.exe` です。引数なしで開くと役割を選ぶ画面が出ます。「使う側」は exe の隣に `host.yaml` がなければ初期設定、あれば起動を行います。「貸す側」がすでに動いていれば、新しく起動せずブラウザでその画面を開きます。
 
 v0.1 の exe も、v0.2 の依頼主側につなげられます。知人側の新しい画面と設定には v0.2 の exe が必要です。更新するときは依頼主側を先に更新してください。
 メイン以外のフォルダを使うには、知人側の exe も v0.2 が必要です（v0.1 の exe はメインのフォルダだけで作業できます）。
@@ -32,8 +34,8 @@ v0.1 の exe も、v0.2 の依頼主側につなげられます。知人側の�
 
 ```
 [こちらの PC]                                   [知人の PC]
- Claude Code ── /claude/mcp ─┐                   codex-bridge-agent.exe
- ブラウザ ───── /admin/ ─────┤ codex-bridge-host    ├─ codex app-server（知人のログインのまま）
+ Claude Code ── /claude/mcp ─┐                   codex-bridge.exe（貸す側）
+ ブラウザ ───── /admin/ ─────┤ codex-bridge（使う側）├─ codex app-server（知人のログインのまま）
                              └─ /codex/mcp ◀──────┤   Codex はこちらの道具だけを使う
                                 /agent/ws  ◀──────┘   （接続はすべて知人側から。Tailscale 経由）
 ```
@@ -60,7 +62,7 @@ v0.1 の exe も、v0.2 の依頼主側につなげられます。知人側の�
 
 ## 知人に渡すもの
 
-1. `uv run pyinstaller codex-bridge-agent.spec` で作った `dist/codex-bridge-agent.exe`
+1. `uv run pyinstaller codex-bridge.spec` で作った `dist/codex-bridge.exe`（ダブルクリックして「貸す側」を選びます）
 2. Tailscale の共有の招待: Tailscale の管理画面 → Machines → このPC → Share → 招待リンクを作成
    （共有されたPCは、知人側からこちらへは接続できますが、こちらから知人のPCへは接続できません）
 3. 招待コード: 管理画面の「招待コード」で知人ごとに別の名前を付けて「発行」（1 人に 1 つ。再表示できないので、その場でコピー）。この名前が依頼の送り先になります
@@ -135,7 +137,7 @@ paused: false
 ## 開発
 
 - テスト: `uv run pytest`
-- 知人側の exe: `uv run pyinstaller codex-bridge-agent.spec`
+- 共通の exe: `uv run pyinstaller codex-bridge.spec`
 
 ## 注意（規約）
 

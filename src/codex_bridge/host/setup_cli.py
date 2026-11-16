@@ -155,12 +155,12 @@ def run_install_mcp(config_path: Path) -> None:
 
 
 def build_friend_kit(root: Path, open_folder: bool = True) -> Path | None:
-    exe = root / "codex-bridge-agent.exe"  # shipped next to setup.bat in the released admin zip
+    exe = root / "codex-bridge.exe"  # shipped next to setup.bat in the released admin zip
     if not exe.exists():
-        spec = root / "codex-bridge-agent.spec"
+        spec = root / "codex-bridge.spec"
         r = subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", str(spec)], cwd=root,
                            capture_output=True, text=True)
-        exe = root / "dist" / "codex-bridge-agent.exe"
+        exe = root / "dist" / "codex-bridge.exe"
         if r.returncode != 0 or not exe.exists():
             _say("作れませんでした。詳しくは次の内容を確認してください:")
             _say((r.stderr or r.stdout)[-2000:])

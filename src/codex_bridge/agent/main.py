@@ -1,4 +1,4 @@
-"""codex-bridge-agent: runs on the friend's PC (tray app)."""
+"""The lender's role: runs on the friend's PC (tray app)."""
 
 from __future__ import annotations
 
@@ -493,8 +493,10 @@ def start_again() -> None:
     if not getattr(sys, "frozen", False):
         show_info("保存場所を移しました。codex-bridge を起動し直してください。")
         return
+    from ..entry import release_agent_instance
+    release_agent_instance()
     # a one-file exe passes its unpacked folder on through the environment: the new one must unpack its own
-    subprocess.Popen([sys.executable], env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}, close_fds=True,
+    subprocess.Popen([sys.executable, "agent"], env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}, close_fds=True,
                      creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
                      | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
 

@@ -81,14 +81,14 @@ def test_request_shutdown_uses_header():
 
 
 def test_friend_kit_copies_bundled_exe_without_building(tmp_path, monkeypatch):
-    # In the released admin zip the agent exe ships next to setup.bat: just copy it.
+    # In the released admin zip the unified exe ships next to setup.bat: just copy it.
     from codex_bridge.host import setup_cli
-    (tmp_path / "codex-bridge-agent.exe").write_bytes(b"exe")
+    (tmp_path / "codex-bridge.exe").write_bytes(b"exe")
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "friend-guide.md").write_text("guide", encoding="utf-8")
     monkeypatch.setattr(setup_cli.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("built")))
     kit = setup_cli.build_friend_kit(tmp_path, open_folder=False)
-    assert (kit / "codex-bridge-agent.exe").read_bytes() == b"exe"
+    assert (kit / "codex-bridge.exe").read_bytes() == b"exe"
     assert (kit / "使い方.md").read_text(encoding="utf-8") == "guide"
 
 

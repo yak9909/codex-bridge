@@ -1,8 +1,8 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-if exist "%~dp0codex-bridge-host.exe" (
-  "%~dp0codex-bridge-host.exe" install-mcp --config host.yaml
+if exist "%~dp0codex-bridge.exe" (
+  "%~dp0codex-bridge.exe" host install-mcp --config host.yaml
   goto done
 )
 where uv >nul 2>nul
@@ -11,7 +11,7 @@ if errorlevel 1 (
   powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
   set "PATH=%USERPROFILE%\.local\bin;%PATH%"
 )
-uv run codex-bridge-host install-mcp --config host.yaml
+uv run codex-bridge host install-mcp --config host.yaml
 :done
 echo.
 echo 何かキーを押すと、このウィンドウを閉じます。

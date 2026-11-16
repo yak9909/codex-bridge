@@ -20,7 +20,7 @@ from .paths import ToolError
 ACTIVE_STATES = ("queued", "running", "agent_offline", "awaiting_lender")  # awaiting_lender: the lender has not approved yet
 DEFAULT_THRESHOLDS = {"five_hour": 90, "weekly": 95}
 REQUEST_TIMEOUT = 30.0
-NOT_CONNECTED = "知人側の agent が接続されていません。知人の PC で codex-bridge-agent が動いているか確かめてください。"
+NOT_CONNECTED = "知人側の agent が接続されていません。知人の PC で codex-bridge の「貸す側」が動いているか確かめてください。"
 BUSY = "作業中のタスクがあります: {}（終わるのを待つか cancel_task で止めてください）"
 QUOTA = "使用量の上限のため受け付けません。再開可能: {}"
 # A continuation can only go to the lender whose Codex holds the session (design §3.3).
@@ -200,7 +200,7 @@ class TaskManager:
             lender = self._lenders.get(name)
             if lender is None or not lender.connected or not self._invited(name):
                 raise ToolError(f"「{name}」の agent が接続されていません。"
-                                "その人の PC で codex-bridge-agent が動いているか確かめてください。")
+                                "その人の PC で codex-bridge の「貸す側」が動いているか確かめてください。")
             return lender
         online = self._connected()
         if not online:

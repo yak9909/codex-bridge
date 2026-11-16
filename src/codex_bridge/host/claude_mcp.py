@@ -47,7 +47,7 @@ Codex を貸している人は、複数いることがあります。招待コ�
   - folders が共有フォルダの一覧と権限。依頼の対象がその中にあるか確かめる。違うなら利用者に確認する。
   - paused が true なら一時停止中。利用者に確認する。
 - list_lenders を呼ぶ（Codex を貸している人の一覧）。
-  - connected が true の人が 1 人もいなければ、どの人の PC でも codex-bridge-agent が動いていない。利用者にそう伝えて止まる。
+  - connected が true の人が 1 人もいなければ、どの人の PC でも codex-bridge の「貸す側」が動いていない。利用者にそう伝えて止まる。
   - ready が false の人は接続した直後で、まだ依頼を受けられない。数秒待ってから呼び直す。
   - usage.blocked_until がある人は、使用量の上限のため、その時刻まで新しい依頼を受けられない。
     上限は、こちらのしきい値（usage.thresholds）と、その人が決めた上限（limits）の低いほう。

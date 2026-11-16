@@ -1,14 +1,16 @@
-"""Build both exes and assemble the two release zips into release/.
+"""Build one exe and assemble the two release zips into release/.
 
 Run from the repo root:  uv run python scripts/build_release.py
   release/codex-bridge-admin-v0.2.0.zip   for the owner (unzip, run setup.bat)
   release/codex-bridge-friend-v0.2.0.zip  for the friend (unzip, run the exe)
 The release version comes from pyproject.toml.
+Only same-version zip files are replaced; other releases are kept.
 """
 
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 import zipfile
 from pathlib import Path
@@ -23,6 +25,7 @@ ADMIN_README = """codex-bridge（依頼主＝管理者用） v{ver}
 ■ 最初に一度だけ
   1. この PC に Tailscale を入れてログインする（https://tailscale.com/download）
   2. setup.bat をダブルクリックして、画面の質問に答える
+     （codex-bridge.exe をダブルクリックして「使う側」を選んでも始められます）
      ・Codex に触らせるフォルダを選ぶ
      ・Windows の「変更を許可しますか？」に「はい」
      ・最後に friend-kit フォルダ（知人に渡すもの）ができる
@@ -31,10 +34,12 @@ ADMIN_README = """codex-bridge（依頼主＝管理者用） v{ver}
 
 ■ 毎回
   start.bat … 起動（管理画面がブラウザで開きます）。黒いウィンドウは閉じないでください。
+  codex-bridge.exe をダブルクリックして「使う側」を選んでも起動できます。
   stop.bat  … 停止（黒いウィンドウを閉じても止まります）
 
 ■ 知人に渡すもの
-  ・friend-kit フォルダの中身（codex-bridge-agent.exe と 使い方.md）
+  ・friend-kit フォルダの中身（codex-bridge.exe と 使い方.md）
+    知人は codex-bridge.exe をダブルクリックして「貸す側」を選びます。
   ・Tailscale の共有の招待リンク
   ・招待コード（管理画面の「招待コード」→「発行」）
 
@@ -62,32 +67,34 @@ def main() -> None:
     if not (ROOT / "vendor" / "rg.exe").exists():
         run("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/fetch_rg.ps1")
     run(sys.executable, "scripts/make_bats.py")
-    run(sys.executable, "-m", "PyInstaller", "--noconfirm", "codex-bridge-agent.spec")
-    run(sys.executable, "-m", "PyInstaller", "--noconfirm", "codex-bridge-host.spec")
+    run(sys.executable, "-m", "PyInstaller", "--noconfirm", "codex-bridge.spec")
 
     out = ROOT / "release"
-    shutil.rmtree(out, ignore_errors=True)
-    admin = out / f"codex-bridge-admin-v{VERSION}"
-    friend = out / f"codex-bridge-friend-v{VERSION}"
-    (admin / "vendor").mkdir(parents=True)
-    (admin / "docs").mkdir()
-    friend.mkdir(parents=True)
+    out.mkdir(exist_ok=True)
+    # Stage outside the repository so old release folders and files stay intact.
+    with tempfile.TemporaryDirectory(prefix="codex-bridge-release-") as staging:
+        admin = Path(staging) / f"codex-bridge-admin-v{VERSION}"
+        friend = Path(staging) / f"codex-bridge-friend-v{VERSION}"
+        (admin / "vendor").mkdir(parents=True)
+        (admin / "docs").mkdir()
+        friend.mkdir()
 
-    for name in ("codex-bridge-host.exe", "codex-bridge-agent.exe"):
-        shutil.copy2(ROOT / "dist" / name, admin / name)
-    for name in ("setup.bat", "start.bat", "stop.bat", "install-mcp.bat"):
-        shutil.copy2(ROOT / name, admin / name)
-    shutil.copy2(ROOT / "vendor" / "rg.exe", admin / "vendor" / "rg.exe")
-    for name in ("operation-guide.md", "friend-guide.md"):
-        shutil.copy2(ROOT / "docs" / name, admin / "docs" / name)
-    (admin / "はじめにお読みください.txt").write_text(ADMIN_README.format(ver=VERSION), encoding="utf-8-sig")
+        shutil.copy2(ROOT / "dist" / "codex-bridge.exe", admin / "codex-bridge.exe")
+        for name in ("setup.bat", "start.bat", "stop.bat", "install-mcp.bat"):
+            shutil.copy2(ROOT / name, admin / name)
+        shutil.copy2(ROOT / "vendor" / "rg.exe", admin / "vendor" / "rg.exe")
+        for name in ("operation-guide.md", "friend-guide.md"):
+            shutil.copy2(ROOT / "docs" / name, admin / "docs" / name)
+        (admin / "はじめにお読みください.txt").write_text(ADMIN_README.format(ver=VERSION),
+                                                           encoding="utf-8-sig", newline="\n")
 
-    shutil.copy2(ROOT / "dist" / "codex-bridge-agent.exe", friend / "codex-bridge-agent.exe")
-    shutil.copy2(ROOT / "docs" / "friend-guide.md", friend / "使い方.md")
+        shutil.copy2(ROOT / "dist" / "codex-bridge.exe", friend / "codex-bridge.exe")
+        shutil.copy2(ROOT / "docs" / "friend-guide.md", friend / "使い方.md")
 
-    for d in (admin, friend):
-        zip_dir(d, out / f"{d.name}.zip")
-        print("built", out / f"{d.name}.zip", f"{(out / f'{d.name}.zip').stat().st_size >> 20} MB")
+        for directory in (admin, friend):
+            archive = out / f"{directory.name}.zip"
+            zip_dir(directory, archive)
+            print("built", archive, f"{archive.stat().st_size >> 20} MB")
 
 
 if __name__ == "__main__":
