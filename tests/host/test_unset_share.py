@@ -1,6 +1,7 @@
 """First-run setup uses only pytest's temporary folders, including legacy configs."""
 
 import json
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -377,6 +378,59 @@ def test_setup_keeps_existing_share_root(tmp_path, monkeypatch):
     assert 'public_bind: "100.64.0.1:8765"' in text
     assert effective_share_root(load_host_config(cfg)) == share.resolve()
     assert policy.read_bytes() == policy_before
+
+
+def test_setup_then_start_calls_run_start(tmp_path, monkeypatch, capsys):
+    cfg = tmp_path / "host.yaml"
+    setup_env(tmp_path, monkeypatch)
+    started = []
+    monkeypatch.setattr(setup_cli, "run_start", lambda p: started.append((p, capsys.readouterr().out)))
+    setup_cli.run_setup(cfg, then_start=True)
+    assert len(started) == 1 and started[0][0] == cfg.resolve()
+    out = started[0][1]
+    assert "このまま codex-bridge を起動します" in out
+    assert "閉じないでください" in out
+    assert "start.bat" in out  # still told for next time
+    assert "2. start.bat" not in out
+    assert out.index("初期設定が終わりました") < out.index("このまま codex-bridge を起動します")
+
+
+def test_setup_without_then_start_does_not_start(tmp_path, monkeypatch, capsys):
+    setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(setup_cli, "run_start", lambda p: pytest.fail("must not start"))
+    setup_cli.run_setup(tmp_path / "host.yaml")
+    assert "このまま codex-bridge を起動します" not in capsys.readouterr().out
+
+
+def test_setup_failure_does_not_start(tmp_path, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(setup_cli.st, "firewall_rule_exists", lambda: False)
+
+    def fail():
+        raise SystemExit(1)
+    monkeypatch.setattr(setup_cli.st, "add_firewall_rule_elevated", fail)
+    monkeypatch.setattr(setup_cli, "run_start", lambda p: pytest.fail("must not start"))
+    with pytest.raises(SystemExit) as raised:
+        setup_cli.run_setup(tmp_path / "host.yaml", then_start=True)
+    assert raised.value.code == 1
+
+
+def test_host_main_accepts_then_start(tmp_path, monkeypatch):
+    cfg = tmp_path / "host.yaml"
+    calls = []
+    monkeypatch.setattr(setup_cli, "run_setup", lambda path, **kw: calls.append((path, kw)))
+    monkeypatch.setattr(sys, "argv", ["host", "setup", "--then-start", "--config", str(cfg)])
+    main.main()
+    assert calls == [(cfg, {"then_start": True})]
+
+
+def test_host_main_setup_default_is_setup_only(tmp_path, monkeypatch):
+    cfg = tmp_path / "host.yaml"
+    calls = []
+    monkeypatch.setattr(setup_cli, "run_setup", lambda path, **kw: calls.append((path, kw)))
+    monkeypatch.setattr(sys, "argv", ["host", "setup", "--config", str(cfg)])
+    main.main()
+    assert calls == [(cfg, {"then_start": False})]
 
 
 def test_setup_does_not_build_friend_kit(tmp_path, monkeypatch, capsys):

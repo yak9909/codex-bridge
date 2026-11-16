@@ -85,10 +85,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(prog="codex-bridge host")
     ap.add_argument("command", nargs="?", default="serve", choices=["serve", "setup", "start", "stop", "install-mcp"])
     ap.add_argument("--config", default="host.yaml", type=Path)
+    ap.add_argument("--then-start", action="store_true",
+                    help="setup のあと、同じ画面でそのまま起動する（exe の「使う側」用）")
     args = ap.parse_args()
     if args.command == "setup":
         from .setup_cli import run_setup
-        run_setup(args.config)
+        run_setup(args.config, then_start=args.then_start)
         return
     if args.command == "start":
         from .setup_cli import run_start

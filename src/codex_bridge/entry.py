@@ -150,8 +150,11 @@ def main(argv: list[str] | None = None) -> int:
         if role == "host":
             directory = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
                          else Path.cwd())
-            command = "start" if (directory / "host.yaml").exists() else "setup"
-            return _run_host([command, "--config", "host.yaml"], directory, from_dialog=True)
+            if (directory / "host.yaml").exists():
+                command = ["start", "--config", "host.yaml"]
+            else:
+                command = ["setup", "--then-start", "--config", "host.yaml"]
+            return _run_host(command, directory, from_dialog=True)
         return _run_agent()
     if argv[0] == "host":
         return _run_host(argv[1:])

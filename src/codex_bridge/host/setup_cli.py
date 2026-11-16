@@ -94,13 +94,26 @@ def run_setup(config_path: Path, *, then_start: bool = False) -> None:
     _step(5, total, "完了")
     _say("初期設定が終わりました。次にやること:")
     _say("  1. install-mcp.bat を実行して、Claude Code / Codex から codex-bridge を使えるようにする")
-    _say("  2. start.bat（または exe をダブルクリックして「使う側」）で codex-bridge を起動する（管理画面が開きます）")
-    _say("  3. 管理画面で共有フォルダを選ぶ")
-    _say("  4. 管理画面の「招待コード」を発行し、同じ zip と一緒に知人に渡す（知人は exe をダブルクリックして「貸す側」）")
-    _say("  5. Tailscale の管理画面でこの PC を知人と共有する（この画面を開きます）")
+    n = 1
+    if not then_start:
+        n += 1
+        _say(f"  {n}. start.bat（または exe をダブルクリックして「使う側」）で codex-bridge を起動する（管理画面が開きます）")
+    n += 1
+    _say(f"  {n}. 管理画面で共有フォルダを選ぶ")
+    n += 1
+    _say(f"  {n}. 管理画面の「招待コード」を発行し、同じ zip と一緒に知人に渡す（知人は exe をダブルクリックして「貸す側」）")
+    n += 1
+    _say(f"  {n}. Tailscale の管理画面でこの PC を知人と共有する（この画面を開きます）")
     _say("     → この PC の行の「…」→「Share...」→ リンクをコピーして知人に送る")
+    if then_start:
+        _say("次回からは、start.bat か、exe をダブルクリックして「使う側」を選ぶと起動できます。")
     if _yes("Tailscale の管理画面を開きますか？"):
         webbrowser.open("https://login.tailscale.com/admin/machines")
+    if then_start:
+        _say()
+        _say("初期設定が終わりました。このまま codex-bridge を起動します。"
+             "この黒いウィンドウは閉じないでください（閉じると止まります）。")
+        run_start(config_path)
 
 
 # ---- install-mcp.bat ---------------------------------------------------------

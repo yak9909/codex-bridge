@@ -42,7 +42,10 @@ def launch(tmp_path, monkeypatch):
                            agent=agent, host=host, browser=browser, calls=calls)
 
 
-@pytest.mark.parametrize("configured,command", [(False, "setup"), (True, "start")])
+@pytest.mark.parametrize("configured,command", [
+    (False, ["setup", "--then-start", "--config", "host.yaml"]),
+    (True, ["start", "--config", "host.yaml"]),
+])
 def test_no_args_host_uses_config_next_to_exe(launch, configured, command):
     if configured:
         (launch.install / "host.yaml").write_text("# test only", encoding="utf-8")
@@ -53,7 +56,7 @@ def test_no_args_host_uses_config_next_to_exe(launch, configured, command):
     assert entry.main([]) == 0
     launch.dialog.assert_called_once_with()
     launch.console.assert_called_once_with()
-    assert launch.calls == [([command, "--config", "host.yaml"], launch.install)]
+    assert launch.calls == [(command, launch.install)]
     assert Path.cwd() == launch.elsewhere
     assert sys.argv is previous_argv
     launch.agent.assert_not_called()
@@ -105,7 +108,16 @@ def test_source_dialog_host_uses_working_directory(launch, monkeypatch):
     monkeypatch.setattr(sys, "frozen", False)
     launch.dialog.return_value = "host"
     assert entry.main([]) == 0
-    assert launch.calls == [(["setup", "--config", "host.yaml"], launch.elsewhere)]
+    assert launch.calls == [(["setup", "--then-start", "--config", "host.yaml"], launch.elsewhere)]
+
+
+def test_dialog_host_without_config_runs_setup_then_start(launch, monkeypatch):
+    launch.dialog.return_value = "host"
+    run_host = Mock(return_value=0)
+    monkeypatch.setattr(entry, "_run_host", run_host)
+    assert entry.main([]) == 0
+    run_host.assert_called_once_with(["setup", "--then-start", "--config", "host.yaml"],
+                                     launch.install, from_dialog=True)
 
 
 def test_running_agent_opens_existing_page(launch, monkeypatch):
