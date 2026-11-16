@@ -152,7 +152,10 @@ def admin_router(host) -> APIRouter:
         except ValueError as e:
             raise HTTPException(400, str(e))
         root = host.paths.root
-        return {"ok": True, "folders": host.paths.roots(), "main": root.as_posix() if root else None}
+        result = {"ok": True, "folders": host.paths.roots(), "main": root.as_posix() if root else None}
+        if host.share_warning:
+            result["warning"] = host.share_warning
+        return result
 
     @r.put("/api/share-root")
     async def put_share_root(body: dict):
@@ -162,7 +165,13 @@ def admin_router(host) -> APIRouter:
             raise HTTPException(409, str(e))
         except (ValueError, OSError) as e:
             raise HTTPException(400, str(e))
-        return {"share_root": str(p)}
+        result = {"share_root": str(p)}
+        warnings = [host.share_warning] if host.share_warning else []
+        if not await asyncio.to_thread(share_ops.folder_is_writable, p):
+            warnings.append(share_ops.UNWRITABLE_WARNING)
+        if warnings:
+            result["warning"] = " ".join(warnings)
+        return result
 
     @r.post("/api/pick-folder")
     async def pick_folder():

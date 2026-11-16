@@ -228,7 +228,9 @@ class SafePaths:
             requested_base: Path = Path(pw.anchor)
         else:
             parts = [p for p in normalize_rel(raw).split("/") if p]
-            requested_base = self.root
+            requested_base = self.root  # read once: the folder may vanish after check_running
+            if requested_base is None:
+                raise ToolError(UNSET_SHARE_MSG)
         # ".." escapes; ":" would address NTFS alternate data streams (file.txt:x, ::$DATA).
         if any(part == ".." or ":" in part for part in parts):
             raise not_found(shown)
@@ -338,9 +340,10 @@ class SafePaths:
         for folder in pol.folders:
             if folder.level == "hidden":
                 exclude_path(_nc(folder.path))
-        main = _nc(self.root)
+        root = self.root  # read once: None when the main folder just vanished
+        main = _nc(root) if root is not None else None
         for rule in pol.rules:
-            if rule.level != "hidden":
+            if rule.level != "hidden" or main is None:
                 continue
             pattern = normalize_rel(rule.path)
             if _within(main, key):

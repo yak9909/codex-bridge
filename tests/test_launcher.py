@@ -110,6 +110,13 @@ def test_exe_and_dialog_share_a_small_valid_icon():
     assert (icon.relative_to(repo).as_posix(), "codex_bridge/assets") in ast.literal_eval(datas)
 
 
+@pytest.fixture(autouse=True)
+def no_real_dpi_change(request, monkeypatch):
+    """Never switch the pytest process's DPI mode; the DPI tests mock ctypes themselves."""
+    if "dpi" not in request.node.name:
+        monkeypatch.setattr(launcher, "_enable_dpi_awareness", lambda: None)
+
+
 @pytest.fixture
 def tk_root():
     tk = pytest.importorskip("tkinter")
@@ -324,3 +331,59 @@ def test_missing_icon_replaces_title_bar_feather_with_windows_default(tk_root, t
     launcher._set_icon(tk_root, tmp_path / "missing.ico")
     for size in (0, 1):
         assert user.SendMessageW(window, 0x007F, size, 0) == expected  # WM_GETICON.
+
+
+@pytest.fixture
+def fake_windll(monkeypatch):
+    import ctypes
+
+    windll = Mock()
+    monkeypatch.setattr(ctypes, "windll", windll, raising=False)
+    monkeypatch.setattr(launcher.sys, "platform", "win32")
+    return windll
+
+
+def test_dpi_awareness_is_requested_per_monitor_first(fake_windll):
+    import ctypes
+
+    fake_windll.user32.SetProcessDpiAwarenessContext.return_value = 1
+    launcher._enable_dpi_awareness()
+    fake_windll.user32.SetProcessDpiAwarenessContext.assert_called_once()
+    assert fake_windll.user32.SetProcessDpiAwarenessContext.call_args.args[0].value == ctypes.c_void_p(-4).value  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+    fake_windll.shcore.SetProcessDpiAwareness.assert_not_called()
+
+
+def test_dpi_awareness_falls_back_and_never_raises(fake_windll):
+    fake_windll.user32.SetProcessDpiAwarenessContext.side_effect = AttributeError("old Windows")
+    fake_windll.shcore.SetProcessDpiAwareness.return_value = 0  # S_OK
+    launcher._enable_dpi_awareness()
+    fake_windll.shcore.SetProcessDpiAwareness.assert_called_once_with(2)
+    fake_windll.user32.SetProcessDPIAware.assert_not_called()
+    fake_windll.user32.SetProcessDpiAwarenessContext.side_effect = None
+    fake_windll.user32.SetProcessDpiAwarenessContext.return_value = 0
+    fake_windll.shcore.SetProcessDpiAwareness.side_effect = OSError("denied")
+    launcher._enable_dpi_awareness()
+    fake_windll.user32.SetProcessDPIAware.assert_called_once_with()
+    fake_windll.user32.SetProcessDPIAware.side_effect = OSError("denied")
+    launcher._enable_dpi_awareness()
+
+
+def test_dpi_awareness_is_skipped_outside_windows(fake_windll, monkeypatch):
+    monkeypatch.setattr(launcher.sys, "platform", "linux")
+    launcher._enable_dpi_awareness()
+    assert fake_windll.mock_calls == []
+
+
+def test_choose_role_sets_dpi_awareness_before_tk_creates_the_window(monkeypatch):
+    import tkinter as tk
+
+    order = []
+    monkeypatch.setattr(launcher, "_enable_dpi_awareness", lambda: order.append("dpi"))
+
+    def make_tk():
+        order.append("tk")
+        raise RuntimeError("stop before any window exists")
+    monkeypatch.setattr(tk, "Tk", make_tk)
+    with pytest.raises(RuntimeError):
+        launcher.choose_role()
+    assert order == ["dpi", "tk"]

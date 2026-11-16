@@ -175,9 +175,32 @@ class _RoleChooser:
         return "break"
 
 
+def _enable_dpi_awareness() -> None:
+    """Make this process DPI aware before Tk creates a window (else 125%/150% screens blur it).
+
+    Per-monitor first, then the older calls; any failure just keeps the default. It applies to the
+    whole process and can only be set once, so later windows (folder picker) are sharp too."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    attempts = (
+        lambda: ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)),  # per-monitor v2
+        lambda: ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0,  # per-monitor (Windows 8.1)
+        lambda: ctypes.windll.user32.SetProcessDPIAware(),  # system aware (Vista)
+    )
+    for attempt in attempts:
+        try:
+            if attempt():
+                return
+        except (AttributeError, OSError):
+            pass  # not on this Windows version, or already set: try the next one
+
+
 def choose_role() -> Role | None:
     import tkinter as tk
 
+    _enable_dpi_awareness()
     root = tk.Tk()
     try:
         chooser = _RoleChooser(root)

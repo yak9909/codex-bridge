@@ -353,12 +353,15 @@ $("tree").addEventListener("click", async (ev) => {
 });
 $("share-pick").onclick = async () => {
   const button = $("share-pick"), message = $("share-setup-error");
-  button.disabled = true;
   message.textContent = "";
+  if (isDirty()) { message.textContent = "権限に未保存の変更があります。先に「保存して反映」か「元に戻す」を押してください。"; return; }
+  button.disabled = true;
   try {
     const chosen = await api("POST", "/pick-folder");
     if (!chosen.path) return;
-    await api("PUT", "/share-root", { path: chosen.path });
+    const result = await api("PUT", "/share-root", { path: chosen.path });
+    $("folder-warning").textContent = result.warning || "";
+    $("folder-warning").hidden = !result.warning;
     await loadPermissions();
     await refreshTop();
   } catch (e) { message.textContent = "設定できませんでした: " + e.message; }

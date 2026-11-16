@@ -14,7 +14,7 @@ import webbrowser
 from pathlib import Path
 
 from . import setup_tools as st
-from .config import load_host_config
+from .config import effective_share_root, load_host_config
 
 LINE = "─" * 60
 
@@ -64,6 +64,24 @@ def _wait_tailscale_ip() -> str:
 
 
 # ---- setup.bat ---------------------------------------------------------------
+def _apply_choice_to_policy(config_path: Path, share: Path, *, was_unset: bool) -> None:
+    """An existing policy.yaml owns the main folder, so the chosen folder has to go there too.
+
+    (A missing policy.yaml is written by ensure_config from the new host.yaml.)"""
+    from .policy import PolicyStore
+    from .share import choose_main_in_policy
+
+    cfg = load_host_config(config_path)  # data_dir may have moved out of the shared folder
+    policy = cfg.data_dir / "policy.yaml"
+    if not policy.exists():
+        return
+    try:
+        choose_main_in_policy(PolicyStore(policy, share_root=cfg.share_root), share, drop_sample=was_unset)
+    except ValueError as e:
+        _say(f"権限の規則に反映できませんでした: {e}")
+        _say("  起動したあと、管理画面の「フォルダを選ぶ」でもう一度選んでください。")
+
+
 def run_setup(config_path: Path) -> None:
     root = Path.cwd()
     config_path = Path(config_path).resolve()
@@ -83,10 +101,11 @@ def run_setup(config_path: Path) -> None:
 
     _step(3, total, "共有フォルダ（Codex に触らせるフォルダ）")
     choose = True
+    current = None
     if config_path.exists():
-        cfg = load_host_config(config_path)
-        if cfg.share_root is not None:
-            _say(f"今の共有フォルダ: {cfg.share_root}")
+        current = effective_share_root(load_host_config(config_path))
+        if current is not None:
+            _say(f"今の共有フォルダ: {current}")
             choose = _yes("共有フォルダを選び直しますか？", default=False)
     if choose:
         share = None
@@ -101,6 +120,7 @@ def run_setup(config_path: Path) -> None:
             data_dir = Path(os.environ["LOCALAPPDATA"]) / "codex-bridge-host" / "data"
         st.write_host_config(config_path, share_root=share, data_dir=data_dir, ip=ip)
         _say(f"共有フォルダを {share} にしました。")
+        _apply_choice_to_policy(config_path, share, was_unset=current is None)
     elif st.update_public_bind(config_path, ip):
         _say("Tailscale の IP が変わっていたので、設定を更新しました。招待コードは発行し直してください。")
 
@@ -192,7 +212,7 @@ def run_start(config_path: Path) -> None:
         raise SystemExit(1)
     cfg = load_host_config(config_path)
     admin = f"http://127.0.0.1:{cfg.local_port}/admin/"
-    if cfg.share_root is None:
+    if effective_share_root(cfg) is None:
         from .paths import UNSET_SHARE_MSG
         _say(UNSET_SHARE_MSG)
     if _admin_alive(cfg.local_port):

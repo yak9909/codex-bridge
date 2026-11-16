@@ -13,7 +13,7 @@ from typing import Callable
 
 from ..common.audit import AuditLog
 from .approvals import Approvals
-from .paths import SafePaths, ToolError, not_found
+from .paths import UNSET_SHARE_MSG, SafePaths, ToolError, not_found
 from .policy import OUTPUTS_TOP, PolicyStore, glob_to_regex, normalize_rel
 from .snapshots import Snapshots
 
@@ -192,7 +192,10 @@ class CommandRunner:
     async def _execute(self, job: Job, real_cwd: Path, timeout: int) -> None:
         limits = self.policy.current().limits
         before = await asyncio.to_thread(self._write_area_state)
-        out_dir = self.paths.root / OUTPUTS_TOP / "outputs"
+        root = self.paths.root  # read once: the main folder can vanish while a command starts
+        if root is None:
+            raise ToolError(UNSET_SHARE_MSG)
+        out_dir = root / OUTPUTS_TOP / "outputs"
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"{secrets.token_hex(16)}.stdout.txt"
         proc = await asyncio.create_subprocess_shell(

@@ -9,7 +9,7 @@ from pathlib import Path
 import uvicorn
 
 from .app import build_host, create_local_app, create_public_app
-from .config import configured_folder, load_host_config
+from .config import configured_folder, effective_share_root, load_host_config
 from .policy_form import yaml_from_form
 
 SAMPLE_HOST = """\
@@ -55,8 +55,9 @@ def ensure_config(path: Path) -> bool:
 
 async def serve(config_path: Path) -> None:
     cfg = load_host_config(config_path)
-    if cfg.share_root is not None and cfg.data_dir.resolve().is_relative_to(cfg.share_root.resolve()):
-        raise SystemExit("data_dir は share_root の外に置いてください")
+    for root in (cfg.share_root, effective_share_root(cfg)):
+        if root is not None and cfg.data_dir.resolve().is_relative_to(root.resolve()):
+            raise SystemExit("data_dir は share_root の外に置いてください")
     host = build_host(cfg, config_path=config_path)
     pub_host, pub_port = cfg.public_bind.rsplit(":", 1)
     public = uvicorn.Server(uvicorn.Config(create_public_app(host), host=pub_host, port=int(pub_port),

@@ -16,6 +16,10 @@ from .policy_form import _abs, add_folder, remove_folder, set_main_folder
 UNWRITABLE_WARNING = "このフォルダは、今のユーザーの権限では書き込めません。Codex が書こうとしても Windows に断られます。"
 
 
+HOST_YAML_WARNING = ("設定は反映しましたが、host.yaml を書き換えられませんでした。"
+                     "次の起動では、管理画面でもう一度フォルダを選んでください。")
+
+
 def folder_is_writable(folder: Path) -> bool:
     """Try one exclusive creation; never retry Windows ACL failures like tempfile does."""
     probe = folder / f".codex-bridge-probe-{uuid4().hex}"
@@ -64,15 +68,20 @@ def add_shared_folder(host, path: str, level: str = "read") -> Path:
 
 def remove_shared_folder(host, path: str) -> Path:
     p = _guard(host, path, removing=True)
+    host.share_warning = None
+    before = host.paths.root
     remove_folder(host.policy, p.as_posix())
+    after = host.paths.root
+    if after != before:  # the main folder moved on (or is gone): host.yaml must say the same
+        _follow_main(host, after)
     _done(host, "remove", p)
     return p
 
 
-def _save_share_root(path: Path, root: Path) -> None:
-    """Update only the setting's line, retaining UTF-8 bytes and original newlines."""
+def _save_share_root(path: Path, root: Path | None) -> None:
+    """Update only the setting's line (null when unset), retaining UTF-8 bytes and original newlines."""
     text = path.read_bytes().decode("utf-8")
-    value = json.dumps(root.as_posix(), ensure_ascii=False)
+    value = "null" if root is None else json.dumps(root.as_posix(), ensure_ascii=False)
     match = re.search(
         r"(?m)^(?:\ufeff)?(?:share_root|\"share_root\"|'share_root')[ \t]*:[^\r\n]*", text)
     if match:
@@ -97,16 +106,51 @@ def _save_share_root(path: Path, root: Path) -> None:
     os.replace(tmp, path)
 
 
+def _follow_main(host, root: Path | None) -> None:
+    """Keep host.yaml (a copy for the next start) and the running host in step with the policy's main.
+
+    The policy is already saved, so a host.yaml that cannot be written is a warning, not a failure."""
+    if host.config_path is not None:
+        try:
+            _save_share_root(host.config_path, root)
+        except (OSError, ValueError, yaml.YAMLError, StopIteration) as e:
+            host.audit.write("host_yaml_not_updated", error=f"{type(e).__name__}: {e}")
+            host.share_warning = HOST_YAML_WARNING
+    host.config = replace(host.config, share_root=root)
+    host.paths.set_root(root)
+    host.policy.share_root = root
+
+
 def set_main_shared_folder(host, path: str) -> Path:
     p = _guard(host, path)
+    host.share_warning = None
     set_main_folder(host.policy, p.as_posix())
-    if host.config_path is not None:
-        _save_share_root(host.config_path, p.resolve())
-    host.config = replace(host.config, share_root=p.resolve())
-    host.paths.set_root(p)
-    host.policy.share_root = p.resolve()
+    _follow_main(host, p.resolve())
     _done(host, "main", p)
     return p
+
+
+SAMPLE_FOLDER = "c:/path/to/your/folder"
+
+
+def drop_sample_folders(store) -> list[Path]:
+    """Remove the shipped sample row (it never exists on this PC). Returns the rows removed."""
+    dropped = []
+    for folder in store.current().folders:
+        if folder.path.as_posix().rstrip("/").lower() == SAMPLE_FOLDER:
+            remove_folder(store, folder.path.as_posix())
+            dropped.append(folder.path)
+    return dropped
+
+
+def choose_main_in_policy(store, folder: Path, *, drop_sample: bool) -> None:
+    """Setup path: make `folder` readable and the main folder of an existing policy.yaml."""
+    target = _abs(str(folder))
+    if store.current().level_for_abs(Path(target)) not in ("read", "write"):
+        add_folder(store, target, "read")  # same level the first policy gives a chosen folder
+    set_main_folder(store, target)
+    if drop_sample:
+        drop_sample_folders(store)
 
 
 def change_share_root(host, new_path: str) -> Path:
@@ -119,9 +163,8 @@ def change_share_root(host, new_path: str) -> Path:
         add_folder(host.policy, p.as_posix(), "write")
     set_main_shared_folder(host, p.as_posix())
     if was_unset:
-        for folder in host.policy.current().folders:
-            if folder.path.as_posix().rstrip("/").lower() == "c:/path/to/your/folder":
-                remove_folder(host.policy, folder.path.as_posix())
+        for dropped in drop_sample_folders(host.policy):
+            _done(host, "remove", dropped)
     return p.resolve()
 
 

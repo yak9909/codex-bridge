@@ -61,6 +61,7 @@ class Host:
     events: Broadcaster
     shutdown: asyncio.Event = field(default_factory=asyncio.Event)  # set by stop.bat via /admin/api/shutdown
     config_path: Path | None = None  # host.yaml, updated when settings change from the admin page
+    share_warning: str | None = None  # set when the last folder change could not be copied to host.yaml
 
 
 def build_host(config: HostConfig, config_path: Path | None = None) -> Host:

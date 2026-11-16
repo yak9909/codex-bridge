@@ -353,3 +353,212 @@ def test_start_explains_admin_setup_and_still_serves(tmp_path, monkeypatch, caps
     setup_cli.run_start(cfg)
     assert called == [cfg]
     assert MESSAGE in capsys.readouterr().out
+
+
+# ---- final-review fixes (I-1, M-1..M-4, 11-a) ---------------------------------
+SAMPLE = "C:/path/to/your/folder"
+
+
+def shared_host(tmp_path, share=None):
+    """A host whose share root is a real folder (host.yaml and policy.yaml agree)."""
+    share = share or tmp_path / "share"
+    share.mkdir(exist_ok=True)
+    cfg = config_file(tmp_path, share.as_posix())
+    main.ensure_config(cfg)
+    return build_host(load_host_config(cfg), config_path=cfg)
+
+
+def sample_install(tmp_path, policy_main=SAMPLE):
+    """host.yaml and policy.yaml exactly like the shipped samples (both still unset)."""
+    cfg = config_file(tmp_path)
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "policy.yaml").write_text(yaml.safe_dump({
+        "main": policy_main, "folders": [{"path": SAMPLE, "level": "read"}],
+        "exec": {"mode": "allowlist", "allow": ["python scripts/**/*.py *"]}}), encoding="utf-8", newline="\n")
+    return cfg
+
+
+def setup_env(tmp_path, monkeypatch, chosen, reselect=False):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "vendor").mkdir(exist_ok=True)
+    (tmp_path / "vendor/rg.exe").touch()
+    monkeypatch.setattr(setup_cli, "_wait_tailscale_ip", lambda: "100.64.0.1")
+    monkeypatch.setattr(setup_cli.st, "firewall_rule_exists", lambda: True)
+    monkeypatch.setattr(setup_cli.subprocess, "run", lambda *a, **kw: pytest.fail("unexpected subprocess"))
+    monkeypatch.setattr(setup_cli.webbrowser, "open", lambda *a: pytest.fail("unexpected browser"))
+    questions = []
+    monkeypatch.setattr(setup_cli, "_yes", lambda q, **kw: questions.append(q) or (reselect and "選び直し" in q))
+    monkeypatch.setattr(setup_cli, "_choose_folder", lambda title: chosen)
+    return questions
+
+
+def test_setup_choice_takes_effect_with_existing_sample_policy(tmp_path, monkeypatch):
+    cfg = sample_install(tmp_path)
+    chosen = tmp_path / "chosen"
+    chosen.mkdir()
+    questions = setup_env(tmp_path, monkeypatch, chosen)
+    setup_cli.run_setup(cfg)
+    assert not any("選び直し" in q for q in questions)
+    host = build_host(load_host_config(cfg), config_path=cfg)
+    assert host.paths.root == chosen.resolve()
+    folders = yaml.safe_load((tmp_path / "data/policy.yaml").read_text(encoding="utf-8"))["folders"]
+    assert folders == [{"path": chosen.as_posix(), "level": "read"}]
+
+
+def test_setup_reselect_replaces_real_main_and_keeps_other_folders(tmp_path, monkeypatch):
+    old, other, chosen = (tmp_path / n for n in ("old", "other", "chosen"))
+    for d in (old, other, chosen):
+        d.mkdir()
+    cfg = config_file(tmp_path, old.as_posix())
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "policy.yaml").write_text(yaml.safe_dump({"main": old.as_posix(), "folders": [
+        {"path": old.as_posix(), "level": "write"}, {"path": other.as_posix(), "level": "read"}]}),
+        encoding="utf-8", newline="\n")
+    questions = setup_env(tmp_path, monkeypatch, chosen, reselect=True)
+    setup_cli.run_setup(cfg)
+    assert any("選び直し" in q for q in questions)
+    host = build_host(load_host_config(cfg), config_path=cfg)
+    assert host.paths.root == chosen.resolve()
+    saved = yaml.safe_load((data / "policy.yaml").read_text(encoding="utf-8"))["folders"]
+    assert {f["path"]: f["level"] for f in saved} == {
+        old.as_posix(): "write", other.as_posix(): "read", chosen.as_posix(): "read"}
+
+
+def test_effective_share_root_follows_the_policy_main(tmp_path):
+    from codex_bridge.host.config import effective_share_root
+    real = tmp_path / "real"
+    real.mkdir()
+    cfg = sample_install(tmp_path, policy_main=real.as_posix())
+    assert load_host_config(cfg).share_root is None            # host.yaml alone says "unset"
+    assert effective_share_root(load_host_config(cfg)) == real.resolve()
+    policy = tmp_path / "data/policy.yaml"
+    before = policy.read_bytes()
+    policy.write_text(yaml.safe_dump({"main": None, "folders": []}), encoding="utf-8")
+    assert effective_share_root(load_host_config(cfg)) is None
+    policy.write_bytes(before)
+
+
+def test_effective_share_root_leaves_a_v1_policy_alone(tmp_path):
+    from codex_bridge.host.config import effective_share_root
+    real = tmp_path / "real"
+    real.mkdir()
+    cfg = config_file(tmp_path, real.as_posix())
+    (tmp_path / "data").mkdir()
+    v1 = tmp_path / "data/policy.yaml"
+    v1.write_text("default: read\n", encoding="utf-8")
+    assert effective_share_root(load_host_config(cfg)) == real.resolve()
+    assert v1.read_text(encoding="utf-8") == "default: read\n"
+    assert not (tmp_path / "data/policy.v1.yaml").exists()
+
+
+def test_start_and_setup_trust_the_policy_main_not_a_sample_host_yaml(tmp_path, monkeypatch, capsys):
+    real = tmp_path / "real"
+    real.mkdir()
+    cfg = sample_install(tmp_path, policy_main=real.as_posix())
+    monkeypatch.setattr(setup_cli, "_admin_alive", lambda port: False)
+    monkeypatch.setattr(setup_cli, "_wait_tailscale_ip", lambda: "127.0.0.1")
+    monkeypatch.setattr(setup_cli.threading.Thread, "start", lambda self: None)
+
+    async def serve(path):
+        pass
+    monkeypatch.setattr(main, "serve", serve)
+    setup_cli.run_start(cfg)
+    assert MESSAGE not in capsys.readouterr().out
+    questions = setup_env(tmp_path, monkeypatch, None)
+    setup_cli.run_setup(cfg)
+    assert any("選び直し" in q for q in questions)
+    assert str(real.resolve()) in capsys.readouterr().out
+
+
+async def test_removing_the_main_folder_keeps_host_yaml_in_step(tmp_path):
+    host = shared_host(tmp_path)
+    first = tmp_path / "share"
+    second = tmp_path / "second"
+    second.mkdir()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_local_app(host)),
+                                 base_url="http://127.0.0.1") as client:
+        assert (await client.post("/admin/api/folders/add", json={"path": str(second), "level": "read"},
+                                  headers=H)).status_code == 200
+        assert (await client.post("/admin/api/folders/remove", json={"path": str(first)}, headers=H)).status_code == 200
+        assert host.paths.root == second.resolve()
+        assert load_host_config(host.config_path).share_root == second.resolve()
+        assert host.config.share_root == second.resolve()
+        assert (await client.post("/admin/api/folders/remove", json={"path": str(second)}, headers=H)).status_code == 200
+    assert host.paths.root is None
+    assert yaml.safe_load(host.config_path.read_text(encoding="utf-8"))["share_root"] is None
+    from codex_bridge.host.config import effective_share_root
+    assert effective_share_root(load_host_config(host.config_path)) is None
+
+
+def test_start_warns_when_host_yaml_keeps_a_folder_the_policy_no_longer_has(tmp_path, monkeypatch, capsys):
+    stale = tmp_path / "stale"
+    stale.mkdir()
+    cfg = config_file(tmp_path, stale.as_posix())
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data/policy.yaml").write_text("main: null\nfolders: []\n", encoding="utf-8")
+    monkeypatch.setattr(setup_cli, "_admin_alive", lambda port: False)
+    monkeypatch.setattr(setup_cli, "_wait_tailscale_ip", lambda: "127.0.0.1")
+    monkeypatch.setattr(setup_cli.threading.Thread, "start", lambda self: None)
+
+    async def serve(path):
+        pass
+    monkeypatch.setattr(main, "serve", serve)
+    setup_cli.run_start(cfg)
+    assert MESSAGE in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("route", ["main", "share-root"])
+async def test_host_yaml_write_failure_is_a_warning_not_a_500(tmp_path, monkeypatch, route):
+    host = shared_host(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+
+    def fail(path, root):
+        raise PermissionError("locked by another program")
+    monkeypatch.setattr("codex_bridge.host.share._save_share_root", fail)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_local_app(host)),
+                                 base_url="http://127.0.0.1") as client:
+        if route == "main":
+            assert (await client.post("/admin/api/folders/add", json={"path": str(other), "level": "read"},
+                                      headers=H)).status_code == 200
+            response = await client.post("/admin/api/folders/main", json={"path": str(other)}, headers=H)
+        else:
+            response = await client.put("/admin/api/share-root", json={"path": str(other)}, headers=H)
+        assert response.status_code == 200, response.text
+        assert "host.yaml" in response.json()["warning"]
+    assert host.paths.root == other.resolve()
+    assert any("host_yaml" in line for line in host.audit.path.read_text(encoding="utf-8").splitlines())
+
+
+async def test_share_root_warns_when_folder_is_not_writable(tmp_path, monkeypatch):
+    host = shared_host(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.setattr("codex_bridge.host.share.folder_is_writable", lambda folder: False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_local_app(host)),
+                                 base_url="http://127.0.0.1") as client:
+        response = await client.put("/admin/api/share-root", json={"path": str(other)}, headers=H)
+    assert response.status_code == 200
+    assert "書き込めません" in response.json()["warning"]
+
+
+def test_main_folder_vanishing_midway_gives_the_unset_message(tmp_path, monkeypatch):
+    from codex_bridge.host.paths import SafePaths
+    host = shared_host(tmp_path)
+    share = (tmp_path / "share").resolve()
+    seq = iter([share])
+    monkeypatch.setattr(SafePaths, "root", property(lambda self: next(seq, None)))
+    with pytest.raises(ToolError, match=MESSAGE):
+        host.paths.resolve("hello.txt", "read")
+    monkeypatch.setattr(SafePaths, "root", property(lambda self: None))
+    assert isinstance(host.paths.search_exclusions(share), list)
+
+
+async def test_command_start_with_vanished_main_is_denied_not_crashed(tmp_path, monkeypatch):
+    from codex_bridge.host.paths import SafePaths
+    host = shared_host(tmp_path)
+    monkeypatch.setattr(SafePaths, "root", property(lambda self: None))
+    with pytest.raises(ToolError, match=MESSAGE):
+        await host.services.runner._execute(object(), tmp_path, 5)
