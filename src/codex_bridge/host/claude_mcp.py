@@ -14,7 +14,7 @@ from ..common.invite import make_invite
 from ..common.protocol import LOG_VISIBILITY
 from .approvals import Approvals
 from .mcp_util import LoopbackOnly, McpEndpoint, error_result, json_result, make_endpoint
-from .paths import ToolError
+from .paths import ToolError, UNSET_SHARE_MSG
 from .policy import EXEC_MODES, PolicyStore
 from .policy_form import form_from_raw
 from .policy_form import set_folder_level as set_folder_level_
@@ -44,6 +44,7 @@ Codex を貸している人は、複数いることがあります。招待コ�
 
 ## 1. 準備の確認
 - get_overview を呼ぶ。
+  - share_root が null なら、共有フォルダがまだ設定されていません。管理画面で選んでください。依頼は設定後に送る。
   - folders が共有フォルダの一覧と権限。依頼の対象がその中にあるか確かめる。違うなら利用者に確認する。
   - paused が true なら一時停止中。利用者に確認する。
 - list_lenders を呼ぶ（Codex を貸している人の一覧）。
@@ -108,9 +109,14 @@ APPROVAL_NOTE = ("承認待ちがあります。内容が依頼に沿ってい�
 
 
 def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshots, *, policy: PolicyStore,
-                     tokens: TokenStore, public_bind: str, share_root: Callable[[], Path],
+                     tokens: TokenStore, public_bind: str, share_root: Callable[[], Path | None],
                      folder_ops: dict | None = None, roots: Callable[[], list] = lambda: []) -> McpEndpoint:
     server = MCPServer(name="codex-bridge", instructions=INSTRUCTIONS)
+
+    def share_status() -> dict:
+        root = share_root()
+        return {"share_root": str(root) if root else None,
+                "share_root_message": None if root else UNSET_SHARE_MSG}
 
     async def run(fn) -> CallToolResult:
         try:
@@ -163,6 +169,7 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
                     break
                 await asyncio.sleep(0.5)
             s = mgr.status(task_id)
+            s.update(share_status())
             pend = [a.to_dict() for a in approvals.pending()]
             s["pending_approvals"] = pend
             if pend:
@@ -335,7 +342,7 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
     @tool("codex-bridge の使い方（依頼から結果確認までの手順と注意）を返します。最初に一度呼んでください。")
     async def get_guide() -> CallToolResult:
         async def f():
-            return {"guide": GUIDE, "share_root": str(share_root())}
+            return {"guide": GUIDE, **share_status()}
         return await run(f)
 
     async def _folder_call(name: str, *args):
@@ -348,7 +355,8 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
             raise ToolError(str(e)) from e
         except Exception as e:  # ShareBusy
             raise ToolError(str(e)) from e
-        return {"path": str(p), "main": str(share_root())}
+        root = share_root()
+        return {"path": str(p), "main": str(root) if root else None}
 
     @tool("共有フォルダを追加します。path はフルパス（例: D:/tools/lib）、level は read（読むだけ）か write（書ける）。"
           "利用者に頼まれたときだけ使ってください。")
@@ -376,7 +384,7 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
     async def get_overview() -> CallToolResult:
         async def f():
             p = policy.current()
-            return {"share_root": str(share_root()), "folders": roots(), "public_bind": public_bind,
+            return {**share_status(), "folders": roots(), "public_bind": public_bind,
                     "agent": mgr.agent_info(),
                     "paused": p.paused, "exec_mode": p.exec_mode, "policy_error": policy.last_error,
                     "policy_problem": policy.problems(),

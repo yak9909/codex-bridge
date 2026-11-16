@@ -73,7 +73,7 @@ def build_host(config: HostConfig, config_path: Path | None = None) -> Host:
                       protected=(config.rg_path, *((config_path,) if config_path else ())))
     snapshots = Snapshots(data)
     approvals = Approvals(policy)
-    mgr = TaskManager(data, touched_fn=snapshots.touched)
+    mgr = TaskManager(data, touched_fn=snapshots.touched, check_start=paths.check_configured)
     tokens = TokenStore(data)
     mgr.invited_names = lambda: {i["name"] for i in tokens.list()}
 

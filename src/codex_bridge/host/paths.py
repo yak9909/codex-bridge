@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path, PureWindowsPath
 from typing import Literal
 
+from .config import configured_folder
 from .policy import OUTPUTS_TOP, Level, Policy, PolicyStore, glob_to_regex, normalize_rel
 
 
@@ -15,6 +16,7 @@ class ToolError(Exception):
 
 
 PAUSED_MSG = "停止中です（管理者が一時停止しています）"
+UNSET_SHARE_MSG = "共有フォルダがまだ設定されていません。管理画面で選んでください。"
 
 
 def not_found(rel: str) -> ToolError:
@@ -36,9 +38,10 @@ def _within(key: str, base: str) -> bool:
 class _WalkPolicy:
     """One policy snapshot: ordinary children inherit their registered folder's level."""
 
-    def __init__(self, policy: Policy, fallback: Path) -> None:
+    def __init__(self, policy: Policy, fallback: Path | None) -> None:
         self.policy = policy
-        self.main = _nc(policy.main) if policy.v2 and policy.main else _nc(fallback)
+        main = policy.main if policy.v2 else fallback
+        self.main = _nc(main) if main else ""
         self.main_prefix = _prefix(self.main)
         self.folders: dict[str, Level] = {}
         if policy.v2:
@@ -96,7 +99,7 @@ class _WalkPolicy:
 class SafePaths:
     """Paths are absolute (any registered folder) or relative to the main folder."""
 
-    def __init__(self, root: Path, policy: PolicyStore, *, install_dir: Path | None = None,
+    def __init__(self, root: Path | None, policy: PolicyStore, *, install_dir: Path | None = None,
                  protected: tuple[Path, ...] = ()) -> None:
         self.policy = policy
         self.install_dir = Path(install_dir).resolve() if install_dir else None
@@ -109,14 +112,14 @@ class SafePaths:
         self._install_prefix = _prefix(self._install_key) if self._install_key else None
         self.set_root(root)
 
-    def set_root(self, root: Path) -> None:
+    def set_root(self, root: Path | None) -> None:
         """Main folder used when the policy has none of its own (v1 policies)."""
-        self._fallback_root = Path(root).resolve()
+        self._fallback_root = configured_folder(Path(root).resolve()) if root is not None else None
 
     @property
-    def root(self) -> Path:
+    def root(self) -> Path | None:
         pol = self.policy.current()
-        return pol.main if (pol.v2 and pol.main is not None) else self._fallback_root
+        return configured_folder(pol.main if pol.v2 else self._fallback_root)
 
     # ---- levels ----------------------------------------------------------
     def _under(self, p: Path, base: Path) -> str | None:
@@ -137,6 +140,8 @@ class SafePaths:
     def _policy_level(self, pol: Policy, p: Path) -> Level | None:
         if pol.v2:
             return pol.level_for_abs(p)
+        if self._fallback_root is None:
+            return None
         rel = self._under(p, self._fallback_root)
         return None if rel is None else pol.level_for(rel)
 
@@ -150,21 +155,30 @@ class SafePaths:
     def _outputs(key: str) -> bool:
         return OUTPUTS_TOP in key.lower().split(os.sep)
 
+    def check_configured(self) -> None:
+        if self.root is None:
+            raise ToolError(UNSET_SHARE_MSG)
+
     def check_running(self) -> None:
+        self.check_configured()
         if self.policy.current().paused:
             raise ToolError(PAUSED_MSG)
 
     # ---- display ---------------------------------------------------------
     def display(self, p: Path) -> str:
         """Relative inside the main folder, absolute ('/' separated) elsewhere."""
-        rel = self._under(p, self.root)
+        main = self.root
+        rel = self._under(p, main) if main else None
         return rel if rel is not None else Path(os.path.abspath(p)).as_posix()
 
     to_rel = display  # older name used throughout the tools
 
     def display_formatter(self) -> Callable[[str], str]:
         """Snapshot the main folder once when formatting absolute scandir paths."""
-        main = _nc(self.root)
+        root = self.root
+        if root is None:
+            return lambda absolute: absolute.replace(os.sep, "/")
+        main = _nc(root)
         prefix = _prefix(main)
 
         def display(absolute: str) -> str:
@@ -181,10 +195,11 @@ class SafePaths:
         """Registered folders Codex may see (hidden ones are left out)."""
         pol = self.policy.current()
         if not pol.v2:
-            return [{"path": self._fallback_root.as_posix(), "level": pol.level_for(""), "main": True}]
+            root = self.root
+            return [{"path": root.as_posix(), "level": pol.level_for(""), "main": True}] if root else []
         out, main = [], _nc(pol.main) if pol.main else None
         for f in pol.folders:
-            if f.level == "hidden" or self.level_of(f.path) in (None, "hidden"):
+            if not configured_folder(f.path) or f.level == "hidden" or self.level_of(f.path) in (None, "hidden"):
                 continue
             out.append({"path": Path(os.path.abspath(f.path)).as_posix(), "level": self.level_of(f.path),
                         "main": _nc(f.path) == main})

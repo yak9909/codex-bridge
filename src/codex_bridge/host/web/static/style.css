@@ -3,6 +3,9 @@
 .hint { color: var(--bad); font-weight: 600; font-size: 13px; margin: 6px 0 0; }
 .hint:empty { display: none; }
 .note { background: var(--amber-bg); color: var(--warn); padding: 6px 10px; border-radius: 6px; font-size: 12px; margin: 8px 0; }
+.setup-share strong { font-size: 17px; }
+.setup-share p { margin: 8px 0 12px; }
+.setup-share .hint:empty { display: none; }
 
 /* ---- the table of lenders ---- */
 .table-wrap { overflow-x: auto; }

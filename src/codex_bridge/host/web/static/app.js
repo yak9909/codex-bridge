@@ -46,6 +46,7 @@ $("policy-problem").onclick = async (ev) => {
 async function refreshTop() {
   const [o, rows] = await Promise.all([api("GET", "/overview"), api("GET", "/lenders")]);
   paused = o.paused;
+  $("share-setup").hidden = !!o.share_root;
   const online = rows.filter((l) => l.connected).length;
   $("conn").className = "conn " + (online ? "on" : "off");
   $("conn-text").textContent = rows.length
@@ -350,6 +351,19 @@ $("tree").addEventListener("click", async (ev) => {
   expanded.add(path); tog.textContent = "▾"; sub.hidden = false;
   await loadChildren(path, sub);
 });
+$("share-pick").onclick = async () => {
+  const button = $("share-pick"), message = $("share-setup-error");
+  button.disabled = true;
+  message.textContent = "";
+  try {
+    const chosen = await api("POST", "/pick-folder");
+    if (!chosen.path) return;
+    await api("PUT", "/share-root", { path: chosen.path });
+    await loadPermissions();
+    await refreshTop();
+  } catch (e) { message.textContent = "設定できませんでした: " + e.message; }
+  finally { button.disabled = false; }
+};
 $("fd-pick").onclick = async () => {
   $("fd-pick").disabled = true;
   try { const r = await api("POST", "/pick-folder"); if (r.path) $("fd-path").value = r.path; }

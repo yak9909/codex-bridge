@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from ...common.invite import make_invite
-from ..paths import ToolError
+from ..paths import ToolError, UNSET_SHARE_MSG
 from ..policy import OUTPUTS_TOP, normalize_rel
 from ..policy_form import _abs, form_from_raw, save_form
 
@@ -49,8 +49,10 @@ def admin_router(host) -> APIRouter:
     @r.get("/api/overview")
     async def overview():
         p = host.policy.current()
+        root = host.paths.root
         return {
-            "share_root": str(host.paths.root), "folders": host.paths.roots(), "public_bind": host.config.public_bind,
+            "share_root": str(root) if root else None, "share_root_message": None if root else UNSET_SHARE_MSG,
+            "folders": host.paths.roots(), "public_bind": host.config.public_bind,
             "paused": p.paused, "exec_mode": p.exec_mode, "policy_error": host.policy.last_error,
             "policy_problem": host.policy.problems(),
             "agent": host.mgr.agent_info(), "current_task": host.mgr.current_task_id(),
@@ -149,7 +151,8 @@ def admin_router(host) -> APIRouter:
             raise HTTPException(409, str(e))
         except ValueError as e:
             raise HTTPException(400, str(e))
-        return {"ok": True, "folders": host.paths.roots(), "main": host.paths.root.as_posix()}
+        root = host.paths.root
+        return {"ok": True, "folders": host.paths.roots(), "main": root.as_posix() if root else None}
 
     @r.put("/api/share-root")
     async def put_share_root(body: dict):
@@ -157,14 +160,14 @@ def admin_router(host) -> APIRouter:
             p = change_share_root(host, body.get("path"))
         except ShareBusy as e:
             raise HTTPException(409, str(e))
-        except ValueError as e:
+        except (ValueError, OSError) as e:
             raise HTTPException(400, str(e))
         return {"share_root": str(p)}
 
     @r.post("/api/pick-folder")
     async def pick_folder():
         """Open the folder picker on this PC and return the chosen path (null if cancelled)."""
-        chosen = await asyncio.to_thread(pick_folder_dialog, host.config.share_root)
+        chosen = await asyncio.to_thread(pick_folder_dialog, host.paths.root)
         return {"path": chosen}
 
     @r.post("/api/pause")

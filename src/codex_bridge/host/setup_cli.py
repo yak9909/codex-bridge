@@ -85,8 +85,9 @@ def run_setup(config_path: Path) -> None:
     choose = True
     if config_path.exists():
         cfg = load_host_config(config_path)
-        _say(f"今の共有フォルダ: {cfg.share_root}")
-        choose = _yes("共有フォルダを選び直しますか？", default=False)
+        if cfg.share_root is not None:
+            _say(f"今の共有フォルダ: {cfg.share_root}")
+            choose = _yes("共有フォルダを選び直しますか？", default=False)
     if choose:
         share = None
         while share is None:
@@ -191,6 +192,9 @@ def run_start(config_path: Path) -> None:
         raise SystemExit(1)
     cfg = load_host_config(config_path)
     admin = f"http://127.0.0.1:{cfg.local_port}/admin/"
+    if cfg.share_root is None:
+        from .paths import UNSET_SHARE_MSG
+        _say(UNSET_SHARE_MSG)
     if _admin_alive(cfg.local_port):
         _say("codex-bridge はすでに動いています。管理画面を開きます。")
         webbrowser.open(admin)

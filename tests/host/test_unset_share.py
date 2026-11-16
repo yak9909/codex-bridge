@@ -1,0 +1,270 @@
+"""First-run setup uses only pytest's temporary folders, including legacy configs."""
+
+import json
+from dataclasses import replace
+
+import httpx
+import pytest
+import yaml
+
+from codex_bridge.host import main, setup_cli
+from codex_bridge.host.app import build_host, create_local_app, create_public_app
+from codex_bridge.host.config import load_host_config
+from codex_bridge.host.paths import ToolError
+from conftest import RG_PATH
+from mcp_helpers import running
+
+MESSAGE = "共有フォルダがまだ設定されていません。管理画面で選んでください。"
+H = {"X-Codex-Bridge": "1"}
+MCP_H = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+
+
+def config_file(tmp_path, share="C:/path/to/your/folder"):
+    cfg = tmp_path / "host.yaml"
+    cfg.write_text(yaml.safe_dump({"share_root": share, "data_dir": str(tmp_path / "data"),
+                                   "rg_path": str(RG_PATH)}), encoding="utf-8", newline="\n")
+    return cfg
+
+
+def legacy_host(tmp_path, version=2):
+    cfg = config_file(tmp_path)
+    data = tmp_path / "data"
+    data.mkdir()
+    raw = {"main": "C:/path/to/your/folder", "folders": [
+        {"path": "C:/path/to/your/folder", "level": "write"}]} if version == 2 else {"default": "write"}
+    (data / "policy.yaml").write_text(yaml.safe_dump(raw), encoding="utf-8", newline="\n")
+    return build_host(load_host_config(cfg), config_path=cfg)
+
+
+@pytest.mark.parametrize("value", [None, "", "  ", "C:/path/to/your/folder", "missing", "file.txt"])
+def test_config_treats_missing_empty_sample_and_nonfolder_as_unset(tmp_path, value):
+    (tmp_path / "file.txt").write_text("file", encoding="utf-8")
+    cfg = config_file(tmp_path, value)
+    assert load_host_config(cfg).share_root is None
+    cfg.write_text("data_dir: data\n", encoding="utf-8")
+    assert load_host_config(cfg).share_root is None
+
+
+def test_ensure_config_does_not_invent_a_shared_folder(tmp_path):
+    cfg = tmp_path / "host.yaml"
+    assert main.ensure_config(cfg)
+    raw = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    assert not raw.get("share_root")
+    policy = yaml.safe_load((tmp_path / "data/policy.yaml").read_text(encoding="utf-8"))
+    assert not policy.get("main") and policy["folders"] == []
+    assert "C:/path/to/your/folder" not in cfg.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("version", [1, 2])
+async def test_legacy_sample_can_serve_without_shared_folder(tmp_path, monkeypatch, capsys, version):
+    host = legacy_host(tmp_path, version)
+    assert host.paths.root is None
+    assert host.paths.roots() == []
+    seen = []
+
+    class Server:
+        def __init__(self, config):
+            self.config = config
+
+        async def serve(self):
+            seen.append(self.config)
+
+    monkeypatch.setattr(main.uvicorn, "Server", Server)
+    await main.serve(host.config_path)
+    assert len(seen) == 2
+    assert "共有フォルダ: 未設定（管理画面で選んでください）" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("linked", [False, True])
+async def test_serve_still_rejects_data_inside_configured_share(tmp_path, linked):
+    share = tmp_path / "share"
+    share.mkdir()
+    chosen = share
+    if linked:
+        chosen = tmp_path / "alias"
+        try:
+            chosen.symlink_to(share, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+    cfg = config_file(tmp_path, str(chosen))
+    raw = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    raw["data_dir"] = str(share / "data")
+    cfg.write_text(yaml.safe_dump(raw), encoding="utf-8", newline="\n")
+    with pytest.raises(SystemExit, match="data_dir は share_root の外に置いてください"):
+        await main.serve(cfg)
+
+
+async def rpc(client, prefix, name, args, headers=None):
+    response = await client.post(prefix + "/mcp", headers={**MCP_H, **(headers or {})}, json={
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": name, "arguments": args}})
+    assert response.status_code == 200, response.text
+    return response.json()["result"]
+
+
+CODEX_CALLS = [
+    ("list_dir", {}), ("list_dir", {"path": "."}), ("read_file", {"path": "hello.txt"}),
+    ("stat", {"path": "."}), ("find_files", {"pattern": "**/*"}), ("grep", {"pattern": "hello"}),
+    ("write_file", {"path": "new.txt", "content": "hello"}),
+    ("edit_file", {"path": "hello.txt", "old": "hello", "new": "world"}),
+    ("apply_patch", {"patch": "*** Begin Patch\n*** Add File: new.txt\n+hello\n*** End Patch"}),
+    ("move_path", {"src": "hello.txt", "dst": "new.txt"}), ("delete_path", {"path": "hello.txt"}),
+    ("run_command", {"command": "echo hello"}), ("get_command_result", {"job_id": "missing"}),
+]
+
+
+@pytest.mark.parametrize("version", [1, 2])
+async def test_unset_codex_tools_and_task_start_return_japanese(tmp_path, version):
+    host = legacy_host(tmp_path, version)
+    token = host.tokens.issue("friend")
+    async with running(host.codex_ep):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_public_app(host)),
+                                     base_url="http://127.0.0.1:8770") as client:
+            for name, args in CODEX_CALLS:
+                result = await rpc(client, "/codex", name, args, {"Authorization": "Bearer " + token})
+                assert result.get("isError") and MESSAGE in result["content"][0]["text"], (name, result)
+    with pytest.raises(ToolError, match=MESSAGE):
+        await host.mgr.start("work")
+    assert not host.mgr.tasks
+
+
+async def test_claude_status_guide_and_admin_handle_unset(tmp_path):
+    host = legacy_host(tmp_path)
+    async with running(host.claude_ep):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_local_app(host)),
+                                     base_url="http://127.0.0.1:8770") as client:
+            overview = (await client.get("/admin/api/overview")).json()
+            assert overview["share_root"] is None and overview["share_root_message"] == MESSAGE
+            assert (await client.get("/admin/api/folders")).status_code == 200
+            response = await client.post("/admin/api/tasks", json={"prompt": "work"}, headers=H)
+            assert response.status_code == 409 and MESSAGE in response.json()["detail"]
+            for name in ("get_overview", "get_guide", "get_status"):
+                result = await rpc(client, "/claude", name, {})
+                assert not result.get("isError"), result
+                assert MESSAGE in json.dumps(result, ensure_ascii=False)
+                assert '"None"' not in result["content"][0]["text"]
+            result = await rpc(client, "/claude", "send_task", {"prompt": "work"})
+            assert result.get("isError") and MESSAGE in result["content"][0]["text"]
+
+
+@pytest.mark.parametrize("version", [1, 2])
+async def test_pick_then_share_works_immediately_and_survives_restart(tmp_path, monkeypatch, version):
+    host = legacy_host(tmp_path, version)
+    chosen = tmp_path / "chosen"
+    chosen.mkdir()
+    (chosen / "hello.txt").write_text("hello\n", encoding="utf-8", newline="\n")
+    monkeypatch.setattr("codex_bridge.host.web.app.pick_folder_dialog", lambda initial: str(chosen))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_local_app(host)),
+                                 base_url="http://127.0.0.1") as client:
+        picked = (await client.post("/admin/api/pick-folder", headers=H)).json()["path"]
+        response = await client.put("/admin/api/share-root", json={"path": picked}, headers=H)
+        assert response.status_code == 200, response.text
+        assert load_host_config(host.config_path).share_root == chosen.resolve()
+        assert host.config.share_root == chosen.resolve()
+        assert host.services.read.read_file("hello.txt")["text"] == "hello\n"
+        host.services.write.write_file("new.txt", "new")
+        assert (chosen / "new.txt").read_text(encoding="utf-8") == "new"
+        assert host.services.read.find_files("*.txt") == ["hello.txt", "new.txt"]
+        assert host.services.search.grep("hello")["matches"]
+        overview = (await client.get("/admin/api/overview")).json()
+        assert overview["share_root"] == str(chosen.resolve()) and not overview["share_root_message"]
+        assert any(f["path"] == chosen.as_posix() for f in overview["folders"])
+    restarted = build_host(load_host_config(host.config_path), config_path=host.config_path)
+    assert restarted.paths.root == chosen.resolve()
+    assert restarted.services.read.read_file("hello.txt")["text"] == "hello\n"
+
+
+async def test_selection_guards_data_and_install_files_even_for_existing_rule(tmp_path):
+    host = legacy_host(tmp_path)
+    original = host.config_path.read_bytes()
+    host.policy.path.write_text(yaml.safe_dump({"main": str(tmp_path), "folders": [
+        {"path": str(tmp_path), "level": "write"}]}), encoding="utf-8")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_local_app(host)),
+                                 base_url="http://127.0.0.1") as client:
+        for candidate in (tmp_path, host.config.data_dir):
+            response = await client.put("/admin/api/share-root", json={"path": str(candidate)}, headers=H)
+            assert response.status_code == 400 and "データフォルダ" in response.json()["detail"]
+    assert host.config_path.read_bytes() == original
+    assert not host.paths.visible(host.config_path)
+    assert not host.paths.visible(host.config.data_dir / "policy.yaml")
+
+
+async def test_empty_policy_has_no_fallback_and_can_be_configured_again(tmp_path):
+    cfg = config_file(tmp_path, None)
+    main.ensure_config(cfg)
+    host = build_host(load_host_config(cfg), config_path=cfg)
+    chosen = tmp_path / "chosen"
+    chosen.mkdir()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_local_app(host)),
+                                 base_url="http://127.0.0.1:8770") as client:
+        for _ in range(2):
+            assert host.paths.root is None and host.paths.roots() == []
+            assert (await client.put("/admin/api/share-root", json={"path": str(chosen)}, headers=H)).status_code == 200
+            assert (await client.post("/admin/api/folders/remove", json={"path": str(chosen)}, headers=H)).status_code == 200
+        assert (await client.get("/admin/api/overview")).json()["share_root"] is None
+        with pytest.raises(ToolError, match=MESSAGE):
+            host.services.read.list_dir()
+
+
+async def test_picker_cancel_keeps_setup_and_runs_outside_event_loop(tmp_path, monkeypatch):
+    import threading
+    host = legacy_host(tmp_path)
+    loop_thread = threading.get_ident()
+    called = []
+    def pick(initial):
+        called.append((initial, threading.get_ident()))
+        return None
+    monkeypatch.setattr("codex_bridge.host.web.app.pick_folder_dialog", pick)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_local_app(host)),
+                                 base_url="http://127.0.0.1:8770") as client:
+        response = await client.post("/admin/api/pick-folder", headers=H)
+        assert response.status_code == 200 and response.json()["path"] is None
+        assert host.paths.root is None
+    assert called[0][0] is None and called[0][1] != loop_thread
+
+
+async def test_selection_rejects_separate_install_and_its_private_folders(tmp_path):
+    host = legacy_host(tmp_path)
+    install = tmp_path / "install"
+    (install / "vendor").mkdir(parents=True)
+    host.config = replace(host.config, install_dir=install)
+    from codex_bridge.host.paths import SafePaths
+    host.paths = SafePaths(None, host.policy, install_dir=install)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_local_app(host)),
+                                 base_url="http://127.0.0.1:8770") as client:
+        for path in (install, install / "vendor"):
+            response = await client.put("/admin/api/share-root", json={"path": str(path)}, headers=H)
+            assert response.status_code == 400 and "インストール先" in response.json()["detail"]
+        assert host.paths.root is None
+
+
+def test_setup_prompts_for_folder_without_asking_to_reselect(tmp_path, monkeypatch):
+    cfg = config_file(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "vendor").mkdir()
+    (tmp_path / "vendor/rg.exe").touch()
+    monkeypatch.setattr(setup_cli, "_wait_tailscale_ip", lambda: "100.64.0.1")
+    monkeypatch.setattr(setup_cli.st, "firewall_rule_exists", lambda: True)
+    monkeypatch.setattr(setup_cli.st, "add_firewall_rule_elevated", lambda: pytest.fail("unexpected firewall change"))
+    monkeypatch.setattr(setup_cli.subprocess, "run", lambda *a, **kw: pytest.fail("unexpected subprocess"))
+    monkeypatch.setattr(setup_cli.webbrowser, "open", lambda *a: pytest.fail("unexpected browser"))
+    questions = []
+    monkeypatch.setattr(setup_cli, "_yes", lambda question, **kwargs: questions.append(question) or False)
+    picked = []
+    monkeypatch.setattr(setup_cli, "_choose_folder", lambda title: picked.append(title))
+    setup_cli.run_setup(cfg)
+    assert len(picked) == 1
+    assert not any("選び直しますか" in q for q in questions)
+
+
+def test_start_explains_admin_setup_and_still_serves(tmp_path, monkeypatch, capsys):
+    cfg = config_file(tmp_path)
+    monkeypatch.setattr(setup_cli, "_admin_alive", lambda port: False)
+    monkeypatch.setattr(setup_cli, "_wait_tailscale_ip", lambda: "127.0.0.1")
+    monkeypatch.setattr(setup_cli.threading.Thread, "start", lambda self: None)
+    called = []
+    async def serve(path):
+        called.append(path)
+    monkeypatch.setattr(main, "serve", serve)
+    setup_cli.run_start(cfg)
+    assert called == [cfg]
+    assert MESSAGE in capsys.readouterr().out

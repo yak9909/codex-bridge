@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
+
+import yaml
 
 from .policy_form import _abs, add_folder, remove_folder, set_main_folder
 
@@ -32,10 +35,16 @@ class ShareBusy(Exception):
     pass
 
 
-def _guard(host, path: str, *, busy_check: bool = True) -> Path:
+def _guard(host, path: str, *, busy_check: bool = True, removing: bool = False) -> Path:
     p = Path(_abs(path))
     if busy_check and host.mgr.current_task_id():
         raise ShareBusy("作業中のタスクがあるため、共有フォルダは変えられません。終わってから変えてください")
+    if not removing:
+        host.policy.guard_shared_folder(p)
+        install = host.paths.install_dir
+        if install and (install.is_relative_to(p.resolve()) or any(
+                p.resolve().is_relative_to(install / name) for name in ("vendor", "src", ".venv", "scripts"))):
+            raise ValueError("codex-bridge のインストール先を含むフォルダは共有できません。別のフォルダを選んでください。")
     return p
 
 
@@ -52,7 +61,7 @@ def add_shared_folder(host, path: str, level: str = "read") -> Path:
 
 
 def remove_shared_folder(host, path: str) -> Path:
-    p = _guard(host, path)
+    p = _guard(host, path, removing=True)
     remove_folder(host.policy, p.as_posix())
     _done(host, "remove", p)
     return p
@@ -61,6 +70,15 @@ def remove_shared_folder(host, path: str) -> Path:
 def set_main_shared_folder(host, path: str) -> Path:
     p = _guard(host, path)
     set_main_folder(host.policy, p.as_posix())
+    if host.config_path is not None:
+        raw = yaml.safe_load(host.config_path.read_text(encoding="utf-8")) or {}
+        raw["share_root"] = p.resolve().as_posix()
+        tmp = host.config_path.with_suffix(".tmp")
+        tmp.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8", newline="\n")
+        os.replace(tmp, host.config_path)
+    host.config = replace(host.config, share_root=p.resolve())
+    host.paths.set_root(p)
+    host.policy.share_root = p.resolve()
     _done(host, "main", p)
     return p
 
@@ -72,8 +90,7 @@ def change_share_root(host, new_path: str) -> Path:
         raise ValueError(f"フォルダが見つかりません: {p}")
     if host.policy.current().level_for_abs(p) != "write":
         add_folder(host.policy, p.as_posix(), "write")
-    set_main_folder(host.policy, p.as_posix())
-    _done(host, "main", p)
+    set_main_shared_folder(host, p.as_posix())
     return p.resolve()
 
 

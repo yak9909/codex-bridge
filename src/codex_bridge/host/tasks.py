@@ -92,7 +92,9 @@ def _read_events(path: Path) -> list[dict]:
 
 
 class TaskManager:
-    def __init__(self, data_dir: Path, touched_fn: Callable[[str | None], list[str]]) -> None:
+    def __init__(self, data_dir: Path, touched_fn: Callable[[str | None], list[str]], *,
+                 check_start: Callable[[], None] | None = None) -> None:
+        self.check_start = check_start
         self.dir = Path(data_dir) / "tasks"
         self.dir.mkdir(parents=True, exist_ok=True)
         self.settings_path = Path(data_dir) / "settings.json"
@@ -470,6 +472,8 @@ class TaskManager:
         return target
 
     async def start(self, prompt: str, continue_task_id: str | None = None, lender: str | None = None) -> str:
+        if self.check_start:
+            self.check_start()
         if not self._connected():
             raise ToolError(NOT_CONNECTED)
         now = time.time()

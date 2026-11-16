@@ -78,6 +78,7 @@ def build_codex_mcp(s: HostServices, match_token: Callable[[str], str | None]) -
 
     async def run(name: str, args: dict, fn, *, blocking: bool) -> CallToolResult:
         try:
+            s.paths.check_configured()
             result = await (asyncio.to_thread(fn) if blocking else fn())
         except (ToolError, OSError) as e:
             if isinstance(e, PermissionError):

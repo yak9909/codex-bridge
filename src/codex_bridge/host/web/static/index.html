@@ -15,6 +15,12 @@
 </header>
 
 <main>
+  <section class="banner warn setup-share" id="share-setup" role="status" hidden>
+    <strong>共有フォルダがまだ設定されていません</strong>
+    <p>Codex に触らせるフォルダを選んでください。選ぶとすぐに使えます。</p>
+    <button type="button" id="share-pick">フォルダを選ぶ</button>
+    <p class="hint" id="share-setup-error" role="alert"></p>
+  </section>
   <section class="banner" id="policy-problem" role="alert" hidden></section>
   <section class="banner warn" id="folder-warning" role="status" hidden></section>
   <section class="banner" id="paused-banner" hidden>一時停止中です。Codex の道具はすべて「停止中」を返します。</section>
