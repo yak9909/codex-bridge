@@ -10,7 +10,9 @@ const LenderSettings = (() => {
     $("limit-five").value = s.limits.five_hour ?? "";
     $("limit-week").value = s.limits.weekly ?? "";
     $("limit-force").checked = s.limits.force;
-    $("approval-timeout").value = s.pre_approval.timeout_min;
+    $("approval-no-timeout").checked = s.pre_approval.timeout_min === null;
+    $("approval-timeout").value = s.pre_approval.timeout_min ?? 30;
+    $("approval-timeout").disabled = $("approval-no-timeout").checked;
     $("retention").value = s.log_retention_days;
     $("workdir").value = s.workdir || "";
     $("current-workdir").textContent = data.workdir;
@@ -32,15 +34,30 @@ const LenderSettings = (() => {
 
   async function init(api, say, refresh) {
     fill(await api("GET", "/settings"));
+    $("approval-no-timeout").onchange = () => {
+      $("approval-timeout").disabled = $("approval-no-timeout").checked;
+    };
+    $("limits-form").onsubmit = async (event) => {
+      event.preventDefault();
+      const button = $("save-limits");
+      button.disabled = true;
+      const percent = (id) => $(id).value === "" ? null : Number($(id).value);
+      const limits = { five_hour: percent("limit-five"), weekly: percent("limit-week"), force: $("limit-force").checked };
+      try {
+        await api("PUT", "/settings", { limits });
+        $("limits-message").textContent = "保存しました。";
+        await refresh();
+      } catch (error) { say(error.message, true); }
+      finally { button.disabled = false; }
+    };
     $("settings-form").onsubmit = async (event) => {
       event.preventDefault();
       const button = $("save-settings");
       button.disabled = true;
-      const percent = (id) => $(id).value === "" ? null : Number($(id).value);
       const patch = {
-        limits: { five_hour: percent("limit-five"), weekly: percent("limit-week"), force: $("limit-force").checked },
         features: Object.fromEntries([...$("feature-options").querySelectorAll("input")].map((i) => [i.dataset.feature, !i.checked])),
-        pre_approval: { enabled: selected("pre-choices"), timeout_min: Number($("approval-timeout").value) },
+        pre_approval: { enabled: selected("pre-choices"),
+          timeout_min: $("approval-no-timeout").checked ? null : Number($("approval-timeout").value) },
         disposable: selected("disposable-choices"), workdir: $("workdir").value.trim() || null,
         log_retention_days: Number($("retention").value),
       };

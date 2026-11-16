@@ -1,6 +1,14 @@
 /* Page-specific layout; the visual parts are shared with the host. */
 .brand .sub { font-size: 13px; }
-.grid2 { grid-template-columns: 1.1fr 1fr; }
+.grid2 { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); }
+.usage-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 14px; }
+.usage-limit { display: flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 13px; }
+.usage-limit span { white-space: nowrap; }
+.usage-row .meter { min-width: 0; grid-template-columns: 64px minmax(50px, 1fr); }
+.usage-row .m-label { display: flex; align-items: center; min-height: 32px; }
+.usage-row .m-val { grid-column: 2; text-align: left; white-space: normal; }
+#limits-form > .row { margin-top: 12px; }
+.approval-wait .check { margin: 0; }
 .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 28px; }
 fieldset { min-width: 0; padding: 12px 14px; margin: 0; border: 1px solid var(--line); border-radius: 8px; }
 legend { font-weight: 600; padding: 0 5px; }
@@ -34,4 +42,10 @@ summary { cursor: pointer; font-size: 13px; font-weight: 600; }
   main { padding: 16px 12px 40px; }
   .meter { grid-template-columns: 64px minmax(50px, 1fr); }
   .meter .m-val { grid-column: 2; text-align: left; }
+}
+@media (max-width: 600px) {
+  .usage-row { gap: 10px; }
+  .usage-row .meter { grid-template-columns: minmax(0, 1fr); }
+  .usage-row .meter .m-val, .usage-row .meter .m-note { grid-column: 1; text-align: left; }
+  .usage-limit { flex-direction: column; align-items: flex-start; }
 }

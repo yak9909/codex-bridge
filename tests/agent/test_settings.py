@@ -43,6 +43,22 @@ def test_defaults_are_those_of_the_design(tmp_path):
     assert not (tmp_path / "settings.json").exists()  # reading writes nothing
 
 
+def test_timeout_none_is_allowed_and_default_stays_30(tmp_path):
+    path = tmp_path / "settings.json"
+    store = st.SettingsStore(path)
+    assert store.get()["pre_approval"]["timeout_min"] == 30
+    assert store.update({"pre_approval": {"timeout_min": None}})["pre_approval"]["timeout_min"] is None
+    assert st.SettingsStore(path).get()["pre_approval"]["timeout_min"] is None
+    before = path.read_bytes()
+    for value in (0, -1, -30, st.MAX_TIMEOUT_MIN + 1):
+        with pytest.raises(ValueError):
+            store.update({"pre_approval": {"timeout_min": value}})
+        assert path.read_bytes() == before
+    for value in (1, st.MAX_TIMEOUT_MIN):
+        assert store.update({"pre_approval": {"timeout_min": value}})["pre_approval"]["timeout_min"] == value
+    assert st.defaults()["pre_approval"]["timeout_min"] == 30
+
+
 def test_update_merges_a_partial_patch_saves_it_and_returns_everything(tmp_path):
     store = st.SettingsStore(tmp_path / "sub" / "settings.json")
     out = store.update({"limits": {"five_hour": 70}, "features": {"web_search": True}, "disposable": True})

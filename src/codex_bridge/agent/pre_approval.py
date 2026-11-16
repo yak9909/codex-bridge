@@ -31,7 +31,7 @@ class Pending:
     msg: dict        # the host's message, kept as it came
     kind: str        # START or FOLLOWUP
     created: float   # wall-clock time, for the screen
-    deadline: float  # on the runner's clock
+    deadline: float | None  # on the runner's clock; None means no expiry
 
     @property
     def task_id(self) -> str:
@@ -65,7 +65,8 @@ class PreApproval:
     async def hold(self, msg: dict, kind: str) -> None:
         r = self.runner
         minutes = r.settings["pre_approval"]["timeout_min"]
-        self.pending = p = Pending(msg, kind, time.time(), r.clock() + minutes * 60)
+        deadline = None if minutes is None else r.clock() + minutes * 60
+        self.pending = p = Pending(msg, kind, time.time(), deadline)
         r.log_prompt(p.task_id, p.prompt)  # the lender can read it in the log from now on
         await self._announce(p)
 
@@ -101,7 +102,7 @@ class PreApproval:
 
     async def expire(self) -> None:
         p = self.pending
-        if p is not None and self.runner.clock() >= p.deadline:
+        if p is not None and p.deadline is not None and self.runner.clock() >= p.deadline:
             self.pending = None
             await self._reject(p, TIMED_OUT.format(self.runner.settings["pre_approval"]["timeout_min"]))
 

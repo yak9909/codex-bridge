@@ -19,9 +19,19 @@
   <section class="grid2" aria-label="使用量と状態">
     <div class="card">
       <h2>使用量</h2>
-      <div id="usage-five" data-label="5 時間枠"></div>
-      <div id="usage-week" data-label="週間枠"></div>
-      <p class="small">あなたの上限と依頼主のしきい値のうち、低いほうが効きます。</p>
+      <form id="limits-form">
+        <div class="usage-row">
+          <div id="usage-five" data-label="5 時間枠"></div>
+          <label class="usage-limit">あなたの上限 <span><input id="limit-five" aria-label="5 時間枠のあなたの上限" type="number" min="1" max="100" step="any"> %</span></label>
+        </div>
+        <div class="usage-row">
+          <div id="usage-week" data-label="週間枠"></div>
+          <label class="usage-limit">あなたの上限 <span><input id="limit-week" aria-label="週間枠のあなたの上限" type="number" min="1" max="100" step="any"> %</span></label>
+        </div>
+        <p class="small">依頼主の作業は、あなたの Codex の使用量を使います。あなたの上限と依頼主のしきい値のうち、低いほうが効きます。空欄なら依頼主のしきい値だけが効きます。</p>
+        <label class="check"><input type="checkbox" id="limit-force"><span><b>超えたらすぐ強制的に止める</b><br><span class="small">オフなら、区切りのよいところで止めて報告するよう頼みます。少し使用量が増えることがあります。</span></span></label>
+        <div class="row"><button id="save-limits" type="submit">保存</button><span class="small" id="limits-message" role="status"></span></div>
+      </form>
     </div>
     <div class="card">
       <h2>今の状態 <span id="state"></span></h2>
@@ -48,19 +58,17 @@
     <h2>設定</h2>
     <form id="settings-form">
       <div class="settings-grid">
-        <fieldset><legend>使用量の上限と止め方</legend>
-          <p class="small">依頼主の作業は、あなたの Codex の使用量を使います。空欄なら依頼主のしきい値だけが効きます。</p>
-          <div class="row"><label>5 時間枠 <input id="limit-five" type="number" min="1" max="100" step="any">%</label><label>週間枠 <input id="limit-week" type="number" min="1" max="100" step="any">%</label></div>
-          <label class="check"><input type="checkbox" id="limit-force"><span><b>超えたらすぐ強制的に止める</b><br><span class="small">オフなら、区切りのよいところで止めて報告するよう頼みます。少し使用量が増えることがあります。</span></span></label>
-        </fieldset>
         <fieldset><legend>使える機能の制限</legend>
           <p class="small">チェックした機能を止めます。作業中の変更は、作業が終わってから Codex を起動し直して反映します。</p>
           <div id="feature-options"></div>
         </fieldset>
         <fieldset><legend>事前承認</legend>
           <div id="pre-choices"></div>
-          <label class="row">承認の待ち時間 <input id="approval-timeout" type="number" min="1" max="1440" required>分</label>
-          <p class="small">時間を過ぎると拒否します。新しい依頼と追加の指示の両方が対象です。</p>
+          <div class="row approval-wait">
+            <label>承認の待ち時間 <input id="approval-timeout" type="number" min="1" max="1440" required> 分</label>
+            <label class="check"><input id="approval-no-timeout" type="checkbox"><span>待ち時間なし（期限なしで待つ）</span></label>
+          </div>
+          <p class="small">待ち時間を指定した場合は、時間を過ぎると拒否します。新しい依頼と追加の指示の両方が対象です。</p>
         </fieldset>
         <fieldset><legend>セッションの保存</legend><div id="disposable-choices"></div>
           <p class="small">使い捨てでも作業中の追加の指示は使えます。完了・中止・失敗・使用量による中断のあとは、続きの依頼はできません。作業の記録は残ります。</p>

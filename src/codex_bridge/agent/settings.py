@@ -72,6 +72,12 @@ def _whole(lo: int, hi: int, what: str):
     return check
 
 
+def _timeout_min(v):
+    if v is None:
+        return None  # no expiry; keep this distinct from a finite number of minutes
+    return _whole(1, MAX_TIMEOUT_MIN, "待ち時間（分）")(v)
+
+
 def _folder(v):
     if v is None:
         return None
@@ -83,7 +89,7 @@ def _folder(v):
 SECTIONS = {
     "limits": {"five_hour": _percent, "weekly": _percent, "force": _flag},
     "features": {f: _flag for f in FEATURES},
-    "pre_approval": {"enabled": _flag, "timeout_min": _whole(1, MAX_TIMEOUT_MIN, "待ち時間（分）")},
+    "pre_approval": {"enabled": _flag, "timeout_min": _timeout_min},
 }
 SCALARS = {"disposable": _flag, "workdir": _folder,
            "log_retention_days": _whole(1, MAX_RETENTION_DAYS, "記録の保管日数")}

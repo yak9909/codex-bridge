@@ -159,6 +159,29 @@ async def test_after_a_rejection_the_next_task_can_come(env):
 
 
 # ---- time out -----------------------------------------------------------------------------------------
+@pytest.mark.parametrize("kind", ["start", "followup"])
+async def test_no_timeout_means_never_expires(env, kind):
+    if kind == "followup":
+        await env.running_task()
+    env.setting(timeout_min=None)
+    if kind == "followup":
+        await env.followup()
+    else:
+        await env.start()
+    pending = env.runner.pending_approval
+    assert pending is not None, env.logged
+    before = list(env.sent)
+    env.clock.now += 365 * 24 * 60 * 60
+    await env.runner.expire_pending()
+    await env.runner.expire_pending()
+    assert env.runner.pending_approval == pending and env.sent == before
+    method = "turn/steer" if kind == "followup" else "turn/start"
+    assert env.fake.received(method) is None
+    assert await env.runner.decide_pending(True) is True
+    await env.fake.wait_for(lambda: env.fake.received(method))
+    assert env.runner.pending_approval is None
+
+
 async def test_an_undecided_request_is_rejected_when_the_time_is_up(env):
     env.setting(on=True, timeout_min=5)
     await env.start()
@@ -302,6 +325,38 @@ def client_of(env, **kw):
                       hello=kw.get("hello", {"agent_version": "0.2", "protocol": 2}))
     c.ws = FakeWs()
     return c
+
+
+@pytest.mark.parametrize("kind", ["start", "followup"])
+@pytest.mark.parametrize("acknowledged", [False, True])
+async def test_no_timeout_pending_is_resent_after_reconnect(env, kind, acknowledged):
+    if kind == "followup":
+        await env.running_task()
+        for message in list(env.sent):
+            if "seq" in message:
+                await env.runner.handle({"type": "ack", "seq": message["seq"]})
+    env.setting(timeout_min=None)
+    if kind == "followup":
+        await env.followup()
+    else:
+        await env.start()
+    pending = env.runner.pending_approval
+    assert pending is not None, env.logged
+    first_seq = env.last_state()["seq"]
+    if acknowledged:
+        await env.runner.handle({"type": "ack", "seq": first_seq})
+    env.clock.now += 365 * 24 * 60 * 60
+    await env.runner.expire_pending()
+    client = client_of(env)
+    await client.on_connected()
+    hello = next(m for m in client.ws.sent if m["type"] == "hello")
+    states = [m for m in client.ws.sent if m["type"] == "task_state"]
+    assert hello["current_task_id"] == "t1"
+    assert len(states) == (1 if acknowledged else 2)
+    assert all(m["state"] == "awaiting_lender" and m["task_id"] == "t1" for m in states)
+    assert states[-1]["seq"] > first_seq
+    assert client.ws.sent.index(hello) < client.ws.sent.index(states[-1])
+    assert env.runner.pending_approval == pending
 
 
 async def test_after_a_reconnect_hello_names_the_pending_task_and_awaiting_lender_is_sent_again(env):
