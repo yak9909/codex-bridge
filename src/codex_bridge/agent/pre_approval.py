@@ -32,6 +32,7 @@ class Pending:
     kind: str        # START or FOLLOWUP
     created: float   # wall-clock time, for the screen
     deadline: float | None  # on the runner's clock; None means no expiry
+    timeout_min: int | None  # minutes when held, independent of later settings changes
 
     @property
     def task_id(self) -> str:
@@ -66,7 +67,7 @@ class PreApproval:
         r = self.runner
         minutes = r.settings["pre_approval"]["timeout_min"]
         deadline = None if minutes is None else r.clock() + minutes * 60
-        self.pending = p = Pending(msg, kind, time.time(), deadline)
+        self.pending = p = Pending(msg, kind, time.time(), deadline, timeout_min=minutes)
         r.log_prompt(p.task_id, p.prompt)  # the lender can read it in the log from now on
         await self._announce(p)
 
@@ -104,7 +105,7 @@ class PreApproval:
         p = self.pending
         if p is not None and p.deadline is not None and self.runner.clock() >= p.deadline:
             self.pending = None
-            await self._reject(p, TIMED_OUT.format(self.runner.settings["pre_approval"]["timeout_min"]))
+            await self._reject(p, TIMED_OUT.format(p.timeout_min))
 
     async def shutdown(self) -> None:
         p, self.pending = self.pending, None

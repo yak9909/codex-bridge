@@ -68,7 +68,7 @@
             <label>承認の待ち時間 <input id="approval-timeout" type="number" min="1" max="1440" required> 分</label>
             <label class="check"><input id="approval-no-timeout" type="checkbox"><span>待ち時間なし（期限なしで待つ）</span></label>
           </div>
-          <p class="small">待ち時間を指定した場合は、時間を過ぎると拒否します。新しい依頼と追加の指示の両方が対象です。</p>
+          <p class="small">待ち時間を指定した場合は、時間を過ぎると拒否します。待ち時間なしの場合は、承認か拒否を選ぶまで待ちます。新しい依頼と追加の指示の両方が対象です。</p>
         </fieldset>
         <fieldset><legend>セッションの保存</legend><div id="disposable-choices"></div>
           <p class="small">使い捨てでも作業中の追加の指示は使えます。完了・中止・失敗・使用量による中断のあとは、続きの依頼はできません。作業の記録は残ります。</p>

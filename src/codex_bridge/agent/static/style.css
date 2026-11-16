@@ -14,6 +14,7 @@ fieldset { min-width: 0; padding: 12px 14px; margin: 0; border: 1px solid var(--
 legend { font-weight: 600; padding: 0 5px; }
 fieldset p { margin: 4px 0 10px; }
 input.path { width: 100%; }
+input:disabled { background: var(--line); color: var(--muted); opacity: .65; }
 code { overflow-wrap: anywhere; }
 .table-wrap { overflow: auto; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }

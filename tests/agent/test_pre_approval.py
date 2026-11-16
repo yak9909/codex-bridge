@@ -197,6 +197,32 @@ async def test_an_undecided_request_is_rejected_when_the_time_is_up(env):
     assert env.states() == ["awaiting_lender", "rejected_by_lender"]
 
 
+@pytest.mark.parametrize("kind", ["start", "followup"])
+@pytest.mark.parametrize("timeout_min", [None, 5])
+async def test_timeout_message_uses_the_minutes_the_request_was_held_with(env, kind, timeout_min):
+    if kind == "followup":
+        await env.running_task()
+        await env.followup()
+    else:
+        await env.start()
+    env.setting(timeout_min=timeout_min)
+    env.clock.now += 30 * 60 - 1
+    await env.runner.expire_pending()
+    assert env.runner.pending_approval is not None
+    env.clock.now += 1
+    await env.runner.expire_pending()
+    if kind == "followup":
+        report = [m for m in env.sent if m["type"] == "event" and m["kind"] == "status"][-1]["data"]["text"]
+        assert env.last_state()["state"] == "running"
+        assert env.fake.received("turn/steer") is None
+    else:
+        report = env.last_state()["report"]
+        assert env.last_state()["state"] == "rejected_by_lender"
+        assert env.fake.received("thread/start") is None
+    assert "Codex を貸している人が 30 分のあいだ承認しなかったため、拒否しました" in report
+    assert env.runner.pending_approval is None
+
+
 async def test_the_default_wait_is_30_minutes_and_the_tick_loop_checks_it(tmp_path):
     e = Env(tmp_path, RUNNING)
     e.runner.tick_interval = 0.02
