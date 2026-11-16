@@ -47,6 +47,78 @@ def start(task_id):
     return {"type": "task_start", "task_id": task_id, "prompt": "依頼"}
 
 
+@pytest.mark.parametrize("damaged", [False, True])
+async def test_unreadable_connection_is_skipped_and_logged_without_blocking_startup(multi, damaged):
+    bad_id = "000000000000"
+    path = multi.home / "connections" / bad_id
+    path.mkdir()
+    if damaged:
+        (path / "invite.bin").write_bytes(b"not a DPAPI invite")
+    logged = []
+    runtime = AgentConnections(multi.home, app_factory=multi.runtime.app_factory, versions={}, on_log=logged.append)
+    try:
+        assert {c.id for c in runtime.store.list()} == {multi.a.id, multi.b.id}
+        assert {r["id"] for r in runtime.rows()} == {multi.a.id, multi.b.id}
+        assert any(bad_id in row["text"] and "読めません" in row["text"] for row in logged)
+        assert path.is_dir()  # retain the damaged original for recovery
+        await runtime.add(make_invite("http://new.invalid", "s", "friend"))
+        assert len(runtime.rows()) == 3
+    finally:
+        await runtime.stop()
+
+
+async def test_stop_bounds_each_shutdown_waiting_for_the_shared_lock(multi, monkeypatch):
+    from codex_bridge.agent import main
+    stopped = []
+    with monkeypatch.context() as patch:
+        patch.setattr(main, "SHUTDOWN_TIMEOUT", 0.02, raising=False)
+        for id, runner in multi.runtime.runners.items():
+            original = runner.app.stop
+
+            async def stop(id=id, original=original):
+                stopped.append(id)
+                await original()
+
+            patch.setattr(runner.app, "stop", stop)
+        async with multi.runtime.slot.lock:
+            await asyncio.wait_for(multi.runtime.stop(), timeout=0.4)
+        assert set(stopped) == {multi.a.id, multi.b.id}
+        assert not multi.runtime.started
+
+
+async def test_stop_continues_after_shutdown_and_runner_cleanup_errors(multi, monkeypatch):
+    stopped, logged, shutdowns = [], [], []
+    a, b = (multi.runtime.runners[c.id] for c in (multi.a, multi.b))
+
+    async def fail_shutdown():
+        raise OSError("shutdown failed")
+
+    async def fail_stop():
+        raise OSError("runner stop failed")
+
+    async def second_shutdown():
+        shutdowns.append("second")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(multi.runtime, "on_log", logged.append)
+        patch.setattr(a, "shutdown", fail_shutdown)
+        patch.setattr(a, "stop", fail_stop)
+        patch.setattr(b, "shutdown", second_shutdown)
+        for id, runner in multi.runtime.runners.items():
+            original = runner.app.stop
+
+            async def stop(id=id, original=original):
+                stopped.append(id)
+                await original()
+
+            patch.setattr(runner.app, "stop", stop)
+        await multi.runtime.stop()
+        assert shutdowns == ["second"]
+        assert set(stopped) == {multi.a.id, multi.b.id}
+        assert any("shutdown failed" in row["text"] for row in logged)
+        assert any("runner stop failed" in row["text"] for row in logged)
+
+
 async def test_settings_are_per_connection_but_limits_are_shared(multi):
     m, a, b = multi.runtime, multi.a.id, multi.b.id
     await m.update_settings(a, {"pre_approval": {"enabled": True, "timeout_min": None},

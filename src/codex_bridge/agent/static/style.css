@@ -34,7 +34,7 @@ th { text-align: left; color: var(--muted); font-size: 12px; font-weight: 400; }
 td, th { border-bottom: 1px solid var(--line); padding: 8px 10px; vertical-align: top; }
 td:first-child, th:first-child { padding-left: 0; }
 td { overflow-wrap: anywhere; }
-td:last-child { text-align: right; white-space: nowrap; }
+td:last-child:not([colspan]) { text-align: right; white-space: nowrap; }
 .session-id { display: inline-block; text-align: left; overflow-wrap: anywhere; }
 tr.selected { background: var(--accent-bg); }
 #session-filter { margin-bottom: 8px; overflow-wrap: anywhere; }

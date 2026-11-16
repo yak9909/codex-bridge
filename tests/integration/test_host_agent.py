@@ -2,6 +2,7 @@
 
 import asyncio
 
+import httpx
 import pytest
 import uvicorn
 from fastapi import FastAPI
@@ -67,10 +68,10 @@ async def multiple(tmp_path):
         fake.app.features = settings["features"]
         return fake.app
 
-    runtime = AgentConnections(tmp_path / "agent", app_factory=factory, versions={"auth_mode": "chatgpt"},
+    runtime = AgentConnections(tmp_path / "agent", app_factory=factory, versions={"auth_mode": "unknown"},
                                initial_backoff=0.1)
-    await runtime.start()
     connections = [await runtime.add(code) for code in codes]
+    await runtime.start()
     try:
         await until(lambda: all(mgr.agent_info().get("ready") for mgr in managers))
         yield runtime, connections, managers, messages
@@ -85,7 +86,27 @@ async def test_add_two_connections_and_both_connect(multiple):
     runtime, connections, managers, messages = multiple
     assert len(runtime.store.list()) == 2
     assert all(any(m["type"] == "hello" for m in stream) for stream in messages)
-    assert all(not r.app.running for r in runtime.runners.values())
+    assert sum(r.app.running for r in runtime.runners.values()) <= 1
+
+
+async def test_startup_reports_auth_and_usage_to_every_host_without_a_task(multiple):
+    runtime, connections, managers, messages = multiple
+    await until(lambda: all(mgr.usage()["five_hour"] is not None for mgr in managers), timeout=2)
+    assert all(mgr.agent_info()["auth_mode"] == "chatgpt" for mgr in managers)
+    assert all(mgr.usage()["five_hour"]["used_percent"] == 12 for mgr in managers)
+    assert all(any(m["type"] == "usage" for m in stream) for stream in messages)
+    assert runtime.slot.last_usage is not None
+    assert all(r.last_usage == runtime.slot.last_usage for r in runtime.runners.values())
+    assert sum(r.app.running for r in runtime.runners.values()) == 1
+    assert all(not mgr.tasks for mgr in managers) and runtime.slot.owner is None
+    from codex_bridge.agent.ui import create_ui_app
+    app = create_ui_app(None, runtime.settings, None, versions=runtime.versions, data_root=runtime.home,
+                        connections=runtime)
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 1))
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8766") as http:
+        overview = (await http.get("/api/overview")).json()
+    assert overview["usage"]["five_hour"]["used_percent"] == 12
+    assert overview["auth_mode"] == "chatgpt" and overview["state"] == "idle"
 
 
 @pytest.mark.parametrize("pending", [False, True])

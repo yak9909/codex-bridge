@@ -32,6 +32,7 @@ from .worklog import WorkLog
 
 LOGVIEW_PORT = 8766
 TITLE = "codex-bridge"
+SHUTDOWN_TIMEOUT = 5.0
 
 
 # ---- small dialogs (tkinter) ---------------------------------------------
@@ -129,15 +130,16 @@ class AgentConnections:
 
     def __init__(self, home: Path, *, app_factory, versions: dict, initial_backoff=1.0, on_log=None):
         self.home = Path(home)
-        self.store = ConnectionStore(home)  # migrate with legacy settings before projecting the shared store
+        self.on_log = on_log or (lambda m: None)
+        self.store = ConnectionStore(home, on_log=self.on_log)  # migrate before projecting the shared store
         self.settings = SettingsStore(home / "settings.json", legacy_limits=home / "limits.json", shared=True)
         self.settings.update({})
         self.app_factory, self.versions = app_factory, versions
         self.initial_backoff = initial_backoff
-        self.on_log = on_log or (lambda m: None)
         self.slot = TaskSlot()
         self.runners, self.clients, self.links = {}, {}, {}
         self.started, self.paused, self.moving = False, False, False
+        self._usage_probe = None
         self.appliers = {}
         for connection in self.store.list():
             self._install(connection)
@@ -160,6 +162,13 @@ class AgentConnections:
                 app.features = dict(desired)
                 app.workdir = wd
             await app.start()
+            mode = await app.auth_mode()
+            if mode != self.versions.get("auth_mode"):
+                self.versions["auth_mode"] = mode
+                for other in self.runners.values():
+                    other.guard.enabled = mode == "chatgpt"
+                await asyncio.gather(*(client.refresh_hello() for client in self.clients.values()),
+                                     return_exceptions=True)
             await runner.refresh_usage()
 
         runner = AgentRunner(app, make_guard(self.versions.get("auth_mode", "chatgpt")),
@@ -190,6 +199,32 @@ class AgentConnections:
         self.started = True
         for id in self.runners:
             await self._activate(id)
+        self._ensure_usage_probe()
+
+    def _error(self, text, error):
+        try:
+            self.on_log({"type": "error", "text": f"{text}: {type(error).__name__}: {error}"})
+        except Exception:
+            pass
+
+    def _ensure_usage_probe(self):
+        if (not self.started or self.moving or not self.runners
+                or any(r.app.running for r in self.runners.values())
+                or self._usage_probe is not None and not self._usage_probe.done()):
+            return
+        self._usage_probe = asyncio.create_task(self._probe_usage())
+
+    async def _probe_usage(self):
+        try:
+            async with self.slot.lock:
+                if not self.started or self.moving:
+                    return
+                # Warm only one connection. Its periodic usage is broadcast to every requester by TaskSlot.
+                runner = next(iter(self.runners.values()), None)
+                if runner is not None:
+                    await runner.prepare()
+        except Exception as e:
+            self._error("起動時の使用量を確認できませんでした", e)
 
     async def _stop_connection(self, id):
         link = self.links.pop(id, None)
@@ -197,21 +232,33 @@ class AgentConnections:
             link.cancel()
             await asyncio.gather(link, return_exceptions=True)
         runner = self.runners[id]
-        await runner.stop()
-        await runner.app.stop()
+        try:
+            await runner.stop()
+        finally:
+            await runner.app.stop()
 
     async def stop(self):
-        for runner in self.runners.values():
-            await runner.shutdown()
-        for id in list(self.runners):
-            await self._stop_connection(id)
         self.started = False
+        if self._usage_probe is not None:
+            self._usage_probe.cancel()
+            await asyncio.gather(self._usage_probe, return_exceptions=True)
+        for runner in self.runners.values():
+            try:
+                await asyncio.wait_for(runner.shutdown(), SHUTDOWN_TIMEOUT)
+            except Exception as e:
+                self._error("終了の知らせを送れませんでした", e)
+        for id in list(self.runners):
+            try:
+                await self._stop_connection(id)
+            except Exception as e:
+                self._error("接続先の終了処理でエラーがありました", e)
 
     async def add(self, code):
         connection = self.store.add(code)
         self._install(connection)
         if self.started:
             await self._activate(connection.id)
+            self._ensure_usage_probe()
         return connection
 
     def _require_idle(self, id):
@@ -236,6 +283,7 @@ class AgentConnections:
             client.invite, client.invite_problem = connection.invite, None
             if self.started:
                 await self._activate(id)
+                self._ensure_usage_probe()
             return connection
 
     async def remove(self, id):
@@ -246,6 +294,7 @@ class AgentConnections:
             self.slot.runners.remove(self.runners.pop(id))
             self.clients.pop(id)
             self.appliers.pop(id)
+            self._ensure_usage_probe()
 
     async def update_settings(self, id, patch):
         saved = self.store.update_settings(id, patch)
@@ -267,6 +316,7 @@ class AgentConnections:
     async def settle(self):
         if self.moving:
             return
+        self._ensure_usage_probe()
         for id, runner in self.runners.items():
             # Do not turn an idle, never-used app-server on just to settle settings.
             if runner.app.running:
@@ -329,11 +379,6 @@ async def run_agent(invite: Invite | None, codex: Path, home: Path) -> bool:
                 mode = await app.auth_mode()
                 if mode == "none":
                     raise RuntimeError("Codex にログインできませんでした。もう一度起動してください。")
-            runtime.versions["auth_mode"] = mode
-            for runner in runtime.runners.values():
-                runner.guard.enabled = mode == "chatgpt"
-            for client in runtime.clients.values():
-                await client.refresh_hello()
         app.start = authenticated_start
         return app
 
@@ -387,14 +432,25 @@ async def run_agent(invite: Invite | None, codex: Path, home: Path) -> bool:
                             "作業中" if runtime.slot.owner else
                             f"接続中 {sum(row['connected'] for row in runtime.rows())} 件")
 
-    await runtime.start()
-    tasks = [asyncio.create_task(logview.serve()), asyncio.create_task(watchdog())]
-    await stop.wait()
-    await runtime.stop()
-    logview.should_exit = True
-    tasks[1].cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
-    tray.icon.stop()
+    tasks = []
+    try:
+        await runtime.start()
+        tasks = [asyncio.create_task(logview.serve()), asyncio.create_task(watchdog())]
+        await stop.wait()
+    finally:
+        try:
+            try:
+                await runtime.stop()
+            except Exception as e:
+                store.add({"type": "error", "text": f"終了処理でエラーがありました: {type(e).__name__}: {e}"})
+        finally:
+            logview.should_exit = True
+            for task in tasks[1:]:
+                task.cancel()
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                tray.icon.stop()
     return relaunch
 
 
@@ -444,7 +500,7 @@ def start_again() -> None:
 
 
 def _main(home: Path) -> bool:
-    connections = ConnectionStore(home)
+    connections = ConnectionStore(home, on_log=LogStore(home / "logs").add)
     invite = None
     if not connections.list():
         invite = ask_invite()

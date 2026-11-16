@@ -203,7 +203,7 @@ const UI = (() => {
     <div class="events" data-td="events"></div>
     <button type="button" class="ghost mini" data-td="more">さらに表示</button>`;
 
-  // opts: {mode: "simple" | "advanced" (the view to start with), onMode?(mode), showLender?,
+  // opts: {mode: "simple" | "advanced" (the view to start with), onMode?(mode), showLender?, lenderLabel?,
   //        onFollowup?(text) -> promise (the text is cleared when it resolves), onCancel?(), onUndo?()}
   function taskDetail(el, task, opts = {}) {
     el.classList.add("task-detail");
@@ -280,7 +280,7 @@ const UI = (() => {
 
     // heading: who, from when to when, how long
     const sum = [];
-    if (opts.showLender) sum.push(["担当", esc(t.lender || "—")]);
+    if (opts.showLender) sum.push([esc(opts.lenderLabel || "担当"), esc(t.lender || "—")]);
     sum.push(["開始", fmtTime(t.created) || "—"]);
     sum.push(["終了", fmtTime(t.finished) || "—"]);
     if (isTime(t.created) && (isTime(t.finished) || active)) {

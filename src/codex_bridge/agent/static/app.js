@@ -148,7 +148,7 @@ async function drawTasks(list) {
   const task = row ? await api("GET", "/tasks/" + enc(row.task_id) + "?connection_id=" + enc(row.connection_id)) : null;
   if (selected !== id) return;
   if (task) task.lender = task.host_name;
-  UI.taskDetail($("task-detail"), task, { mode, showLender: true,
+  UI.taskDetail($("task-detail"), task, { mode, showLender: true, lenderLabel: "依頼主",
     onMode: (value) => { mode = value; localStorage.setItem(MODE_KEY, value); } });
 }
 

@@ -398,6 +398,41 @@ vm.runInContext(`
     assert result.returncode == 0, result.stderr
 
 
+def test_task_detail_requester_label_preserves_host_default_and_escaping():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to exercise the shared task detail without a browser")
+    script = r'''
+const fs = require("node:fs"), vm = require("node:vm"), assert = require("node:assert/strict");
+const element = () => {
+  const parts = new Map();
+  return {classList: {add() {}, toggle() {}}, innerHTML: "", textContent: "", scrollHeight: 0, clientHeight: 0,
+    setAttribute() {}, querySelectorAll: () => [],
+    querySelector(selector) {
+      if (!parts.has(selector)) parts.set(selector, element());
+      return parts.get(selector);
+    }};
+};
+const context = vm.createContext({});
+vm.runInContext(fs.readFileSync(process.argv[2], "utf8") + "; globalThis.sharedUI = UI;", context);
+const el = element(), task = {task_id:"t", state:"completed", lender:'<img src=x>', prompt:'<script>remote</script>', events:[]};
+const sum = () => el.querySelector('[data-td="sum"]').innerHTML;
+context.sharedUI.taskDetail(el, task, {showLender:true});
+assert.ok(sum().includes("<b>担当</b>"));
+assert.ok(sum().includes("&lt;img src=x&gt;"));
+context.sharedUI.taskDetail(el, task, {showLender:true, lenderLabel:"依頼主"});
+assert.ok(sum().includes("<b>依頼主</b>"));
+assert.ok(!sum().includes("<b>担当</b>"));
+assert.equal(el.querySelector('[data-td="prompt"]').textContent, task.prompt);
+context.sharedUI.taskDetail(el, task, {showLender:true, lenderLabel:"<script>label</script>"});
+assert.ok(!sum().includes("<script>"));
+'''
+    source = Path(__file__).resolve().parents[2] / "src/codex_bridge/common/web/ui.js"
+    result = subprocess.run([node, "-", str(source)], input=script, text=True, encoding="utf-8",
+                            capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+
+
 def test_first_run_writes_sample_configs(tmp_path):
     cfg = tmp_path / "host.yaml"
     assert ensure_config(cfg) is True

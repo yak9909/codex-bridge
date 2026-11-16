@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import secrets
@@ -47,11 +48,25 @@ class Connection:
 
 
 class ConnectionStore:
-    def __init__(self, home: Path) -> None:
+    def __init__(self, home: Path, *, on_log=None) -> None:
         self.home = Path(home)
         self.root = self.home / "connections"
         self._lock = threading.RLock()
+        self.on_log = on_log
+        self._reported = set()
         self._migrate()
+
+    def _unreadable(self, path: Path) -> None:
+        if path in self._reported:
+            return
+        self._reported.add(path)
+        text = f"招待コードを読めませんでした: {path}。元のファイルを残しています。新しい招待コードで接続先を追加してください。"
+        logging.getLogger(__name__).warning(text)
+        if self.on_log is not None:
+            try:
+                self.on_log({"type": "error", "text": text})
+            except Exception:
+                pass  # a failed diagnostic write must not make the agent unstartable
 
     def _migrate(self) -> None:
         old = self.home / "invite.bin"
@@ -59,7 +74,8 @@ class ConnectionStore:
             return
         invite = load_invite(self.home)
         if invite is None:
-            raise ValueError("保存された招待コードを読めませんでした。元のファイルは残しています")
+            self._unreadable(old)
+            return
         stage = self.home / ("connections-migrate-" + secrets.token_hex(6))
         try:
             first = stage / secrets.token_hex(6)
@@ -121,7 +137,10 @@ class ConnectionStore:
             rows = []
             for path in sorted(self.root.iterdir()) if self.root.exists() else ():
                 if path.is_dir() and SAFE_ID.fullmatch(path.name):
-                    rows.append(self._read(path.name))
+                    try:
+                        rows.append(self._read(path.name))
+                    except (KeyError, OSError, ValueError, TypeError):
+                        self._unreadable(path / "invite.bin")
             return rows
 
     def _unique(self, invite: Invite, except_id=None) -> None:

@@ -52,6 +52,68 @@ def test_crash_is_written_to_log_and_reported(tmp_path, monkeypatch):
     assert shown and "crash.log" in shown[0]
 
 
+def test_unreadable_legacy_invite_asks_for_a_new_code_and_starts(tmp_path, monkeypatch):
+    from codex_bridge.agent.connections import ConnectionStore
+    from codex_bridge.common.invite import Invite
+    original = b"not a DPAPI invite"
+    (tmp_path / "invite.bin").write_bytes(original)
+    invited, started = [], []
+    invite = Invite("http://new.invalid", "new-token", "friend")
+
+    def ask():
+        invited.append(True)
+        return invite
+
+    async def run(invite, codex, home):
+        started.append((codex, home))
+        assert ConnectionStore(home).list()[0].invite == invite
+        return False
+
+    monkeypatch.setattr(agent_main, "ask_invite", ask)
+    monkeypatch.setattr(agent_main, "choose_codex", lambda *args: tmp_path / "codex.exe")
+    monkeypatch.setattr(agent_main, "run_agent", run)
+    assert agent_main._main(tmp_path) is False
+    assert invited == [True] and started == [(tmp_path / "codex.exe", tmp_path)]
+    assert (tmp_path / "invite.bin").read_bytes() == original
+    assert "読めません" in (tmp_path / "logs" / "log.jsonl").read_text(encoding="utf-8")
+
+
+async def test_run_agent_stops_the_tray_even_if_runtime_cleanup_raises(tmp_path, monkeypatch):
+    stopped, refs = [], {}
+
+    class Runtime:
+        def __init__(self, *args, **kwargs):
+            self.runners = {"existing": None}
+            self.settings = None
+
+        async def start(self):
+            pass
+
+        async def apply_shared(self, saved):
+            pass
+
+        async def stop(self):
+            raise OSError("cleanup failed")
+
+    def tray(on_quit, on_pause_toggle):
+        refs["quit"] = on_quit
+        return SimpleNamespace(run_detached=lambda: None,
+                               icon=SimpleNamespace(stop=lambda: stopped.append("tray")))
+
+    def server(*args, **kwargs):
+        async def serve():
+            refs["quit"]()
+        return SimpleNamespace(serve=serve, should_exit=False)
+
+    monkeypatch.setattr(agent_main, "AgentConnections", Runtime)
+    monkeypatch.setattr(agent_main, "Tray", tray)
+    monkeypatch.setattr(agent_main, "make_ui_server", server)
+    monkeypatch.setattr(agent_main, "codex_version", lambda cmd: "fake")
+    assert await asyncio.wait_for(agent_main.run_agent(None, tmp_path / "fake.exe", tmp_path), 1) is False
+    assert stopped == ["tray"]
+    assert "cleanup failed" in (tmp_path / "logs" / "log.jsonl").read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("fails,already_paused", [(False, False), (True, False), (True, True)])
 async def test_final_review_move_pauses_before_copy_and_restores_on_failure(tmp_path, monkeypatch,
                                                                          fails, already_paused):
