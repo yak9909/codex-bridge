@@ -19,7 +19,7 @@ def attach_console() -> bool:
     """Show our hidden console, preserve an inherited console, and report whether we own it."""
     if sys.platform != "win32":
         return False
-    kernel = ctypes.windll.kernel32
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.GetConsoleWindow.argtypes = []
     kernel.GetConsoleWindow.restype = wintypes.HWND
     kernel.GetConsoleProcessList.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD]
@@ -30,17 +30,20 @@ def attach_console() -> bool:
     # including in onefile builds. Retain a fallback for launches without one.
     if not window:
         if not kernel.AttachConsole(-1):
-            if not kernel.AllocConsole():
-                raise ctypes.WinError()
-            owned = True
+            if kernel.AllocConsole():
+                owned = True
+            else:
+                error = ctypes.get_last_error()
+                if error != 5:  # ERROR_ACCESS_DENIED: already attached, possibly without a window
+                    raise ctypes.WinError(error)
         window = kernel.GetConsoleWindow()
-    if not owned:
+    if window and not owned:
         # A double-clicked onefile console contains only Python and its bootloader.
         # A shell (or any other process) sharing it means it belongs to the caller.
         pids = (wintypes.DWORD * 2)()
         count = kernel.GetConsoleProcessList(pids, len(pids))
         if not count:
-            raise ctypes.WinError()
+            raise ctypes.WinError(ctypes.get_last_error())
         own_pids = {os.getpid()}
         if getattr(sys, "frozen", False):
             own_pids.add(os.getppid())
@@ -56,7 +59,7 @@ def attach_console() -> bool:
         stream = getattr(sys, name)
         if stream is None or stream.closed:
             setattr(sys, name, open(device, mode, encoding="utf-8", buffering=1))
-    return owned
+    return owned and bool(window)  # a windowless console must never trigger an Enter wait
 
 
 def acquire_agent_instance() -> tuple[bool, int | None]:

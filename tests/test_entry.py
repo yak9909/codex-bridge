@@ -148,6 +148,10 @@ def console_api(monkeypatch):
                              AttachConsole=Mock(return_value=True), AllocConsole=Mock(return_value=True))
     user = SimpleNamespace(ShowWindow=Mock())
     monkeypatch.setattr(entry.ctypes, "windll", SimpleNamespace(kernel32=kernel, user32=user), raising=False)
+    dll = Mock(return_value=kernel)
+    last_error = Mock(return_value=0)
+    monkeypatch.setattr(entry.ctypes, "WinDLL", dll, raising=False)
+    monkeypatch.setattr(entry.ctypes, "get_last_error", last_error, raising=False)
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(entry.os, "getpid", lambda: 102)
@@ -161,7 +165,7 @@ def console_api(monkeypatch):
     opened = Mock(side_effect=AssertionError("must preserve valid standard streams"))
     monkeypatch.setattr(entry, "open", opened, raising=False)
     state = SimpleNamespace(kernel=kernel, user=user, pids=[100, 101, 102], streams=streams, opened=opened,
-                            redirect_streams=redirect_streams)
+                            redirect_streams=redirect_streams, dll=dll, last_error=last_error)
     return state
 
 
@@ -203,6 +207,78 @@ def test_missing_console_attaches_before_allocating(console_api, attached):
     assert console_api.kernel.AllocConsole.call_count == int(not attached)
     assert console_api.user.ShowWindow.call_count == int(not attached)
     console_api.opened.assert_not_called()
+
+
+@pytest.fixture
+def windowless_console(console_api):
+    console_api.kernel.GetConsoleWindow.return_value = 0
+    console_api.kernel.AttachConsole.return_value = False
+    console_api.kernel.AllocConsole.return_value = False
+    console_api.last_error.return_value = 5  # ERROR_ACCESS_DENIED: already attached
+    # A onefile build can be alone with its bootloader in a windowless console.
+    console_api.pids = [101, 102]
+    return console_api
+
+
+def test_windowless_inherited_console_keeps_pipes_and_is_not_owned(windowless_console):
+    windowless_console.redirect_streams()
+    assert entry.attach_console() is False
+    windowless_console.dll.assert_called_once_with("kernel32", use_last_error=True)
+    windowless_console.last_error.assert_called_once_with()
+    windowless_console.kernel.AttachConsole.assert_called_once_with(-1)
+    windowless_console.kernel.AllocConsole.assert_called_once_with()
+    windowless_console.kernel.GetConsoleProcessList.assert_not_called()
+    windowless_console.user.ShowWindow.assert_not_called()
+    windowless_console.opened.assert_not_called()
+    assert [sys.stdout, sys.stderr, sys.stdin] == windowless_console.streams
+    print("piped output")
+    print("piped error", file=sys.stderr)
+    assert sys.stdout.getvalue() == "piped output\n"
+    assert sys.stderr.getvalue() == "piped error\n"
+    assert input() == "redirected input"
+
+
+@pytest.mark.parametrize("argv,code", [(["foo"], 2), (["host", "--help"], 0)])
+def test_windowless_console_preserves_cli_exit_codes(windowless_console, monkeypatch, argv, code):
+    windowless_console.redirect_streams()
+    dialog = Mock(side_effect=AssertionError("unexpected dialog"))
+    pause = Mock(side_effect=AssertionError("unexpected pause"))
+    monkeypatch.setattr(entry, "choose_role", dialog)
+    monkeypatch.setattr(entry, "input", pause, raising=False)
+    if argv[0] == "host":
+        with pytest.raises(SystemExit) as error:
+            entry.main(argv)
+        assert error.value.code == code
+        assert "codex-bridge host" in sys.stdout.getvalue()
+    else:
+        assert entry.main(argv) == code
+        assert "使い方" in sys.stderr.getvalue()
+    dialog.assert_not_called()
+    pause.assert_not_called()
+    windowless_console.opened.assert_not_called()
+
+
+def test_windowless_console_never_pauses_on_dialog_host_error(windowless_console, tmp_path, monkeypatch):
+    windowless_console.redirect_streams()
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "codex-bridge.exe"))
+    monkeypatch.setattr(entry, "choose_role", Mock(return_value="host"))
+    monkeypatch.setattr(host_main, "main", Mock(side_effect=SystemExit(3)))
+    pause = Mock(side_effect=AssertionError("nobody can press Enter"))
+    monkeypatch.setattr(entry, "input", pause, raising=False)
+    with pytest.raises(SystemExit) as error:
+        entry.main([])
+    assert error.value.code == 3
+    pause.assert_not_called()
+    windowless_console.user.ShowWindow.assert_not_called()
+
+
+def test_console_allocation_other_error_is_preserved(windowless_console):
+    windowless_console.last_error.return_value = 87
+    with pytest.raises(OSError) as error:
+        entry.attach_console()
+    assert error.value.winerror == 87
+    windowless_console.last_error.assert_called_once_with()
+    windowless_console.opened.assert_not_called()
 
 
 @pytest.mark.parametrize("invalid", ["missing", "closed"])
