@@ -424,31 +424,46 @@ def test_agent_relaunch_releases_marker_before_starting_same_role(launch, monkey
     assert len(events) == 2
 
 
-def test_release_packages_one_exe_and_preserves_existing_releases(tmp_path, monkeypatch):
+def _fake_build_tree(tmp_path, monkeypatch, extra=()):
     script = Path(__file__).resolve().parents[1] / "scripts" / "build_release.py"
     build = runpy.run_path(str(script))["main"]
     monkeypatch.setitem(build.__globals__, "ROOT", tmp_path)
     monkeypatch.setitem(build.__globals__, "VERSION", "0.2.0")
     run = Mock()
     monkeypatch.setitem(build.__globals__, "run", run)
-    files = ["dist/codex-bridge.exe", "vendor/rg.exe", "setup.bat", "start.bat", "stop.bat",
-             "install-mcp.bat", "docs/operation-guide.md", "docs/friend-guide.md",
-             "release/codex-bridge-admin-v0.1.0.zip", "release/old-build/keep.txt"]
-    for name in files:
+    sources = ["dist/codex-bridge.exe", "vendor/rg.exe", "setup.bat", "start.bat", "stop.bat",
+               "install-mcp.bat", "docs/operation-guide.md", "docs/friend-guide.md"]
+    for name in [*sources, *extra]:
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(name.encode("utf-8"))
+    return build, run
+
+
+def test_build_makes_one_zip(tmp_path, monkeypatch):
+    build, run = _fake_build_tree(tmp_path, monkeypatch)
     build()
     run.assert_any_call(sys.executable, "-m", "PyInstaller", "--noconfirm", "codex-bridge.spec")
     assert len([call for call in run.call_args_list if "PyInstaller" in call.args]) == 1
-    expected = {
-        "admin": {"codex-bridge.exe", "setup.bat", "start.bat", "stop.bat", "install-mcp.bat",
-                  "vendor/rg.exe", "docs/operation-guide.md", "docs/friend-guide.md", "はじめにお読みください.txt"},
-        "friend": {"codex-bridge.exe", "使い方.md"},
-    }
-    for role, contents in expected.items():
-        name = f"codex-bridge-{role}-v0.2.0"
-        with zipfile.ZipFile(tmp_path / "release" / f"{name}.zip") as archive:
-            assert set(archive.namelist()) == {f"{name}/{path}" for path in contents}
-    for name in files[-2:]:
+    assert sorted(p.name for p in (tmp_path / "release").iterdir()) == ["codex-bridge-v0.2.0.zip"]
+    contents = {"codex-bridge.exe", "setup.bat", "start.bat", "stop.bat", "install-mcp.bat",
+                "vendor/rg.exe", "docs/operation-guide.md", "docs/friend-guide.md", "はじめにお読みください.txt"}
+    with zipfile.ZipFile(tmp_path / "release" / "codex-bridge-v0.2.0.zip") as archive:
+        assert set(archive.namelist()) == {f"codex-bridge-v0.2.0/{path}" for path in contents}
+        readme = archive.read("codex-bridge-v0.2.0/はじめにお読みください.txt")
+    assert readme.startswith(b"\xef\xbb\xbf") and b"\r\n" not in readme
+    text = readme.decode("utf-8-sig")
+    assert "知人（貸す側）の方へ" in text and "依頼主（使う側）の方へ" in text
+    assert "friend-kit" not in text and "v0.2.0" in text
+
+
+def test_build_removes_same_version_split_zips_only(tmp_path, monkeypatch):
+    keep = ["release/codex-bridge-admin-v0.1.0.zip", "release/old-build/keep.txt"]
+    remove = ["release/codex-bridge-admin-v0.2.0.zip", "release/codex-bridge-friend-v0.2.0.zip"]
+    build, _ = _fake_build_tree(tmp_path, monkeypatch, extra=[*keep, *remove])
+    build()
+    for name in remove:
+        assert not (tmp_path / name).exists()
+    for name in keep:
         assert (tmp_path / name).read_bytes() == name.encode("utf-8")
+    assert (tmp_path / "release" / "codex-bridge-v0.2.0.zip").exists()

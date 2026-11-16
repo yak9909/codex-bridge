@@ -12,19 +12,21 @@
 
 ## 配布物（すぐ使う場合）
 
-GitHub の **Releases** から 2 つの zip を取得します。v0.2.0 の配布物は次の名前です。Python や uv は要りません。
+GitHub の **Releases** から zip を 1 つ取得します。v0.2.0 の配布物は次の名前です。Python や uv は要りません。依頼主も知人も、同じ zip を使います。
 
 | zip | 誰が使う | 使い方 |
 |---|---|---|
-| `codex-bridge-admin-v0.2.0.zip` | 依頼主（あなた） | 展開して `setup.bat` → `install-mcp.bat` → 以後は `start.bat` / `stop.bat`。初期設定と起動は `codex-bridge.exe` をダブルクリックして「使う側」を選んでもできます。中の「はじめにお読みください.txt」を参照 |
-| `codex-bridge-friend-v0.2.0.zip` | 知人 | 展開して `codex-bridge.exe` をダブルクリックし、「貸す側」を選んで、自分用の招待コードを貼る。中の「使い方.md」を参照 |
+| `codex-bridge-v0.2.0.zip` | 依頼主と知人の両方 | 展開して、中の「はじめにお読みください.txt」を参照 |
 
-exe は両方とも同じ `codex-bridge.exe` です。引数なしで開くと役割を選ぶ画面が出ます。「使う側」は exe の隣に `host.yaml` がなければ初期設定、あれば起動を行います。「貸す側」がすでに動いていれば、新しく起動せずブラウザでその画面を開きます。
+- **知人（貸す側）**: 展開して `codex-bridge.exe` をダブルクリックし、「貸す側」を選んで、依頼主からもらった自分用の招待コードを貼ります。ほかのファイルは使いません。
+- **依頼主（使う側）**: 展開して `codex-bridge.exe` をダブルクリックし、「使う側」を選びます。初回は初期設定のあと、そのまま起動して管理画面が開きます。管理画面で共有フォルダを選び、`install-mcp.bat` を実行し、招待コードを発行して、この zip と一緒に知人に渡します。2 回目からは exe で「使う側」を選ぶか `start.bat`、停止は `stop.bat` です。初期設定だけしたいときは `setup.bat` を使います。
+
+exe は全員が同じ `codex-bridge.exe` です。引数なしで開くと役割を選ぶ画面が出ます。「使う側」は exe の隣に `host.yaml` がなければ初期設定のあと起動し、あれば起動だけを行います。「貸す側」がすでに動いていれば、新しく起動せずブラウザでその画面を開きます。
 
 v0.1 の exe も、v0.2 の依頼主側につなげられます。知人側の新しい画面と設定には v0.2 の exe が必要です。更新するときは依頼主側を先に更新してください。
 メイン以外のフォルダを使うには、知人側の exe も v0.2 が必要です（v0.1 の exe はメインのフォルダだけで作業できます）。
 
-リリースの作り方（開発者向け）: `uv run python scripts/build_release.py` で `release/` に 2 つの zip ができます。
+リリースの作り方（開発者向け）: `uv run python scripts/build_release.py` で `release/` に zip が 1 つ（`codex-bridge-v{バージョン}.zip`）できます。
 
 設計: [v0.2 の設計書](docs/2026-11-14-codex-bridge-v2-design.md)（[v0.1](docs/2026-11-14-codex-bridge-design.md)）
 知人向けの手順: [docs/friend-guide.md](docs/friend-guide.md)
