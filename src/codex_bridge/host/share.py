@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
-import tempfile
+from uuid import uuid4
 
 from .policy_form import _abs, add_folder, remove_folder, set_main_folder
 
@@ -11,10 +12,17 @@ UNWRITABLE_WARNING = "このフォルダは、今のユーザーの権限では�
 
 
 def folder_is_writable(folder: Path) -> bool:
-    """Probe as the current user; closing the temporary file also removes it."""
+    """Try one exclusive creation; never retry Windows ACL failures like tempfile does."""
+    probe = folder / f".codex-bridge-probe-{uuid4().hex}"
+    # Keep Windows cleanup tied to the handle even when later deletion by name
+    # would be denied. Other platforms use the explicit unlink in finally.
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_TEMPORARY", 0)
     try:
-        with tempfile.TemporaryFile(dir=folder):
-            pass
+        descriptor = os.open(probe, flags, 0o600)
+        try:
+            os.close(descriptor)
+        finally:
+            probe.unlink(missing_ok=True)
     except OSError:
         return False
     return True

@@ -1,8 +1,12 @@
 import time
 import json
+import csv
+import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
+from uuid import UUID
 
 import httpx
 import pytest
@@ -221,15 +225,105 @@ async def test_register_unwritable_folder_warns(admin, host, tmp_path, monkeypat
     assert checked == ([extra] if level == "write" else [])
 
 
+@pytest.mark.parametrize("denied_rights", ["W", "DE,DC"], ids=["write-denied", "delete-denied"])
+def test_folder_write_probe_returns_quickly_when_acl_denies_writing(tmp_path, denied_rights):
+    icacls = shutil.which("icacls")
+    if icacls is None:
+        pytest.skip("icacls is unavailable")
+    folder = tmp_path / "write-denied"
+    folder.mkdir()
+    whoami = Path(os.environ["SystemRoot"]) / "System32" / "whoami.exe"
+    identity = subprocess.run([str(whoami), "/user", "/fo", "csv", "/nh"],
+                              capture_output=True, text=True, errors="replace", check=True, timeout=10)
+    sid = next(csv.reader(identity.stdout.splitlines()))[1]
+    assert sid.startswith("S-1-")
+    marker = folder / "delete-denied.txt"
+    try:
+        denied = subprocess.run([icacls, str(folder), "/deny", f"*{sid}:(OI)(CI)({denied_rights})"],
+                                capture_output=True, text=True, errors="replace", timeout=10)
+        assert denied.returncode == 0, denied.stdout + denied.stderr
+        # Reproduce the Windows mismatch that makes tempfile retry: os.access says
+        # writable, but actually creating a file fails under the current user's ACL.
+        assert os.access(folder, os.W_OK)
+        if denied_rights == "W":
+            with pytest.raises(PermissionError):
+                with (folder / "denied.txt").open("xb"):
+                    pass
+        else:
+            marker.write_bytes(b"delete check")
+            with pytest.raises(PermissionError):
+                marker.unlink()
+        # A child process lets the timeout kill the old retry loop without leaving
+        # a spinning thread behind, even if an assertion fails before ACL cleanup.
+        result = subprocess.run(
+            [sys.executable, "-c", "from pathlib import Path; import sys; "
+             "from codex_bridge.host.share import folder_is_writable; "
+             "print(folder_is_writable(Path(sys.argv[1])))", str(folder)],
+            capture_output=True, text=True, check=True, timeout=3)
+        if denied_rights == "W":
+            assert result.stdout.strip() == "False"
+        else:
+            # A newly opened DELETE_ON_CLOSE handle can clean itself up even if
+            # ordinary deletion is denied. Either result must leave no probe.
+            assert result.stdout.strip() in ("True", "False")
+    finally:
+        restored = subprocess.run([icacls, str(folder), "/remove:d", f"*{sid}"],
+                                  capture_output=True, text=True, errors="replace", timeout=10)
+        assert restored.returncode == 0, restored.stdout + restored.stderr
+        marker.unlink(missing_ok=True)
+    # A deny ACE may also prevent listing. Inspect only after restoring the ACL;
+    # restoring permissions must reveal no probe left by either failure case.
+    assert list(folder.iterdir()) == []
+
+
 def test_folder_write_probe_creates_and_removes_a_file(tmp_path, monkeypatch):
     from codex_bridge.host.share import folder_is_writable
-    assert folder_is_writable(tmp_path)
-    assert list(tmp_path.iterdir()) == []
+    opened = []
+    real_open = os.open
 
-    def denied(*args, **kwargs):
+    def create_once(path, flags, mode):
+        opened.append(Path(path))
+        assert flags & os.O_CREAT and flags & os.O_EXCL and flags & os.O_WRONLY
+        descriptor = real_open(path, flags, mode)
+        assert Path(path).is_file()
+        return descriptor
+
+    monkeypatch.setattr("codex_bridge.host.share.os.open", create_once)
+    assert folder_is_writable(tmp_path)
+    assert len(opened) == 1
+    assert opened[0].name.startswith(".codex-bridge-probe-")
+    assert list(tmp_path.iterdir()) == []
+    attempts = []
+
+    def denied(path, *args, **kwargs):
+        attempts.append(path)
         raise PermissionError(13, "Access is denied", str(tmp_path))
 
-    monkeypatch.setattr("tempfile.TemporaryFile", denied)
+    monkeypatch.setattr("codex_bridge.host.share.os.open", denied)
+    assert not folder_is_writable(tmp_path)
+    assert len(attempts) == 1
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_folder_write_probe_does_not_remove_an_existing_file(tmp_path, monkeypatch):
+    from codex_bridge.host import share as share_ops
+    monkeypatch.setattr(share_ops, "uuid4", lambda: UUID(int=0))
+    existing = tmp_path / f".codex-bridge-probe-{UUID(int=0).hex}"
+    existing.write_bytes(b"existing data")
+    assert not share_ops.folder_is_writable(tmp_path)
+    assert existing.read_bytes() == b"existing data"
+    assert list(tmp_path.iterdir()) == [existing]
+
+
+def test_folder_write_probe_cleans_up_after_close_error(tmp_path, monkeypatch):
+    from codex_bridge.host.share import folder_is_writable
+    real_close = os.close
+
+    def failed_close(descriptor):
+        real_close(descriptor)
+        raise OSError("close failed")
+
+    monkeypatch.setattr("codex_bridge.host.share.os.close", failed_close)
     assert not folder_is_writable(tmp_path)
     assert list(tmp_path.iterdir()) == []
 
