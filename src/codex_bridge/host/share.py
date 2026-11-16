@@ -61,6 +61,7 @@ def _done(host, what: str, p: Path) -> None:
 
 def add_shared_folder(host, path: str, level: str = "read") -> Path:
     p = _guard(host, path)
+    host.share_warning = None  # each operation starts clean; only its own host.yaml failure sets it
     add_folder(host.policy, p.as_posix(), level)
     _done(host, f"add:{level}", p)
     return p
@@ -124,9 +125,13 @@ def _follow_main(host, root: Path | None) -> None:
 def set_main_shared_folder(host, path: str) -> Path:
     p = _guard(host, path)
     host.share_warning = None
+    was_unset = host.paths.root is None  # a real main that already exists keeps the user's list as is
     set_main_folder(host.policy, p.as_posix())
     _follow_main(host, p.resolve())
     _done(host, "main", p)
+    if was_unset:
+        for dropped in drop_sample_folders(host.policy):
+            _done(host, "remove", dropped)
     return p
 
 
@@ -158,13 +163,9 @@ def change_share_root(host, new_path: str) -> Path:
     p = _guard(host, new_path)
     if not p.is_dir():
         raise ValueError(f"フォルダが見つかりません: {p}")
-    was_unset = host.paths.root is None
     if host.policy.current().level_for_abs(p) != "write":
         add_folder(host.policy, p.as_posix(), "write")
-    set_main_shared_folder(host, p.as_posix())
-    if was_unset:
-        for dropped in drop_sample_folders(host.policy):
-            _done(host, "remove", dropped)
+    set_main_shared_folder(host, p.as_posix())  # also drops the sample row when the root was unset
     return p.resolve()
 
 

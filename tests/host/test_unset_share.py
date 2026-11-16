@@ -562,3 +562,55 @@ async def test_command_start_with_vanished_main_is_denied_not_crashed(tmp_path, 
     monkeypatch.setattr(SafePaths, "root", property(lambda self: None))
     with pytest.raises(ToolError, match=MESSAGE):
         await host.services.runner._execute(object(), tmp_path, 5)
+
+
+async def test_stale_host_yaml_warning_does_not_repeat_on_the_next_add(tmp_path, monkeypatch):
+    host = shared_host(tmp_path)
+    other, third = tmp_path / "other", tmp_path / "third"
+    other.mkdir()
+    third.mkdir()
+
+    def fail(path, root):
+        raise PermissionError("read-only")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_local_app(host)),
+                                 base_url="http://127.0.0.1") as client:
+        assert (await client.post("/admin/api/folders/add", json={"path": str(other), "level": "read"},
+                                  headers=H)).status_code == 200
+        with monkeypatch.context() as m:
+            m.setattr("codex_bridge.host.share._save_share_root", fail)
+            response = await client.post("/admin/api/folders/main", json={"path": str(other)}, headers=H)
+        assert "host.yaml" in response.json()["warning"]
+        response = await client.post("/admin/api/folders/add", json={"path": str(third), "level": "read"},
+                                     headers=H)
+        assert response.status_code == 200
+        assert "warning" not in response.json()
+    assert host.share_warning is None
+
+
+def test_main_button_and_tool_path_drop_sample_row_only_when_unset(tmp_path):
+    from codex_bridge.host.share import add_shared_folder, set_main_shared_folder
+    host = legacy_host(tmp_path)  # main is the sample row: unset
+    chosen = tmp_path / "chosen"
+    chosen.mkdir()
+    add_shared_folder(host, str(chosen), "read")
+    set_main_shared_folder(host, str(chosen))
+    saved = yaml.safe_load(host.policy.path.read_text(encoding="utf-8"))
+    assert saved["main"] == chosen.as_posix()
+    assert saved["folders"] == [{"path": chosen.as_posix(), "level": "read"}]
+
+
+def test_main_button_keeps_sample_row_when_a_real_main_already_exists(tmp_path):
+    from codex_bridge.host.share import add_shared_folder, set_main_shared_folder
+    host = legacy_host(tmp_path)
+    real, chosen = tmp_path / "real", tmp_path / "chosen"
+    real.mkdir()
+    chosen.mkdir()
+    raw = yaml.safe_load(host.policy.path.read_text(encoding="utf-8"))
+    raw["main"] = real.as_posix()
+    raw["folders"].append({"path": real.as_posix(), "level": "write"})
+    host.policy.path.write_text(yaml.safe_dump(raw), encoding="utf-8", newline="\n")
+    assert host.paths.root == real.resolve()
+    add_shared_folder(host, str(chosen), "read")
+    set_main_shared_folder(host, str(chosen))
+    paths = [f["path"] for f in yaml.safe_load(host.policy.path.read_text(encoding="utf-8"))["folders"]]
+    assert "C:/path/to/your/folder" in paths and real.as_posix() in paths

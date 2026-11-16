@@ -5,7 +5,7 @@ import pytest
 
 from codex_bridge.host.policy import Folder, PolicyStore, parse_policy
 from codex_bridge.host.policy_migrate import migrate_v1
-from codex_bridge.host.policy_form import set_folder_level
+from codex_bridge.host.policy_form import add_folder, set_folder_level
 
 
 def v2(tmp_path: Path) -> dict:
@@ -175,3 +175,17 @@ def test_unchanged_duplicate_bad_folders_do_not_block_pause(tmp_path):
         {"path": tmp_path.as_posix(), "level": "hidden"}]}), encoding="utf-8")
     store.update(paused=True)
     assert store.current().paused
+
+
+def test_unrelated_changes_save_with_a_stored_rule_containing_data_dir(tmp_path):
+    store = stored_bad_folder(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    add_folder(store, other.as_posix(), "read")
+    set_folder_level(store, other.as_posix(), "hidden")
+    set_folder_level(store, other.as_posix(), "inherit")
+    store.update(paused=True)
+    store.update(exec_mode="off")
+    assert store.current().paused and store.current().exec_mode == "off"
+    with pytest.raises(ValueError, match="データフォルダ"):
+        add_folder(store, tmp_path.parent.as_posix(), "read")
