@@ -455,6 +455,8 @@ def test_build_makes_one_zip(tmp_path, monkeypatch):
     text = readme.decode("utf-8-sig")
     assert "知人（貸す側）の方へ" in text and "依頼主（使う側）の方へ" in text
     assert "friend-kit" not in text and "v0.2.0" in text
+    assert "docs\\friend-guide.md" in text and "docs\\operation-guide.md" in text
+    assert "\x0c" not in text
 
 
 def test_build_removes_same_version_split_zips_only(tmp_path, monkeypatch):

@@ -28,7 +28,7 @@ README = """codex-bridge v{ver}
   2. 「貸す側」を選ぶ
   3. 依頼主からもらった招待コードを貼る
   ほかのファイルは使いません。
-  詳しくは docs\friend-guide.md を見てください。
+  詳しくは docs\\friend-guide.md を見てください。
 
 ■ 依頼主（使う側）の方へ
   最初に一度だけ
@@ -50,7 +50,7 @@ README = """codex-bridge v{ver}
     start.bat などで起動してから、Claude Code か Codex で「codex-bridge で、○○の開発を依頼して」と頼むだけです。
     管理画面の「Codex に依頼する」欄から直接頼むこともできます。
 
-  詳しくは docs\operation-guide.md を見てください。
+  詳しくは docs\\operation-guide.md を見てください。
 """
 
 
