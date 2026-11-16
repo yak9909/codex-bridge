@@ -10,7 +10,7 @@ import yaml
 
 from codex_bridge.host import main, setup_cli
 from codex_bridge.host.app import build_host, create_local_app, create_public_app
-from codex_bridge.host.config import load_host_config
+from codex_bridge.host.config import effective_share_root, load_host_config
 from codex_bridge.host.paths import ToolError
 from conftest import RG_PATH
 from mcp_helpers import running
@@ -322,23 +322,70 @@ async def test_selection_rejects_separate_install_and_its_private_folders(tmp_pa
         assert host.paths.root is None
 
 
-def test_setup_prompts_for_folder_without_asking_to_reselect(tmp_path, monkeypatch):
-    cfg = config_file(tmp_path)
+def setup_env(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "vendor").mkdir()
+    (tmp_path / "vendor").mkdir(exist_ok=True)
     (tmp_path / "vendor/rg.exe").touch()
     monkeypatch.setattr(setup_cli, "_wait_tailscale_ip", lambda: "100.64.0.1")
     monkeypatch.setattr(setup_cli.st, "firewall_rule_exists", lambda: True)
     monkeypatch.setattr(setup_cli.st, "add_firewall_rule_elevated", lambda: pytest.fail("unexpected firewall change"))
     monkeypatch.setattr(setup_cli.subprocess, "run", lambda *a, **kw: pytest.fail("unexpected subprocess"))
+    monkeypatch.setattr(setup_cli.subprocess, "Popen", lambda *a, **kw: pytest.fail("unexpected process"))
     monkeypatch.setattr(setup_cli.webbrowser, "open", lambda *a: pytest.fail("unexpected browser"))
+    import tkinter
+    monkeypatch.setattr(tkinter, "Tk", lambda *a, **kw: pytest.fail("no folder dialog in setup"))
     questions = []
-    monkeypatch.setattr(setup_cli, "_yes", lambda question, **kwargs: questions.append(question) or False)
-    picked = []
-    monkeypatch.setattr(setup_cli, "_choose_folder", lambda title: picked.append(title))
+    monkeypatch.setattr(setup_cli, "_yes", lambda q, **kw: questions.append(q) or False)
+    return questions
+
+
+def test_setup_writes_unset_share_root(tmp_path, monkeypatch, capsys):
+    cfg = tmp_path / "host.yaml"
+    questions = setup_env(tmp_path, monkeypatch)
     setup_cli.run_setup(cfg)
-    assert len(picked) == 1
-    assert not any("選び直しますか" in q for q in questions)
+    assert "share_root: null" in cfg.read_text(encoding="utf-8")
+    assert effective_share_root(load_host_config(cfg)) is None
+    assert "管理画面で選びます" in capsys.readouterr().out
+    assert not any("フォルダ" in q for q in questions)
+
+
+def test_setup_with_existing_sample_install_leaves_the_host_unset(tmp_path, monkeypatch):
+    cfg = sample_install(tmp_path)
+    policy = tmp_path / "data/policy.yaml"
+    before = policy.read_bytes()
+    setup_env(tmp_path, monkeypatch)
+    setup_cli.run_setup(cfg)
+    assert effective_share_root(load_host_config(cfg)) is None
+    assert policy.read_bytes() == before
+    assert 'public_bind: "100.64.0.1:8765"' in cfg.read_text(encoding="utf-8")
+
+
+def test_setup_keeps_existing_share_root(tmp_path, monkeypatch):
+    share = tmp_path / "share"
+    share.mkdir()
+    cfg = config_file(tmp_path, share.as_posix())
+    cfg.write_text(cfg.read_text(encoding="utf-8") + 'public_bind: "100.1.1.1:8765"\n',
+                   encoding="utf-8", newline="\n")
+    main.ensure_config(cfg)
+    policy = tmp_path / "data/policy.yaml"
+    policy_before = policy.read_bytes()
+    line = next(l for l in cfg.read_text(encoding="utf-8").splitlines() if l.startswith("share_root:"))
+    setup_env(tmp_path, monkeypatch)
+    setup_cli.run_setup(cfg)
+    text = cfg.read_text(encoding="utf-8")
+    assert line in text.splitlines()
+    assert 'public_bind: "100.64.0.1:8765"' in text
+    assert effective_share_root(load_host_config(cfg)) == share.resolve()
+    assert policy.read_bytes() == policy_before
+
+
+def test_setup_does_not_build_friend_kit(tmp_path, monkeypatch, capsys):
+    cfg = tmp_path / "host.yaml"
+    questions = setup_env(tmp_path, monkeypatch)
+    setup_cli.run_setup(cfg)
+    assert not (tmp_path / "friend-kit").exists()
+    assert "friend-kit" not in capsys.readouterr().out + "".join(questions)
+    assert not hasattr(setup_cli, "build_friend_kit")
 
 
 def test_start_explains_admin_setup_and_still_serves(tmp_path, monkeypatch, capsys):
@@ -377,53 +424,6 @@ def sample_install(tmp_path, policy_main=SAMPLE):
         "main": policy_main, "folders": [{"path": SAMPLE, "level": "read"}],
         "exec": {"mode": "allowlist", "allow": ["python scripts/**/*.py *"]}}), encoding="utf-8", newline="\n")
     return cfg
-
-
-def setup_env(tmp_path, monkeypatch, chosen, reselect=False):
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "vendor").mkdir(exist_ok=True)
-    (tmp_path / "vendor/rg.exe").touch()
-    monkeypatch.setattr(setup_cli, "_wait_tailscale_ip", lambda: "100.64.0.1")
-    monkeypatch.setattr(setup_cli.st, "firewall_rule_exists", lambda: True)
-    monkeypatch.setattr(setup_cli.subprocess, "run", lambda *a, **kw: pytest.fail("unexpected subprocess"))
-    monkeypatch.setattr(setup_cli.webbrowser, "open", lambda *a: pytest.fail("unexpected browser"))
-    questions = []
-    monkeypatch.setattr(setup_cli, "_yes", lambda q, **kw: questions.append(q) or (reselect and "選び直し" in q))
-    monkeypatch.setattr(setup_cli, "_choose_folder", lambda title: chosen)
-    return questions
-
-
-def test_setup_choice_takes_effect_with_existing_sample_policy(tmp_path, monkeypatch):
-    cfg = sample_install(tmp_path)
-    chosen = tmp_path / "chosen"
-    chosen.mkdir()
-    questions = setup_env(tmp_path, monkeypatch, chosen)
-    setup_cli.run_setup(cfg)
-    assert not any("選び直し" in q for q in questions)
-    host = build_host(load_host_config(cfg), config_path=cfg)
-    assert host.paths.root == chosen.resolve()
-    folders = yaml.safe_load((tmp_path / "data/policy.yaml").read_text(encoding="utf-8"))["folders"]
-    assert folders == [{"path": chosen.as_posix(), "level": "read"}]
-
-
-def test_setup_reselect_replaces_real_main_and_keeps_other_folders(tmp_path, monkeypatch):
-    old, other, chosen = (tmp_path / n for n in ("old", "other", "chosen"))
-    for d in (old, other, chosen):
-        d.mkdir()
-    cfg = config_file(tmp_path, old.as_posix())
-    data = tmp_path / "data"
-    data.mkdir()
-    (data / "policy.yaml").write_text(yaml.safe_dump({"main": old.as_posix(), "folders": [
-        {"path": old.as_posix(), "level": "write"}, {"path": other.as_posix(), "level": "read"}]}),
-        encoding="utf-8", newline="\n")
-    questions = setup_env(tmp_path, monkeypatch, chosen, reselect=True)
-    setup_cli.run_setup(cfg)
-    assert any("選び直し" in q for q in questions)
-    host = build_host(load_host_config(cfg), config_path=cfg)
-    assert host.paths.root == chosen.resolve()
-    saved = yaml.safe_load((data / "policy.yaml").read_text(encoding="utf-8"))["folders"]
-    assert {f["path"]: f["level"] for f in saved} == {
-        old.as_posix(): "write", other.as_posix(): "read", chosen.as_posix(): "read"}
 
 
 def test_effective_share_root_follows_the_policy_main(tmp_path):
@@ -466,10 +466,12 @@ def test_start_and_setup_trust_the_policy_main_not_a_sample_host_yaml(tmp_path, 
     monkeypatch.setattr(main, "serve", serve)
     setup_cli.run_start(cfg)
     assert MESSAGE not in capsys.readouterr().out
-    questions = setup_env(tmp_path, monkeypatch, None)
+    policy = tmp_path / "data/policy.yaml"
+    before = policy.read_bytes()
+    setup_env(tmp_path, monkeypatch)
     setup_cli.run_setup(cfg)
-    assert any("選び直し" in q for q in questions)
-    assert str(real.resolve()) in capsys.readouterr().out
+    assert policy.read_bytes() == before
+    assert effective_share_root(load_host_config(cfg)) == real.resolve()
 
 
 async def test_removing_the_main_folder_keeps_host_yaml_in_step(tmp_path):

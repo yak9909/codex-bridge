@@ -412,43 +412,6 @@ def test_agent_relaunch_releases_marker_before_starting_same_role(launch, monkey
     assert len(events) == 2
 
 
-def test_friend_kit_contains_unified_exe_and_guide(tmp_path, monkeypatch):
-    from codex_bridge.host import setup_cli
-
-    (tmp_path / "codex-bridge.exe").write_bytes(b"test executable")
-    (tmp_path / "docs").mkdir()
-    (tmp_path / "docs" / "friend-guide.md").write_text("test guide", encoding="utf-8")
-    build = Mock(side_effect=AssertionError("must use the shipped exe"))
-    browser = Mock()
-    monkeypatch.setattr(setup_cli.subprocess, "run", build)
-    monkeypatch.setattr(setup_cli.os, "startfile", browser, raising=False)
-    kit = setup_cli.build_friend_kit(tmp_path, open_folder=False)
-    assert kit == tmp_path / "friend-kit"
-    assert sorted(path.name for path in kit.iterdir()) == ["codex-bridge.exe", "使い方.md"]
-    assert (kit / "codex-bridge.exe").read_bytes() == b"test executable"
-    assert (kit / "使い方.md").read_text(encoding="utf-8") == "test guide"
-    build.assert_not_called()
-    browser.assert_not_called()
-
-
-def test_friend_kit_source_build_uses_unified_spec(tmp_path, monkeypatch):
-    from codex_bridge.host import setup_cli
-
-    (tmp_path / "docs").mkdir()
-    (tmp_path / "docs" / "friend-guide.md").write_text("guide", encoding="utf-8")
-
-    def build(argv, **kwargs):
-        assert argv == [sys.executable, "-m", "PyInstaller", "--noconfirm", str(tmp_path / "codex-bridge.spec")]
-        assert kwargs["cwd"] == tmp_path
-        (tmp_path / "dist").mkdir()
-        (tmp_path / "dist" / "codex-bridge.exe").write_bytes(b"fake built exe")
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(setup_cli.subprocess, "run", build)
-    kit = setup_cli.build_friend_kit(tmp_path, open_folder=False)
-    assert (kit / "codex-bridge.exe").read_bytes() == b"fake built exe"
-
-
 def test_release_packages_one_exe_and_preserves_existing_releases(tmp_path, monkeypatch):
     script = Path(__file__).resolve().parents[1] / "scripts" / "build_release.py"
     build = runpy.run_path(str(script))["main"]

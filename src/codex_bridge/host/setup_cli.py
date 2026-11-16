@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import shutil
 import subprocess
-import sys
 import threading
 import time
 import urllib.request
@@ -36,19 +33,6 @@ def _yes(question: str, default: bool = True) -> bool:
     return default if not ans else ans in ("y", "yes", "はい")
 
 
-def _choose_folder(title: str) -> Path | None:
-    import tkinter as tk
-    from tkinter import filedialog
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    try:
-        chosen = filedialog.askdirectory(title=title, mustexist=True)
-    finally:
-        root.destroy()
-    return Path(chosen) if chosen else None
-
-
 def _wait_tailscale_ip() -> str:
     while True:
         ip = st.tailscale_ip()
@@ -64,28 +48,10 @@ def _wait_tailscale_ip() -> str:
 
 
 # ---- setup.bat ---------------------------------------------------------------
-def _apply_choice_to_policy(config_path: Path, share: Path, *, was_unset: bool) -> None:
-    """An existing policy.yaml owns the main folder, so the chosen folder has to go there too.
-
-    (A missing policy.yaml is written by ensure_config from the new host.yaml.)"""
-    from .policy import PolicyStore
-    from .share import choose_main_in_policy
-
-    cfg = load_host_config(config_path)  # data_dir may have moved out of the shared folder
-    policy = cfg.data_dir / "policy.yaml"
-    if not policy.exists():
-        return
-    try:
-        choose_main_in_policy(PolicyStore(policy, share_root=cfg.share_root), share, drop_sample=was_unset)
-    except ValueError as e:
-        _say(f"権限の規則に反映できませんでした: {e}")
-        _say("  起動したあと、管理画面の「フォルダを選ぶ」でもう一度選んでください。")
-
-
-def run_setup(config_path: Path) -> None:
+def run_setup(config_path: Path, *, then_start: bool = False) -> None:
     root = Path.cwd()
     config_path = Path(config_path).resolve()
-    total = 6
+    total = 5
     _say("codex-bridge の初期設定を始めます。質問には Enter だけで答えれば、おすすめの設定になります。")
 
     _step(1, total, "Tailscale の確認")
@@ -99,30 +65,12 @@ def run_setup(config_path: Path) -> None:
         subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                         str(root / "scripts" / "fetch_rg.ps1")], check=False)
 
-    _step(3, total, "共有フォルダ（Codex に触らせるフォルダ）")
-    choose = True
-    current = None
-    if config_path.exists():
-        current = effective_share_root(load_host_config(config_path))
-        if current is not None:
-            _say(f"今の共有フォルダ: {current}")
-            choose = _yes("共有フォルダを選び直しますか？", default=False)
-    if choose:
-        share = None
-        while share is None:
-            _say("フォルダを選ぶ画面を開きます（ほかのウィンドウの後ろに隠れていたら、タスクバーを確認してください）。")
-            share = _choose_folder("Codex に触らせるフォルダを選んでください")
-            if share is None and not _yes("フォルダが選ばれませんでした。もう一度選びますか？"):
-                _say("初期設定を中止しました。")
-                return
-        data_dir = root / "data"
-        if st.inside(data_dir, share):
-            data_dir = Path(os.environ["LOCALAPPDATA"]) / "codex-bridge-host" / "data"
-        st.write_host_config(config_path, share_root=share, data_dir=data_dir, ip=ip)
-        _say(f"共有フォルダを {share} にしました。")
-        _apply_choice_to_policy(config_path, share, was_unset=current is None)
+    _step(3, total, "設定ファイルと権限の規則")
+    if not config_path.exists():
+        st.write_host_config(config_path, share_root=None, data_dir=root / "data", ip=ip)
     elif st.update_public_bind(config_path, ip):
         _say("Tailscale の IP が変わっていたので、設定を更新しました。招待コードは発行し直してください。")
+    _say("共有フォルダ（Codex に触らせるフォルダ）は、起動したあとの管理画面で選びます。")
 
     from .main import ensure_config
     ensure_config(config_path)
@@ -143,16 +91,13 @@ def run_setup(config_path: Path) -> None:
         _say("設定できました。" if st.add_firewall_rule_elevated() else
              "設定できませんでした。あとで setup.bat をもう一度実行してください。")
 
-    _step(5, total, "知人に渡す一式（friend-kit フォルダ）を作る")
-    if _yes("今、作りますか？"):
-        build_friend_kit(root)
-
-    _step(6, total, "完了")
+    _step(5, total, "完了")
     _say("初期設定が終わりました。次にやること:")
     _say("  1. install-mcp.bat を実行して、Claude Code / Codex から codex-bridge を使えるようにする")
-    _say("  2. start.bat をダブルクリックして codex-bridge を起動する（管理画面が開きます）")
-    _say("  3. 管理画面の「招待コード」で発行し、friend-kit フォルダの中身と一緒に知人に渡す")
-    _say("  4. Tailscale の管理画面でこの PC を知人と共有する（この画面を開きます）")
+    _say("  2. start.bat（または exe をダブルクリックして「使う側」）で codex-bridge を起動する（管理画面が開きます）")
+    _say("  3. 管理画面で共有フォルダを選ぶ")
+    _say("  4. 管理画面の「招待コード」を発行し、同じ zip と一緒に知人に渡す（知人は exe をダブルクリックして「貸す側」）")
+    _say("  5. Tailscale の管理画面でこの PC を知人と共有する（この画面を開きます）")
     _say("     → この PC の行の「…」→「Share...」→ リンクをコピーして知人に送る")
     if _yes("Tailscale の管理画面を開きますか？"):
         webbrowser.open("https://login.tailscale.com/admin/machines")
@@ -173,27 +118,6 @@ def run_install_mcp(config_path: Path) -> None:
     _say("使い方: start.bat で codex-bridge を起動してから、Claude Code か Codex で新しい会話を始め、")
     _say("  「codex-bridge で、○○の開発を依頼して」のように頼んでください。")
     _say("  エージェントが共有フォルダを確かめ、知人の Codex に依頼し、結果を確認して報告します。")
-
-
-def build_friend_kit(root: Path, open_folder: bool = True) -> Path | None:
-    exe = root / "codex-bridge.exe"  # shipped next to setup.bat in the released admin zip
-    if not exe.exists():
-        spec = root / "codex-bridge.spec"
-        r = subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", str(spec)], cwd=root,
-                           capture_output=True, text=True)
-        exe = root / "dist" / "codex-bridge.exe"
-        if r.returncode != 0 or not exe.exists():
-            _say("作れませんでした。詳しくは次の内容を確認してください:")
-            _say((r.stderr or r.stdout)[-2000:])
-            return None
-    kit = root / "friend-kit"
-    kit.mkdir(exist_ok=True)
-    shutil.copy2(exe, kit / exe.name)
-    shutil.copy2(root / "docs" / "friend-guide.md", kit / "使い方.md")
-    _say(f"できました: {kit}")
-    if open_folder:
-        os.startfile(kit)
-    return kit
 
 
 # ---- start.bat ---------------------------------------------------------------

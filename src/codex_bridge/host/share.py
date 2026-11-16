@@ -148,16 +148,6 @@ def drop_sample_folders(store) -> list[Path]:
     return dropped
 
 
-def choose_main_in_policy(store, folder: Path, *, drop_sample: bool) -> None:
-    """Setup path: make `folder` readable and the main folder of an existing policy.yaml."""
-    target = _abs(str(folder))
-    if store.current().level_for_abs(Path(target)) not in ("read", "write"):
-        add_folder(store, target, "read")  # same level the first policy gives a chosen folder
-    set_main_folder(store, target)
-    if drop_sample:
-        drop_sample_folders(store)
-
-
 def change_share_root(host, new_path: str) -> Path:
     """v0.1 name: share this folder (writable) and make it the main folder."""
     p = _guard(host, new_path)

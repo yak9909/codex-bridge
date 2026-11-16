@@ -45,12 +45,13 @@ def tailscale_ip(run=subprocess.run) -> str | None:
 
 
 # ---- host.yaml ---------------------------------------------------------------
-def write_host_config(path: Path, share_root: Path, data_dir: Path, ip: str,
+def write_host_config(path: Path, share_root: Path | None, data_dir: Path, ip: str,
                       port: int = PUBLIC_PORT, local_port: int = 8770, rg_path: str = "vendor/rg.exe") -> None:
+    share_line = "null" if share_root is None else json.dumps(Path(share_root).as_posix(), ensure_ascii=False)
     text = (
         "# codex-bridge host settings (made by setup.bat)\n"
-        "# share_root: the folder the friend's Codex may work in\n"
-        f"share_root: {json.dumps(Path(share_root).as_posix(), ensure_ascii=False)}\n"
+        "# share_root: the folder the friend's Codex may work in (choose it on the admin page)\n"
+        f"share_root: {share_line}\n"
         "# data_dir: logs, snapshots, tokens (must be OUTSIDE share_root)\n"
         f"data_dir: {json.dumps(Path(data_dir).as_posix(), ensure_ascii=False)}\n"
         "# public_bind: this PC's Tailscale IP (start.bat updates it if the IP changes)\n"
