@@ -145,12 +145,88 @@ def test_choose_role_clicks_anywhere_on_card(tk_root, monkeypatch, index, role, 
         cards = [w for w in tk_root.winfo_children() if w.winfo_class() == "Frame"]
         card = cards[index]
         target = card if part == "frame" else card.winfo_children()[part == "description"]
-        target.event_generate("<Button-1>")
+        x, y = target.winfo_width() // 2, target.winfo_height() // 2
+        target.event_generate("<ButtonPress-1>", x=x, y=y)
+        target.event_generate("<ButtonRelease-1>", x=x, y=y)
 
     tk_root.after(80, click)
     tk_root.after(1000, tk_root.quit)  # A broken binding must fail, never hang pytest.
     assert launcher.choose_role() == role
     tk_root.destroy.assert_called_once_with()
+
+
+@pytest.mark.parametrize("index", [0, 1])
+@pytest.mark.parametrize("part", ["frame", "title", "description"])
+def test_card_mouse_press_waits_for_release(tk_root, index, part):
+    chooser = launcher._RoleChooser(tk_root)
+    tk_root.update()
+    card = chooser.cards[index]
+    target = card if part == "frame" else card.winfo_children()[part == "description"]
+    target.event_generate("<ButtonPress-1>", x=target.winfo_width() // 2,
+                          y=target.winfo_height() // 2)
+    assert chooser.selection.role is None
+    assert not chooser.selection.finished
+
+
+@pytest.mark.parametrize("index", [0, 1])
+@pytest.mark.parametrize("location", ["left", "right", "above", "below", "other_card",
+                                     "other_card_widget"])
+def test_card_mouse_release_outside_cancels_and_clears_press(tk_root, index, location):
+    chooser = launcher._RoleChooser(tk_root)
+    tk_root.update()
+    card = chooser.cards[index]
+    target = card.winfo_children()[1]
+    x, y = target.winfo_width() // 2, target.winfo_height() // 2
+    target.event_generate("<ButtonPress-1>", x=x, y=y)
+    left, top = card.winfo_rootx(), card.winfo_rooty()
+    right, bottom = left + card.winfo_width(), top + card.winfo_height()
+    other = chooser.cards[1 - index]
+    release_x, release_y = {
+        "left": (left - 1, (top + bottom) // 2),
+        "right": (right, (top + bottom) // 2),
+        "above": ((left + right) // 2, top - 1),
+        "below": ((left + right) // 2, bottom),
+        "other_card": (other.winfo_rootx() + other.winfo_width() // 2,
+                       other.winfo_rooty() + other.winfo_height() // 2),
+        "other_card_widget": (other.winfo_rootx() + other.winfo_width() // 2,
+                              other.winfo_rooty() + other.winfo_height() // 2),
+    }[location]
+    target.event_generate("<B1-Motion>", x=release_x - target.winfo_rootx(),
+                          y=release_y - target.winfo_rooty())
+    recipient = other if location == "other_card_widget" else target
+    recipient.event_generate("<ButtonRelease-1>", x=release_x - recipient.winfo_rootx(),
+                             y=release_y - recipient.winfo_rooty())
+    assert chooser.selection.role is None
+    assert not chooser.selection.finished
+    target.event_generate("<ButtonRelease-1>", x=x, y=y)
+    assert chooser.selection.role is None
+    assert not chooser.selection.finished
+
+
+@pytest.mark.parametrize("index,role", [(0, "host"), (1, "agent")])
+def test_card_drag_back_inside_and_release_on_another_child(tk_root, index, role):
+    chooser = launcher._RoleChooser(tk_root)
+    tk_root.update()
+    card = chooser.cards[index]
+    title, description = card.winfo_children()
+    title.event_generate("<ButtonPress-1>", x=title.winfo_width() // 2,
+                         y=title.winfo_height() // 2)
+    title.event_generate("<B1-Motion>", x=-card.winfo_width(), y=0)
+    description.event_generate("<ButtonRelease-1>", x=description.winfo_width() // 2,
+                               y=description.winfo_height() // 2)
+    assert chooser.selection.role == role
+    assert chooser.selection.finished
+
+
+@pytest.mark.parametrize("index", [0, 1])
+def test_card_mouse_release_without_press_does_not_choose(tk_root, index):
+    chooser = launcher._RoleChooser(tk_root)
+    tk_root.update()
+    card = chooser.cards[index]
+    card.event_generate("<ButtonRelease-1>", x=card.winfo_width() // 2,
+                        y=card.winfo_height() // 2)
+    assert chooser.selection.role is None
+    assert not chooser.selection.finished
 
 
 @pytest.mark.parametrize("events,role", [(["<Return>"], "host"),
@@ -189,6 +265,7 @@ def test_card_layout_fonts_hover_focus_and_center(tk_root, scaling):
     tk_root.tk.call("tk", "scaling", scaling)
     chooser = launcher._RoleChooser(tk_root)
     tk_root.update()
+    assert tk_root.winfo_width() >= round(340 * scaling / (96 / 72)) - 2
     cards = chooser.cards
     assert len(cards) == 2
     assert [tuple(label.cget("text") for label in card.winfo_children()) for card in cards] == [
@@ -208,6 +285,9 @@ def test_card_layout_fonts_hover_focus_and_center(tk_root, scaling):
         for label in (title, description):
             assert label.winfo_width() >= label.winfo_reqwidth()
             assert label.winfo_height() >= label.winfo_reqheight()
+            assert label.winfo_x() >= tk_root.winfo_pixels("14p")
+        text_right = description.winfo_x() + description_font.measure(description.cget("text"))
+        assert card.winfo_width() - text_right >= tk_root.winfo_pixels("14p")
         before = card.cget("bg")
         card.winfo_children()[1].event_generate("<Enter>")
         assert card.cget("bg") != before

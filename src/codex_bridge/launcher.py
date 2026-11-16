@@ -85,6 +85,7 @@ class _RoleChooser:
         self.selection = _RoleSelection()
         self.cards = []
         self.hovered: int | None = None
+        self.pressed: int | None = None
         root.withdraw()
         root.title("codex-bridge")
         root.resizable(False, False)
@@ -104,7 +105,8 @@ class _RoleChooser:
             tk.Label(card, text=description, font=self.body_font, fg="#626b78", anchor="w",
                      bd=0).pack(fill="x", padx="14p", pady=(0, "12p"))
             for widget in (card, *card.winfo_children()):
-                widget.bind("<Button-1>", lambda event, i=index: self._choose(i))
+                widget.bind("<ButtonPress-1>", lambda event, i=index: self._press(i))
+                widget.bind("<ButtonRelease-1>", lambda event, i=index: self._release(event, i))
                 widget.bind("<Enter>", lambda event, i=index: self._hover(i))
                 widget.bind("<Leave>", lambda event: self._hover(None))
             card.bind("<FocusIn>", lambda event, i=index: self._select(i))
@@ -114,10 +116,12 @@ class _RoleChooser:
         root.protocol("WM_DELETE_WINDOW", self._cancel)
         self._refresh()
         root.update_idletasks()
-        width, height = root.winfo_reqwidth(), root.winfo_reqheight()
+        # 255 points is about 340px at 100%; Tk scales it along with the padding.
+        width = max(root.winfo_reqwidth(), root.winfo_pixels("255p"))
+        height = root.winfo_reqheight()
+        root.minsize(width, height)
         x = max(0, (root.winfo_screenwidth() - width) // 2)
         y = max(0, (root.winfo_screenheight() - height) // 2)
-        # Let fonts and point-based spacing determine size; only position is explicit.
         root.geometry(f"+{x}+{y}")
         _set_icon(root, Path(__file__).with_name("assets") / "codex-bridge.ico")
         root.deiconify()
@@ -138,6 +142,19 @@ class _RoleChooser:
     def _select(self, index: int) -> None:
         self.selection.selected = index
         self._refresh()
+
+    def _press(self, index: int) -> None:
+        self.pressed = index
+
+    def _release(self, event, index: int) -> None:
+        pressed = self.pressed
+        self.pressed = None
+        if pressed != index:
+            return
+        card = self.cards[index]
+        x, y = event.x_root - card.winfo_rootx(), event.y_root - card.winfo_rooty()
+        if 0 <= x < card.winfo_width() and 0 <= y < card.winfo_height():
+            self._choose(index)
 
     def _choose(self, index: int) -> None:
         self.selection.choose(index)
