@@ -7,6 +7,7 @@ from ctypes import wintypes
 import os
 from pathlib import Path
 import sys
+import traceback
 import webbrowser
 
 from .launcher import choose_role
@@ -14,17 +15,48 @@ from .launcher import choose_role
 _agent_handle: int | None = None
 
 
-def attach_console() -> None:
-    """Give the windowed executable a parent console, or a new console for a double click."""
+def attach_console() -> bool:
+    """Show our hidden console, preserve an inherited console, and report whether we own it."""
     if sys.platform != "win32":
-        return
+        return False
     kernel = ctypes.windll.kernel32
-    if not kernel.AttachConsole(-1):
-        if not kernel.AllocConsole() and kernel.GetLastError() != 5:  # already attached
+    kernel.GetConsoleWindow.argtypes = []
+    kernel.GetConsoleWindow.restype = wintypes.HWND
+    kernel.GetConsoleProcessList.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD]
+    kernel.GetConsoleProcessList.restype = wintypes.DWORD
+    window = kernel.GetConsoleWindow()
+    owned = False
+    # console=True normally provides the correct console before Python starts,
+    # including in onefile builds. Retain a fallback for launches without one.
+    if not window:
+        if not kernel.AttachConsole(-1):
+            if not kernel.AllocConsole():
+                raise ctypes.WinError()
+            owned = True
+        window = kernel.GetConsoleWindow()
+    if not owned:
+        # A double-clicked onefile console contains only Python and its bootloader.
+        # A shell (or any other process) sharing it means it belongs to the caller.
+        pids = (wintypes.DWORD * 2)()
+        count = kernel.GetConsoleProcessList(pids, len(pids))
+        if not count:
             raise ctypes.WinError()
-    sys.stdout = open("CONOUT$", "w", encoding="utf-8", buffering=1)
-    sys.stderr = open("CONOUT$", "w", encoding="utf-8", buffering=1)
-    sys.stdin = open("CONIN$", "r", encoding="utf-8")
+        own_pids = {os.getpid()}
+        if getattr(sys, "frozen", False):
+            own_pids.add(os.getppid())
+        owned = count <= len(pids) and set(pids[:count]) <= own_pids
+    if owned and window:
+        show_window = ctypes.windll.user32.ShowWindow
+        show_window.argtypes = [wintypes.HWND, ctypes.c_int]
+        show_window.restype = wintypes.BOOL
+        show_window(window, 5)  # SW_SHOW; hide-early only hides an owned console
+    # Do not replace redirected files/pipes, or usable console streams.
+    for name, device, mode in (("stdout", "CONOUT$", "w"), ("stderr", "CONOUT$", "w"),
+                               ("stdin", "CONIN$", "r")):
+        stream = getattr(sys, name)
+        if stream is None or stream.closed:
+            setattr(sys, name, open(device, mode, encoding="utf-8", buffering=1))
+    return owned
 
 
 def acquire_agent_instance() -> tuple[bool, int | None]:
@@ -68,9 +100,16 @@ def _run_agent() -> int:
     return 0
 
 
-def _run_host(argv: list[str], directory: Path | None = None) -> int:
-    attach_console()
-    from .host.main import main
+def _wait_before_close() -> None:
+    try:
+        input("Enter キーを押すと閉じます。")
+    except (EOFError, OSError):
+        pass  # unavailable input must not replace the host's error status
+
+
+def _run_host(argv: list[str], directory: Path | None = None, *, from_dialog: bool = False) -> int:
+    owned = attach_console()
+    pause_on_error = from_dialog and owned
     previous_argv = sys.argv
     previous_cwd = Path.cwd()
     try:
@@ -78,7 +117,20 @@ def _run_host(argv: list[str], directory: Path | None = None) -> int:
             os.chdir(directory)
         # The existing development entry reads argparse's arguments from sys.argv.
         sys.argv = [previous_argv[0], *argv]
+        from .host.main import main
         main()
+    except SystemExit as error:
+        if pause_on_error and error.code:
+            if not isinstance(error.code, int):
+                print(error.code, file=sys.stderr)
+            _wait_before_close()
+        raise
+    except Exception:
+        if not pause_on_error:
+            raise
+        traceback.print_exc()
+        _wait_before_close()
+        return 1
     finally:
         sys.argv = previous_argv
         if directory is not None:
@@ -96,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
             directory = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
                          else Path.cwd())
             command = "start" if (directory / "host.yaml").exists() else "setup"
-            return _run_host([command, "--config", "host.yaml"], directory)
+            return _run_host([command, "--config", "host.yaml"], directory, from_dialog=True)
         return _run_agent()
     if argv[0] == "host":
         return _run_host(argv[1:])

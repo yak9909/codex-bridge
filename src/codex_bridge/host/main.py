@@ -82,7 +82,7 @@ async def serve(config_path: Path) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(prog="codex-bridge-host")
+    ap = argparse.ArgumentParser(prog="codex-bridge host")
     ap.add_argument("command", nargs="?", default="serve", choices=["serve", "setup", "start", "stop", "install-mcp"])
     ap.add_argument("--config", default="host.yaml", type=Path)
     args = ap.parse_args()

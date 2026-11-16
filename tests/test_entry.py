@@ -1,5 +1,7 @@
 """Unified entry point; no test may open a real window, console or browser."""
 
+import ast
+import io
 import sys
 import runpy
 import zipfile
@@ -24,7 +26,7 @@ def launch(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(install / "codex-bridge.exe"))
     dialog = Mock(return_value=None)
-    console = Mock()
+    console = Mock(return_value=False)
     agent = Mock()
     browser = Mock()
     calls = []
@@ -35,6 +37,7 @@ def launch(tmp_path, monkeypatch):
     monkeypatch.setattr(host_main, "main", host)
     monkeypatch.setattr(agent_main, "main", agent)
     monkeypatch.setattr(entry.webbrowser, "open", browser)
+    monkeypatch.setattr(entry, "input", Mock(side_effect=AssertionError("unexpected pause")), raising=False)
     return SimpleNamespace(install=install, elsewhere=elsewhere, dialog=dialog, console=console,
                            agent=agent, host=host, browser=browser, calls=calls)
 
@@ -133,23 +136,165 @@ def test_host_error_restores_process_state(launch):
     assert Path.cwd() == launch.elsewhere
 
 
-@pytest.mark.parametrize("attached", [True, False])
-def test_console_attaches_or_allocates_and_reopens_streams(monkeypatch, attached):
-    kernel = SimpleNamespace(AttachConsole=Mock(return_value=attached), AllocConsole=Mock(return_value=True))
-    monkeypatch.setattr(entry.ctypes, "windll", SimpleNamespace(kernel32=kernel), raising=False)
-    monkeypatch.setattr(entry.sys, "platform", "win32")
-    streams = [Mock(), Mock(), Mock()]
-    opened = Mock(side_effect=streams)
+@pytest.fixture
+def console_api(monkeypatch):
+    def processes(buffer, capacity):
+        for index, pid in enumerate(state.pids[:capacity]):
+            buffer[index] = pid
+        return len(state.pids)
+
+    kernel = SimpleNamespace(GetConsoleWindow=Mock(return_value=123),
+                             GetConsoleProcessList=Mock(side_effect=processes),
+                             AttachConsole=Mock(return_value=True), AllocConsole=Mock(return_value=True))
+    user = SimpleNamespace(ShowWindow=Mock())
+    monkeypatch.setattr(entry.ctypes, "windll", SimpleNamespace(kernel32=kernel, user32=user), raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(entry.os, "getpid", lambda: 102)
+    monkeypatch.setattr(entry.os, "getppid", lambda: 101)
+    # Real in-memory streams stand in for valid redirected stdout/stderr/stdin.
+    streams = [io.StringIO(), io.StringIO(), io.StringIO("redirected input\n")]
+    def redirect_streams():
+        # Set streams during the test call; pytest resets its capture after fixture setup.
+        for name, stream in zip(("stdout", "stderr", "stdin"), streams):
+            monkeypatch.setattr(sys, name, stream)
+    opened = Mock(side_effect=AssertionError("must preserve valid standard streams"))
     monkeypatch.setattr(entry, "open", opened, raising=False)
-    # Make stream replacement reversible even when pytest is capturing output.
-    for name in ("stdout", "stderr", "stdin"):
-        monkeypatch.setattr(sys, name, getattr(sys, name))
-    entry.attach_console()
-    kernel.AttachConsole.assert_called_once_with(-1)
-    assert kernel.AllocConsole.call_count == (0 if attached else 1)
-    assert [(call.args[0], call.args[1]) for call in opened.call_args_list] == [
-        ("CONOUT$", "w"), ("CONOUT$", "w"), ("CONIN$", "r")]
-    assert [sys.stdout, sys.stderr, sys.stdin] == streams
+    state = SimpleNamespace(kernel=kernel, user=user, pids=[100, 101, 102], streams=streams, opened=opened,
+                            redirect_streams=redirect_streams)
+    return state
+
+
+def test_inherited_console_preserves_window_and_redirection(console_api):
+    console_api.redirect_streams()
+    assert entry.attach_console() is False
+    console_api.kernel.AttachConsole.assert_not_called()
+    console_api.kernel.AllocConsole.assert_not_called()
+    console_api.user.ShowWindow.assert_not_called()
+    console_api.opened.assert_not_called()
+    print("redirected output")
+    assert sys.stdout.getvalue() == "redirected output\n"
+    assert input() == "redirected input"
+
+
+def test_owned_onefile_console_is_shown_without_allocating(console_api):
+    # Explorer -> bootloader (101) -> Python (102); there is no shell sharing this console.
+    console_api.pids = [101, 102]
+    assert entry.attach_console() is True
+    console_api.user.ShowWindow.assert_called_once_with(123, 5)  # SW_SHOW
+    console_api.kernel.AttachConsole.assert_not_called()
+    console_api.kernel.AllocConsole.assert_not_called()
+    console_api.opened.assert_not_called()
+
+
+def test_source_console_shared_with_parent_is_not_owned(console_api, monkeypatch):
+    monkeypatch.setattr(sys, "frozen", False)
+    console_api.pids = [101, 102]
+    assert entry.attach_console() is False
+    console_api.user.ShowWindow.assert_not_called()
+
+
+@pytest.mark.parametrize("attached", [True, False])
+def test_missing_console_attaches_before_allocating(console_api, attached):
+    console_api.kernel.GetConsoleWindow.side_effect = [0, 123]
+    console_api.kernel.AttachConsole.return_value = attached
+    assert entry.attach_console() is (not attached)
+    console_api.kernel.AttachConsole.assert_called_once_with(-1)
+    assert console_api.kernel.AllocConsole.call_count == int(not attached)
+    assert console_api.user.ShowWindow.call_count == int(not attached)
+    console_api.opened.assert_not_called()
+
+
+@pytest.mark.parametrize("invalid", ["missing", "closed"])
+def test_only_invalid_standard_streams_are_reopened(console_api, monkeypatch, invalid):
+    console_api.redirect_streams()
+    broken = None if invalid == "missing" else io.StringIO()
+    if broken is not None:
+        broken.close()
+    monkeypatch.setattr(sys, "stderr", broken)
+    replacement = io.StringIO()
+    console_api.opened.side_effect = None
+    console_api.opened.return_value = replacement
+    assert entry.attach_console() is False
+    console_api.opened.assert_called_once_with("CONOUT$", "w", encoding="utf-8", buffering=1)
+    assert sys.stderr is replacement
+    assert sys.stdout is console_api.streams[0]
+    assert sys.stdin is console_api.streams[2]
+
+
+@pytest.mark.parametrize("from_dialog,owned,waits", [(True, True, True), (True, False, False),
+                                                   (False, True, False), (False, False, False)])
+def test_host_error_pauses_only_for_dialog_with_owned_console(launch, monkeypatch, from_dialog, owned, waits):
+    launch.console.return_value = owned
+    launch.dialog.return_value = "host"
+    launch.host.side_effect = SystemExit(3)
+    pause = Mock(return_value="")
+    monkeypatch.setattr(entry, "input", pause)
+    with pytest.raises(SystemExit) as error:
+        entry.main([] if from_dialog else ["host", "start"])
+    assert error.value.code == 3
+    if waits:
+        pause.assert_called_once_with("Enter キーを押すと閉じます。")
+    else:
+        pause.assert_not_called()
+
+
+@pytest.mark.parametrize("exit_code", [None, 0])
+def test_successful_host_exit_does_not_pause(launch, exit_code):
+    launch.dialog.return_value = "host"
+    launch.console.return_value = True
+    launch.host.side_effect = SystemExit(exit_code)
+    with pytest.raises(SystemExit):
+        entry.main([])
+
+
+def test_dialog_traceback_is_visible_before_waiting(launch, monkeypatch, capsys):
+    launch.dialog.return_value = "host"
+    launch.console.return_value = True
+    launch.host.side_effect = RuntimeError("host failed")
+
+    def wait(prompt):
+        assert prompt == "Enter キーを押すと閉じます。"
+        assert "RuntimeError: host failed" in capsys.readouterr().err
+
+    pause = Mock(side_effect=wait)
+    monkeypatch.setattr(entry, "input", pause)
+    previous_argv = sys.argv
+    assert entry.main([]) == 1
+    pause.assert_called_once()
+    assert sys.argv is previous_argv
+    assert Path.cwd() == launch.elsewhere
+
+
+def test_dialog_pause_eof_keeps_original_exit_status(launch, monkeypatch):
+    launch.dialog.return_value = "host"
+    launch.console.return_value = True
+    launch.host.side_effect = SystemExit(3)
+    monkeypatch.setattr(entry, "input", Mock(side_effect=EOFError))
+    with pytest.raises(SystemExit) as error:
+        entry.main([])
+    assert error.value.code == 3
+
+
+@pytest.mark.parametrize("argument,code,stream", [("--help", 0, "out"), ("bad-command", 2, "err")])
+def test_host_help_and_errors_use_unified_command(monkeypatch, capsys, argument, code, stream):
+    monkeypatch.setattr(sys, "argv", ["codex-bridge.exe", argument])
+    with pytest.raises(SystemExit) as error:
+        host_main.main()
+    assert error.value.code == code
+    output = getattr(capsys.readouterr(), stream)
+    assert "codex-bridge host" in output
+    assert "codex-bridge-host" not in output
+
+
+def test_onefile_uses_native_console_with_early_hiding():
+    path = Path(__file__).resolve().parents[1] / "codex-bridge.spec"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    exe = next(node for node in ast.walk(tree)
+               if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "EXE")
+    options = {option.arg: ast.literal_eval(option.value) for option in exe.keywords}
+    assert options["console"] is True
+    assert options["hide_console"] == "hide-early"
 
 
 def test_agent_instance_handle_closes_on_runner_failure(launch, monkeypatch):

@@ -34,6 +34,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     name="codex-bridge",
-    console=False,
+    console=True,
+    hide_console="hide-early",
     upx=False,
 )
