@@ -75,7 +75,7 @@ function lenderRow(l, i) {
   const lim = l.limits;
   const pct = (v) => (v == null ? "なし" : `${esc(v)}%`);
   const limits = !lim ? "—" : lim.five_hour == null && lim.weekly == null ? "なし"
-    : `5 時間枠 ${pct(lim.five_hour)}<br>週間枠 ${pct(lim.weekly)}<div class="small">超えたら${lim.force ? "すぐ止める" : "区切りで止める"}</div>`;
+    : `5 時間枠 ${pct(lim.five_hour)}<br>週間枠 ${pct(lim.weekly)}<div class="small">超えたら${lim.force ? "すぐ止める" : "すぐ止めて報告させる"}</div>`;
   const task = l.busy_elsewhere ? "ほかの依頼主の作業中" : l.current_task_id
     ? `<button type="button" class="link" data-task="${esc(l.current_task_id)}">${esc(l.current_task_id)}</button>`
     : seen ? "なし" : "—";

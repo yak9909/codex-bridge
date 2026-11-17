@@ -113,7 +113,7 @@ const EVENTS = [
   { ts: BASE + 160, kind: "tool_call", data: { tool: "grep", arguments: "{\"pattern\": \"在庫\"}", status: "completed" } },
   { ts: BASE + 171, kind: "tool_finished", data: { tool: "run_command", arguments: { command: "python scripts/check.py" }, duration_ms: 2140,
     success: false, result_summary: "終了コード 1: FileNotFoundError" } },
-  { ts: BASE + 180, kind: "status", data: { text: "使用量の上限が近いため、区切りで止めるよう指示しました" } },
+  { ts: BASE + 180, kind: "status", data: { text: "使用量の上限に達したため、作業をすぐ止めて報告するよう指示しました" } },
 ];
 const handlers = {
   onFollowup: async (text) => alert(`追加の指示: ${text}`), onCancel: () => alert("中止"), onUndo: () => alert("取り消し"),

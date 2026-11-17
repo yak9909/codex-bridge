@@ -159,3 +159,9 @@ def test_effective_limits_reported():
     g = guard()
     g.set_local_limits({"five_hour": 50, "weekly": None}, force=True)
     assert g.effective_limits() == {"five_hour": 50, "weekly": 95}
+
+
+def test_stop_text_says_stop_now_and_report():
+    assert "今から中断処理に入ります" in STOP_TEXT
+    assert "すぐに終了" in STOP_TEXT
+    assert "区切り" not in STOP_TEXT

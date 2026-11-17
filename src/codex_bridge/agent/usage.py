@@ -1,4 +1,4 @@
-"""Usage windows and the threshold guard that asks Codex to stop gracefully."""
+"""Usage windows and the threshold guard that tells Codex to stop now and report."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-STOP_TEXT = ("使用量の上限が近づいています。今の作業を区切りのよいところで止め、"
-             "終えたこと・残っていること・次にやるべきことを報告してください。"
-             "報告のあとは新しい作業を始めないでください。")
+STOP_TEXT = ("使用量の上限に達したため、今から中断処理に入ります。今の作業はここで止めてください。"
+             "新しい手順やファイルの変更には進まず、終えたこと・残っていること・次にやるべきことだけを短く報告して、"
+             "すぐに終了してください。")
 FIVE_HOUR_MINS = 300
 WEEKLY_MINS = 10080
 

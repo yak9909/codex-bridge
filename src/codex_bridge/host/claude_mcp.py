@@ -198,7 +198,7 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
             return mgr.usage()
         return await run(f)
 
-    @tool("使用量のしきい値（%）を変えます。超えると作業中の Codex に区切りで止めるよう指示し、新しい依頼を止めます。")
+    @tool("使用量のしきい値（%）を変えます。超えると作業中の Codex にすぐ止めて報告するよう指示し、新しい依頼を止めます。")
     async def set_thresholds(five_hour: float | None = None, weekly: float | None = None) -> CallToolResult:
         async def f():
             return await mgr.set_thresholds(five_hour, weekly)

@@ -559,7 +559,7 @@ class AgentRunner:
                 if cur and cur.turn_id and cur.thread_id:
                     try:
                         await self.app.turn_steer(cur.thread_id, cur.turn_id, a.text)
-                        await self._event("status", text="使用量の上限が近いため、区切りで止めるよう指示しました")
+                        await self._event("status", text="使用量の上限に達したため、作業をすぐ止めて報告するよう指示しました")
                     except Exception:  # includes timeouts: retry at the next turn start
                         self.guard.on_steer_failed()
                 else:
