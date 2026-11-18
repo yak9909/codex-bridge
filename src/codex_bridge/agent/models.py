@@ -26,6 +26,20 @@ def parse_model_list(entries: list[dict]) -> list[dict]:
     return catalog
 
 
+def apply_config_default(catalog: list[dict], config: dict) -> list[dict]:
+    result = [dict(m) for m in catalog]
+    model = config.get("model")
+    if isinstance(model, str) and any(m["model"] == model for m in result):
+        for m in result:
+            m["is_default"] = m["model"] == model
+    effort = config.get("model_reasoning_effort")
+    if isinstance(effort, str):
+        for m in result:
+            if m["is_default"]:
+                m["default_effort"] = effort
+    return result
+
+
 def effort_allowed(effort: str, max_effort: str) -> bool:
     return (effort in EFFORT_ORDER and max_effort in EFFORT_ORDER
             and EFFORT_ORDER.index(effort) <= EFFORT_ORDER.index(max_effort))

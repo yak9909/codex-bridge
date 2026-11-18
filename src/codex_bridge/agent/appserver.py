@@ -204,6 +204,10 @@ class AppServer:
         await self._write({"id": msg["id"], "result": result})
 
     # ---- typed helpers -------------------------------------------------
+    async def config_read(self) -> dict:
+        r = await self.request("config/read", {})
+        return r.get("config") or {}
+
     async def model_list(self) -> list[dict]:
         entries = []
         params = {}

@@ -127,7 +127,7 @@ paused: false
 | `send_task(prompt, continue_task_id?, lender?, model?, effort?)` | 依頼する。lender を省くと自動、指定するなら招待コードの名前。続きは前のタスクの ID を渡し、前と同じ人へ送る。model と effort は省くと、その人の Codex の既定（使わせている範囲内） |
 | `list_lenders()` | 知人ごとの接続・使用量・上限・担当タスク・事前承認・続きが可能かを確認 |
 | `send_followup(task_id, text)` | 作業中の Codex に追加の指示 |
-| `get_status(task_id?, wait_sec?)` / `get_result(task_id)` | 状態・最近の出来事・承認待ち（wait_sec で最大 50 秒待つ）／最終報告・変更ファイル |
+| `get_status(task_id?, wait_sec?)` / `get_result(task_id)` | 状態・最近の出来事・承認待ち（wait_sec で最大 50 秒待つ）／最終報告・変更ファイル。ふつうは知らせで足ります。知らせが届かない環境のときだけ wait_sec で待ちます。 |
 | `cancel_task(task_id)` | 中止 |
 | `get_usage()` / `set_thresholds(five_hour?, weekly?)` | 知人ごとの使用量と、こちらのしきい値 |
 | `undo_task(task_id)` | ファイル操作の道具による変更を元に戻す（コマンド実行による変更は戻らない） |

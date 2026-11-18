@@ -95,9 +95,23 @@ async def test_admin_api_not_served_on_public_bind(public):
 
 
 async def test_notify_wait_requires_target(admin):
-    r = await admin.get("/admin/api/notify/wait")
+    r = await admin.get("/admin/api/notify/wait", headers=H)
     assert r.status_code == 400
     assert r.json()["detail"] == "task_id か origin を指定してください"
+
+
+async def test_notify_wait_requires_header_without_consuming(admin, host):
+    await join(host, "friend")
+    tid = await host.mgr.start("work", origin="codex")
+    host.mgr.tasks[tid].state = "completed"
+    for headers in ({}, {"X-Codex-Bridge": "wrong"}):
+        r = await admin.get("/admin/api/notify/wait", params={"task_id": tid}, headers=headers)
+        assert r.status_code == 403
+        assert r.json()["detail"] == "missing X-Codex-Bridge header"
+        assert not host.mgr.tasks[tid].notified_final
+    r = await admin.get("/admin/api/notify/wait", params={"task_id": tid}, headers=H)
+    assert r.status_code == 200 and r.json()["status"] == "notice"
+    assert host.mgr.tasks[tid].notified_final
 
 
 async def test_notify_wait_returns_notice(admin, host):
@@ -105,7 +119,7 @@ async def test_notify_wait_returns_notice(admin, host):
     tid = await host.mgr.start("work")
     await host.mgr.on_agent_message(link, {"type": "task_state", "task_id": tid,
                                            "state": "completed", "report": "done"})
-    r = await admin.get("/admin/api/notify/wait", params={"task_id": tid, "timeout": 1})
+    r = await admin.get("/admin/api/notify/wait", params={"task_id": tid, "timeout": 1}, headers=H)
     assert r.status_code == 200 and r.json()["status"] == "notice"
     assert r.json()["notices"][0]["task_id"] == tid
 
@@ -128,7 +142,7 @@ async def test_notify_wait_passes_clamped_timeout_and_disconnect(admin, host, mo
     params = {"origin": "claude", "any": 1}
     if timeout is not None:
         params["timeout"] = timeout
-    r = await admin.get("/admin/api/notify/wait", params=params)
+    r = await admin.get("/admin/api/notify/wait", params=params, headers=H)
     assert r.status_code == 200 and r.json()["status"] == "timeout"
     assert calls[0]["timeout"] == expected and calls[0]["any_unwatched"] is True
     assert "session" not in calls[0]
@@ -139,7 +153,7 @@ async def test_notify_wait_passes_codex_session(admin, host):
     tid = await host.mgr.start("work", origin="codex", session="s1")
     await host.mgr.on_agent_message(link, {"type": "task_state", "task_id": tid, "state": "completed"})
     for session, status in (("s2", "none"), ("s1", "notice")):
-        r = await admin.get("/admin/api/notify/wait", params={"origin": "codex", "session": session, "timeout": 1})
+        r = await admin.get("/admin/api/notify/wait", params={"origin": "codex", "session": session, "timeout": 1}, headers=H)
         assert r.status_code == 200 and r.json()["status"] == status
 
 
@@ -887,8 +901,18 @@ async def test_policy_form_save_keeps_lender_exec_modes(admin, host):
     host.policy.update(lender_exec_modes={"alice": "off", "bob": "all"})
     form = (await admin.get("/admin/api/policy-form")).json()
     assert form["lender_exec_modes"] == {"alice": "off", "bob": "all"}
+    host.tokens.issue("alice")
+    changed = await admin.put("/admin/api/lenders/alice/exec-mode", json={"mode": "ask"}, headers=H)
+    assert changed.status_code == 200
     form.pop("lender_exec_modes")
     form["exec"]["mode"] = "ask"
     r = await admin.put("/admin/api/policy-form", json=form, headers=H)
     assert r.status_code == 200, r.text
-    assert host.policy.current().lender_exec_modes == {"alice": "off", "bob": "all"}
+    assert host.policy.current().lender_exec_modes == {"alice": "ask", "bob": "all"}
+
+
+async def test_collect_form_removes_lender_exec_modes(admin):
+    js = (await admin.get("/admin/static/app.js")).text
+    collect = js.split("function collectForm() {", 1)[1].split("const isDirty", 1)[0]
+    assert "delete form.lender_exec_modes;" in collect
+    assert "return form;" in collect

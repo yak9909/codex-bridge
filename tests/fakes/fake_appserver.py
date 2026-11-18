@@ -16,6 +16,7 @@ import sys
 
 DEFAULTS = {
     "initialize": {"userAgent": "fake"},
+    "config/read": {"config": {"model": None, "model_reasoning_effort": None}, "origins": {}},
     "model/list": {"data": [{"id": "gpt-fake", "model": "gpt-fake", "displayName": "GPT Fake", "hidden": False,
                              "isDefault": True, "defaultReasoningEffort": "medium",
                              "supportedReasoningEfforts": [{"reasoningEffort": e, "description": ""}

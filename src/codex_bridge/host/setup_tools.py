@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import Callable
 
@@ -203,6 +204,21 @@ def codex_set_url(url: str, config: Path | None = None) -> bool:
     return True
 
 
+def codex_current_url(config: Path | None = None) -> str | None:
+    path = Path(config or codex_config_path())
+    try:
+        text = path.read_text(encoding="utf-8")
+        header = f"[mcp_servers.{MCP_NAME}]"
+        m = re.search(rf"^{re.escape(header)}[ \t]*(?:#.*)?$", text, flags=re.MULTILINE)
+        if not m:
+            return None
+        nxt = re.search(r"^[ \t]*\[", text[m.end():], flags=re.MULTILINE)
+        end = m.end() + nxt.start() if nxt else len(text)
+        return tomllib.loads(text[m.end():end]).get("url")
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
 def codex_auto_approve(config: Path | None = None) -> bool:
     """Let the owner's Codex call codex-bridge tools without asking each time (they poll get_status a lot).
 
@@ -246,7 +262,7 @@ def codex_hooks_path() -> Path:
 
 def _install_hook(kind: str, command: str, path: Path) -> str:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         existed = True
     except FileNotFoundError:
         data, existed = {}, False

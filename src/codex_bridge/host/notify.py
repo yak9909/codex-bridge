@@ -27,6 +27,7 @@ class Notifier:
         self._closed = False
         self._waiting: dict[str, int] = {}
         self._notified_approvals: set[str] = set()
+        self._codex_generations: dict[str, int] = {}
         mgr.on_change.append(self.changed)
         approvals.on_change.append(self.changed)
 
@@ -46,7 +47,7 @@ class Notifier:
         now = self.clock()
         return [r.task_id for r in self.mgr.tasks.values()
                 if r.origin == "codex" and now - r.created <= CODEX_MAX_AGE
-                and (session is None or r.session == session)
+                and (session is None or r.session is None or r.session == session)
                 and (r.state in ("queued", "running") or r.task_id in pending
                      or (r.state in FINAL_STATES and not r.notified_final))]
 
@@ -83,6 +84,11 @@ class Notifier:
         if self._closed:
             return {"status": "closing", "notices": []}
         codex = task_id is None and origin == "codex"
+        generation = None
+        if codex and session is not None:
+            generation = self._codex_generations.get(session, 0) + 1
+            self._codex_generations[session] = generation
+            self.changed()
         if task_id is not None:
             targets = [task_id] if task_id in self.mgr.tasks else []
         elif origin == "claude" and any_unwatched:
@@ -101,12 +107,15 @@ class Notifier:
             while True:
                 if self._closed:
                     return {"status": "closing", "notices": []}
+                gone = False
                 if disconnected is not None:
                     gone = await disconnected()
                     if self._closed:
                         return {"status": "closing", "notices": []}
-                    if gone:
-                        return {"status": "gone", "notices": []}
+                if generation is not None and self._codex_generations.get(session) != generation:
+                    return {"status": "none", "notices": []}
+                if gone:
+                    return {"status": "gone", "notices": []}
                 # Timer ticks only check disconnects; task selection and taking run on changes.
                 if event is None or event.is_set():
                     # Capture before taking so a change during the take cannot be lost.

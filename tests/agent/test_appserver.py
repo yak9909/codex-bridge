@@ -53,6 +53,17 @@ async def test_rate_limits(fake):
     assert s.five_hour == Window(12, 1800000000) and s.weekly == Window(30, 1800500000)
 
 
+@pytest.mark.parametrize("fake,expected", [
+    ({"responses": {"config/read": {"config": {"model": "m2", "model_reasoning_effort": "high"},
+                                     "origins": {}}}}, {"model": "m2", "model_reasoning_effort": "high"}),
+    ({"responses": {"config/read": {"config": None, "origins": {}}}}, {}),
+], indirect=["fake"])
+async def test_config_read_returns_effective_config(fake, expected):
+    await fake.app.start()
+    assert await fake.app.config_read() == expected
+    assert fake.received("config/read") == {}
+
+
 async def test_stop_closes_rpc_input_when_windows_tree_kill_is_unavailable(fake, monkeypatch):
     from types import SimpleNamespace
     from codex_bridge.agent import appserver

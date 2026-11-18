@@ -290,10 +290,12 @@ function levelFor(path, skipOwn) {
 }
 function collectForm() {
   const mode = document.querySelector('input[name="mode"]:checked');
-  return { ...permForm,
+  const form = { ...permForm,
     exec: { mode: mode ? mode.value : permForm.exec.mode, allow: $("perm-allow").value.split("\n"),
             confirm_modified_scripts: $("perm-confirm-mod").checked },
     delete_needs_approval: $("perm-del").checked };
+  delete form.lender_exec_modes;
+  return form;
 }
 const isDirty = () => !!permForm && JSON.stringify(collectForm()) !== permSaved;
 function markDirty() {

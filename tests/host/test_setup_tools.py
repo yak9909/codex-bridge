@@ -269,6 +269,42 @@ def test_codex_hook_in_codex_home(tmp_path):
     }]}}
 
 
+@pytest.mark.parametrize("kind,event,filename", [("claude", "PostToolUse", "settings.json"),
+                                               ("codex", "Stop", "hooks.json")])
+def test_install_hook_reads_bom_and_writes_without_bom(tmp_path, kind, event, filename):
+    path = tmp_path / filename
+    path.write_text('{"keep": "元の設定"}', encoding="utf-8-sig")
+    before = path.read_bytes()
+    command = st.hook_command(kind, 8770)
+    assert getattr(st, f"install_{kind}_hook")(command, path) == "added"
+    assert not path.read_bytes().startswith(b"\xef\xbb\xbf")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["keep"] == "元の設定" and data["hooks"][event][0]["hooks"][0]["command"] == command
+    assert path.with_name(path.name + ".bak").read_bytes() == before
+
+
+@pytest.mark.parametrize("current", [None, "missing_table", "wrong", "correct"])
+def test_install_mcp_warns_only_when_codex_url_still_wrong(tmp_path, monkeypatch, capsys, current):
+    from codex_bridge.host import setup_cli
+
+    monkeypatch.setattr(st, "register_claude", lambda **kwargs: "missing")
+    monkeypatch.setattr(st, "register_codex", lambda **kwargs: "already")
+    monkeypatch.setattr(st, "codex_set_url", lambda url: False)
+    monkeypatch.setattr(st, "codex_auto_approve", lambda: False)
+    url = st.codex_mcp_url(8770)
+    config = st.codex_config_path()
+    if current is not None:
+        config.parent.mkdir()
+        text = (f'[mcp_servers.codex-bridge] # bridge\nurl = "{url if current == "correct" else "wrong"}"\n'
+                if current != "missing_table" else f'[other]\nurl = "{url}"\n')
+        config.write_text(text, encoding="utf-8")
+    setup_cli.run_install_mcp(tmp_path / "missing.yaml")
+    output = capsys.readouterr().out
+    warning = ("  ※ Codex の登録の URL を書き換えられませんでした。config.toml の "
+               f"[mcp_servers.codex-bridge] の url を {url} にしてください。")
+    assert (warning in output) is (current != "correct")
+
+
 def test_codex_url_rewritten_on_rerun(tmp_path):
     config = tmp_path / "cx" / "config.toml"
     config.parent.mkdir()

@@ -22,7 +22,7 @@ from .appserver import AppServer, codex_command
 from .control_client import ControlClient
 from .connections import ConnectionStore
 from .logview import LogStore
-from .models import parse_model_list
+from .models import apply_config_default, parse_model_list
 from .runner import AgentRunner, TaskSlot
 from .sessions import SessionRegistry
 from .settings import SettingsApplier, SettingsStore, hello_fields, resolve_workdir, move_data_root
@@ -139,6 +139,7 @@ class AgentConnections:
         self.initial_backoff = initial_backoff
         self.slot = TaskSlot()
         self.catalog: list[dict] | None = None
+        self._catalog_stale = False
         self.runners, self.clients, self.links = {}, {}, {}
         self.started, self.paused, self.moving = False, False, False
         self._usage_probe = None
@@ -171,7 +172,7 @@ class AgentConnections:
                     other.guard.enabled = mode == "chatgpt"
                 await asyncio.gather(*(client.refresh_hello() for client in self.clients.values()),
                                      return_exceptions=True)
-            if self.catalog is None:
+            if self.catalog is None or self._catalog_stale:
                 await self._load_catalog(app)
             await runner.refresh_usage()
 
@@ -218,7 +219,14 @@ class AgentConnections:
         except Exception as e:
             self._error("Codex のモデルの一覧を取得できませんでした", e)
             return
+        try:
+            config = await app.config_read()
+        except Exception:
+            pass
+        else:
+            catalog = apply_config_default(catalog, config)
         self.catalog = catalog
+        self._catalog_stale = False
         runners = list(self.runners.values())
         for runner in runners:
             runner.catalog = catalog
@@ -319,7 +327,7 @@ class AgentConnections:
 
     async def update_settings(self, id, patch):
         saved = self.store.update_settings(id, patch)
-        self.catalog = None
+        self._catalog_stale = True
         runner = self.runners[id]
         runner.apply_settings({**self.settings.get(), **saved})
         await self.clients[id].refresh_hello()

@@ -35,7 +35,8 @@ def _guard(request: Request) -> None:
     host = (request.headers.get("host") or "").rsplit(":", 1)[0]
     if host not in LOCAL_HOSTS:
         raise HTTPException(403, "forbidden host")
-    if request.method not in SAFE_METHODS and request.headers.get("x-codex-bridge") != "1":
+    consumes_notices = request.url.path == "/admin/api/notify/wait"
+    if (request.method not in SAFE_METHODS or consumes_notices) and request.headers.get("x-codex-bridge") != "1":
         raise HTTPException(403, "missing X-Codex-Bridge header")
 
 

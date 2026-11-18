@@ -133,7 +133,10 @@ def run_install_mcp(config_path: Path) -> None:
     codex_result = st.register_codex(local_port=port)
     _say(f"  Codex      : {msgs[codex_result]}")
     if codex_result in ("added", "already"):
-        st.codex_set_url(st.codex_mcp_url(port))
+        url = st.codex_mcp_url(port)
+        if not st.codex_set_url(url) and st.codex_current_url() != url:
+            _say("  ※ Codex の登録の URL を書き換えられませんでした。config.toml の "
+                 f"[mcp_servers.codex-bridge] の url を {url} にしてください。")
         if st.codex_auto_approve():
             _say("               （codex-bridge の道具を毎回確認なしで呼べるように設定しました）")
         result = st.install_codex_hook(st.hook_command("codex", port))

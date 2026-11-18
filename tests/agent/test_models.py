@@ -14,6 +14,35 @@ def entry(model="m1", *, efforts=None, default="medium", is_default=True):
             "default_effort": default, "is_default": is_default}
 
 
+@pytest.mark.parametrize("config,defaults,efforts", [
+    ({"model": "m2", "model_reasoning_effort": "high"}, [False, True], ["medium", "high"]),
+    ({"model_reasoning_effort": "high"}, [True, False], ["high", "medium"]),
+    ({"model": "unknown"}, [True, False], ["medium", "medium"]),
+    ({}, [True, False], ["medium", "medium"]),
+    ({"model": None, "model_reasoning_effort": None}, [True, False], ["medium", "medium"]),
+    ({"model": 1, "model_reasoning_effort": 1}, [True, False], ["medium", "medium"]),
+])
+def test_apply_config_default(config, defaults, efforts):
+    from codex_bridge.agent import models
+
+    catalog = [entry(), entry("m2", is_default=False)]
+    original = copy.deepcopy(catalog)
+    result = models.apply_config_default(catalog, config)
+    assert [m["is_default"] for m in result] == defaults
+    assert [m["default_effort"] for m in result] == efforts
+    assert catalog == original
+    assert all(new is not old for new, old in zip(result, catalog))
+
+
+def test_apply_config_default_still_respects_lender_limits():
+    from codex_bridge.agent import models
+
+    catalog = models.apply_config_default([entry(), entry("m2", is_default=False)],
+                                         {"model": "m2", "model_reasoning_effort": "max"})
+    assert choose(catalog, None, "high", None, None) == ("m2", "high")
+    assert choose(catalog, ["m1"], "high", None, None) == ("m1", "medium")
+
+
 def test_parse_skips_hidden_and_reads_efforts():
     raw = [{"id": "other-id", "model": "m1", "displayName": "Model One", "hidden": False,
             "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": ""},

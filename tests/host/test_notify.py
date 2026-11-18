@@ -167,6 +167,30 @@ async def test_codex_session_filter(mgr, agent, notifier):
     assert result["status"] == "notice" and result["notices"][0]["task_id"] == tid
 
 
+async def test_codex_sessionless_task_matches_any_session(mgr, agent, notifier):
+    tid = await mgr.start("work", origin="codex")
+    await agent.finish(tid)
+    result = await notifier.wait(origin="codex", session="s1", timeout=0.1)
+    assert result["status"] == "notice" and result["notices"][0]["task_id"] == tid
+
+
+async def test_new_codex_wait_supersedes_same_session(mgr, agent, notifier):
+    tid = await mgr.start("work", origin="codex", session="s1")
+    first = asyncio.create_task(notifier.wait(origin="codex", session="s1", timeout=10))
+    await asyncio.sleep(0)
+    second = asyncio.create_task(notifier.wait(origin="codex", session="s1", timeout=10))
+    try:
+        assert await asyncio.wait_for(asyncio.shield(first), 1) == {"status": "none", "notices": []}
+        assert not second.done() and not mgr.tasks[tid].notified_final
+        await agent.finish(tid)
+        result = await asyncio.wait_for(second, 1)
+        assert result["status"] == "notice" and result["notices"][0]["task_id"] == tid
+    finally:
+        for task in (first, second):
+            task.cancel()
+        await asyncio.gather(first, second, return_exceptions=True)
+
+
 async def test_any_unwatched_skips_watched_tasks(mgr, agent, notifier):
     a = await mgr.start("A", origin="claude", lender="friend")
     other = FakeAgent(mgr, "other")

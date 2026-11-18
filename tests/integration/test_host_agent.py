@@ -35,7 +35,7 @@ async def until(pred, timeout=10):
 
 
 @pytest.fixture
-async def multiple(tmp_path):
+async def multiple(tmp_path, request):
     from codex_bridge.agent.main import AgentConnections
     managers, servers, serving, codes, messages, fakes = [], [], [], [], [], {}
     for i in range(2):
@@ -65,7 +65,10 @@ async def multiple(tmp_path):
     def factory(connection, settings):
         root = tmp_path / ("fake-" + connection.id)
         root.mkdir()
-        fake = fakes[connection.id] = Fake(root, {"after": {"turn/start": [TURN_STARTED], "turn/steer": [MSG, DONE]}})
+        fake = fakes[connection.id] = Fake(root, {
+            "after": {"turn/start": [TURN_STARTED], "turn/steer": [MSG, DONE]},
+            **getattr(request, "param", {}),
+        })
         fake.app.features = settings["features"]
         return fake.app
 
@@ -136,8 +139,16 @@ async def test_settings_change_refetches_catalog(multiple, tmp_path):
     runtime, connections, managers, messages = multiple
     await runtime._usage_probe
     assert model_list_count(tmp_path) == 1
+    catalog = runtime.catalog
     await runtime.update_settings(connections[0].id, {"allowed_models": [], "max_effort": "high"})
-    assert runtime.catalog is None
+    from codex_bridge.agent.ui import create_ui_app
+    app = create_ui_app(None, runtime.settings, None, versions=runtime.versions, data_root=runtime.home,
+                        connections=runtime)
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 1))
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8766") as http:
+        response = await http.get(f"/api/connections/{connections[0].id}/settings")
+    assert response.status_code == 200 and response.json()["models"] == catalog
+    assert runtime.catalog is catalog
     assert model_list_count(tmp_path) == 1
     await until(lambda: [m for m in messages[0] if m["type"] == "hello"][-1].get("models") == [])
     hello = [m for m in messages[0] if m["type"] == "hello"][-1]
@@ -150,6 +161,40 @@ async def test_settings_change_refetches_catalog(multiple, tmp_path):
     assert offer["models"] == [] and offer["max_effort"] == "high"
     other = [m for m in messages[1] if m["type"] == "lender_models"][-1]
     assert other["models"][0]["model"] == "gpt-fake" and other["max_effort"] == "xhigh"
+
+
+@pytest.mark.parametrize("multiple,expected", [
+    ({"responses": {
+        "model/list": {"data": [
+            {"model": "m1", "isDefault": True, "defaultReasoningEffort": "medium",
+             "supportedReasoningEfforts": [{"reasoningEffort": e} for e in ("medium", "high")]},
+            {"model": "m2", "isDefault": False, "defaultReasoningEffort": "medium",
+             "supportedReasoningEfforts": [{"reasoningEffort": e} for e in ("medium", "high")]},
+        ]},
+        "config/read": {"config": {"model": "m2", "model_reasoning_effort": "high"}, "origins": {}},
+        "thread/start": {"thread": {"id": "th1"}, "model": "m2", "reasoningEffort": "high"},
+    }}, ("m2", "high")),
+    ({"errors": {"config/read": {"code": -32601, "message": "unsupported"}}}, ("gpt-fake", "medium")),
+], indirect=["multiple"])
+async def test_config_default_or_read_failure_reaches_turn_start(multiple, tmp_path, expected):
+    runtime, connections, managers, messages = multiple
+    await runtime._usage_probe
+    logs = []
+    runtime.on_log = logs.append
+    # Exercise config/read again while observing that its failure adds no log.
+    await runtime._load_catalog(runtime.runners[connections[0].id].app)
+    assert not logs
+    tid = await managers[0].start("work")
+    await until(lambda: managers[0].status(tid)["state"] == "running")
+    received = [json.loads(line)["received"]
+                for record in tmp_path.glob("fake-*/record.jsonl")
+                for line in record.read_text(encoding="utf-8").splitlines()
+                if "received" in json.loads(line)]
+    assert any(m.get("method") == "config/read" and m["params"] == {} for m in received)
+    thread = next(m["params"] for m in received if m.get("method") == "thread/start")
+    assert thread["model"] == expected[0]
+    turn = next(m["params"] for m in received if m.get("method") == "turn/start")
+    assert (turn["model"], turn["effort"]) == expected
 
 
 @pytest.mark.parametrize("pending", [False, True])
