@@ -79,7 +79,7 @@ async def test_tool_names(env):
     r = await local.post("/claude/mcp", headers=ACCEPT, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     assert {t["name"] for t in r.json()["result"]["tools"]} == {
         "send_task", "send_followup", "get_status", "get_result", "cancel_task", "get_usage",
-        "set_thresholds", "undo_task", "list_sessions", "read_session", "delete_session",
+        "undo_task", "list_sessions", "read_session", "delete_session",
         "list_approvals", "decide_approval", "get_policy", "set_policy", "set_folder_level", "set_exec_mode",
         "set_paused",
         "set_log_visibility", "list_tasks", "issue_invite", "revoke_invite", "list_invites", "get_overview",
@@ -115,13 +115,35 @@ async def test_claude_can_read_and_change_policy(env, share):
 
 async def test_claude_can_switch_exec_mode_pause_and_visibility(env, share):
     mgr, local, _ = env
-    text_of(await call(local, "set_exec_mode", {"mode": "off"}))
-    assert share.policy.current().exec_mode == "off"
-    assert (await call(local, "set_exec_mode", {"mode": "weird"}))["isError"]
+    share.tokens.issue("alice")
+    text_of(await call(local, "set_exec_mode", {"mode": "off", "lender": "alice"}))
+    assert share.policy.current().exec_mode_for("alice") == "off"
+    assert (await call(local, "set_exec_mode", {"mode": "weird", "lender": "alice"}))["isError"]
     text_of(await call(local, "set_paused", {"paused": True}))
     assert share.policy.current().paused is True
-    text_of(await call(local, "set_log_visibility", {"value": "all"}))
-    assert mgr.settings["log_visibility"] == "all"
+    text_of(await call(local, "set_log_visibility", {"value": "all", "lender": "alice"}))
+    assert mgr.log_visibility_for("alice") == "all" and mgr.log_visibility_for("bob") == "summary"
+
+
+async def test_mcp_set_exec_mode_needs_lender(env, share):
+    _, local, _ = env
+    result = await call(local, "set_exec_mode", {"mode": "off"})
+    assert result["isError"] and "lender を指定してください" in result["content"][0]["text"]
+    assert share.policy.current().exec_mode == "allowlist"
+
+
+async def test_mcp_set_log_visibility_needs_lender(env):
+    mgr, local, _ = env
+    result = await call(local, "set_log_visibility", {"value": "all"})
+    assert result["isError"] and "lender を指定してください" in result["content"][0]["text"]
+    assert mgr.settings["log_visibility"] == "summary"
+
+
+async def test_mcp_has_no_set_thresholds(env):
+    _, local, _ = env
+    r = await local.post("/claude/mcp", headers=ACCEPT, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert "set_thresholds" not in {t["name"] for t in r.json()["result"]["tools"]}
+    assert (await call(local, "set_thresholds", {"five_hour": 50}))["isError"]
 
 
 async def test_claude_can_manage_invites(env, share):
@@ -367,8 +389,8 @@ async def test_get_usage_is_per_lender(env):
     await two_lenders(mgr)
     u = text_of(await call(local, "get_usage", {}))
     assert {n: v["five_hour"]["used_percent"] for n, v in u["lenders"].items()} == {"alice": 60, "bob": 10}
-    assert u["lenders"]["alice"]["blocked_until"] is None and u["thresholds"] == {"five_hour": 90, "weekly": 95}
-    text_of(await call(local, "set_thresholds", {"five_hour": 50}))
+    assert u["lenders"]["alice"]["blocked_until"] is None and "thresholds" not in u
+    mgr._lenders["alice"].limits = {"five_hour": 50}  # only the lender's own limit blocks
     u = text_of(await call(local, "get_usage", {}))
     assert u["lenders"]["alice"]["blocked_until"] and u["lenders"]["bob"]["blocked_until"] is None
 
@@ -412,14 +434,6 @@ async def test_undo_task(env, share):
     res = await call(local, "undo_task", {"task_id": "t5"})
     assert json.loads(res["content"][0]["text"])["restored"] == ["out/u.txt"]
     assert not (share.root / "out/u.txt").exists()
-
-
-async def test_get_usage_and_thresholds(env):
-    mgr, local, _ = env
-    res = await call(local, "set_thresholds", {"five_hour": 80})
-    assert json.loads(res["content"][0]["text"])["five_hour"] == 80
-    u = json.loads((await call(local, "get_usage", {}))["content"][0]["text"])
-    assert u["thresholds"]["five_hour"] == 80 and u["five_hour"] is None
 
 
 async def test_undo_unknown_or_unsafe_task_id_refused(env, share):
@@ -535,13 +549,10 @@ async def test_set_exec_mode_for_lender_and_inherit(env, share):
         assert {r["name"]: r["exec_mode"] for r in rows} == {"alice": expected, "bob": None}
     for args, message in (({"mode": "off", "lender": "missing"}, "その名前の招待コードがありません: missing"),
                           ({"mode": "bad", "lender": "alice"}, "mode"),
-                          ({"mode": "inherit"}, "mode")):
+                          ({"mode": "inherit"}, "lender を指定してください")):
         result = await call(local, "set_exec_mode", args)
         assert result["isError"] and message in result["content"][0]["text"]
     assert share.policy.current().lender_exec_modes == {}
-    text_of(await call(local, "set_exec_mode", {"mode": "off", "lender": "alice"}))
-    assert text_of(await call(local, "set_exec_mode", {"mode": "all"})) == {"exec_mode": "all"}
-    assert share.policy.current().lender_exec_modes == {"alice": "off"}
 
 
 async def test_get_policy_lists_lender_modes(env, share):

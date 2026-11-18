@@ -248,16 +248,14 @@ async def test_one_task_at_a_time(mgr, agent):
 
 
 async def test_quota_blocks_new_tasks(mgr, agent):
-    await agent.push("usage", **usage(five_hour=95))
+    await agent.push("usage", **usage(five_hour=95), friend_limits={"five_hour": 90})
     with pytest.raises(ToolError, match="再開可能"):
         await mgr.start("a")
 
 
-async def test_quota_threshold_is_configurable(mgr, agent):
-    await agent.push("usage", **usage(five_hour=95))
-    await mgr.set_thresholds(five_hour=99, weekly=None)
+async def test_no_own_limit_never_blocks(mgr, agent):
+    await agent.push("usage", **usage(five_hour=99))
     assert await mgr.start("a")
-    assert agent.last("settings")["thresholds"] == {"five_hour": 99, "weekly": 95}
 
 
 async def test_completed_task_result(mgr, agent):
@@ -354,6 +352,45 @@ async def test_hello_triggers_settings(mgr, agent):
     await agent.push("hello", agent_version="0.1.0", codex_version="0.167.0", auth_mode="chatgpt")
     assert agent.last("settings")["log_visibility"] == "summary"
     assert mgr.agent_info()["auth_mode"] == "chatgpt"
+
+
+async def test_log_visibility_per_lender(tmp_path, mgr):
+    yamada, suzuki = FakeAgent(mgr, "yamada"), FakeAgent(mgr, "suzuki")
+    for a in (yamada, suzuki):
+        await a.push("hello", agent_version="0.3.0", codex_version="x", auth_mode="chatgpt")
+    await mgr.set_log_visibility("all", "yamada")
+    assert yamada.last("settings")["log_visibility"] == "all" and yamada.last("settings")["thresholds"] == {}
+    assert len(suzuki.sent) == 1  # nobody else is told
+    await suzuki.push("hello", agent_version="0.3.0", codex_version="x", auth_mode="chatgpt")
+    assert suzuki.last("settings")["log_visibility"] == "summary" and suzuki.last("settings")["thresholds"] == {}
+    with pytest.raises(ToolError):
+        await mgr.set_log_visibility("everything", "yamada")
+    mgr2 = TaskManager(tmp_path / "data", touched_fn=lambda tid: [])
+    assert mgr2.log_visibility_for("yamada") == "all" and mgr2.log_visibility_for("suzuki") == "summary"
+
+
+async def test_old_default_log_visibility_applies_to_lenders_without_their_own(tmp_path):
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "settings.json").write_text(json.dumps({"log_visibility": "files"}), encoding="utf-8")
+    mgr = TaskManager(tmp_path / "data", touched_fn=lambda tid: [])
+    assert mgr.log_visibility_for("anyone") == "files"
+    await mgr.set_log_visibility("all", "yamada")
+    assert mgr.log_visibility_for("yamada") == "all" and mgr.log_visibility_for("suzuki") == "files"
+
+
+async def test_old_saved_thresholds_load(tmp_path):
+    from codex_bridge.host.lenders import Lender
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "settings.json").write_text(
+        json.dumps({"thresholds": {"five_hour": 50}, "log_visibility": "summary"}), encoding="utf-8")
+    mgr = TaskManager(tmp_path / "data", touched_fn=lambda tid: [])
+    assert "thresholds" not in mgr.settings
+    agent = FakeAgent(mgr)
+    await agent.push("hello", agent_version="0.2.0", codex_version="x", auth_mode="chatgpt")
+    await agent.push("usage", **usage(five_hour=60))  # 60% with no own limit is available
+    assert await mgr.start("a")
+    mgr._save_settings()
+    assert "thresholds" not in json.loads((tmp_path / "data" / "settings.json").read_text(encoding="utf-8"))
 
 
 async def test_restarted_agent_without_task_fails_orphan(mgr, agent):

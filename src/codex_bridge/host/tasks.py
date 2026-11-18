@@ -19,7 +19,7 @@ from .lenders import (Lender, SendFn, as_protocol, as_text, blocked_until, lende
 from .paths import ToolError
 
 ACTIVE_STATES = ("queued", "running", "agent_offline", "awaiting_lender")  # awaiting_lender: the lender has not approved yet
-DEFAULT_THRESHOLDS = {"five_hour": 90, "weekly": 95}
+NO_THRESHOLDS: dict = {}  # the borrower sets no limit of its own: only the lender's `limits` count
 REQUEST_TIMEOUT = 30.0
 NOT_CONNECTED = "知人側の agent が接続されていません。知人の PC で codex-bridge の「貸す側」が動いているか確かめてください。"
 BUSY = "作業中のタスクがあります: {}（終わるのを待つか cancel_task で止めてください）"
@@ -128,9 +128,12 @@ class TaskManager:
         self._task_ids = itertools.count(1)
         self.on_change: list[Callable[[], None]] = []
         self.invited_names: Callable[[], set[str]] | None = None
-        self.settings = {"thresholds": dict(DEFAULT_THRESHOLDS), "log_visibility": "summary"}
+        # "log_visibility" is the default for lenders without their own value in "lender_log_visibility"
+        self.settings = {"log_visibility": "summary", "lender_log_visibility": {}}
         if self.settings_path.exists():
-            self.settings.update(json.loads(self.settings_path.read_text(encoding="utf-8")))
+            saved = json.loads(self.settings_path.read_text(encoding="utf-8"))
+            saved.pop("thresholds", None)  # the borrower no longer sets thresholds; an old file may still hold them
+            self.settings.update(saved)
         self._load()
 
     # ---- persistence ---------------------------------------------------
@@ -304,7 +307,7 @@ class TaskManager:
             if "current_task_id" in m:
                 self._reconcile(lender, m.get("current_task_id"))
             lender.ready = True
-            await lender.send(self._settings_msg())
+            await lender.send(self._settings_msg(lender.name))
             self._changed()
         elif t == "lender_models":
             lender.models = normalize_models(m.get("models"))
@@ -399,25 +402,28 @@ class TaskManager:
             rec.state_before_offline = None
             self._save(rec)
 
-    def _settings_msg(self) -> dict:
-        return protocol.msg("settings", thresholds=dict(self.settings["thresholds"]),
-                            log_visibility=self.settings["log_visibility"])
+    def log_visibility_for(self, name: str) -> str:
+        return self.settings["lender_log_visibility"].get(name, self.settings["log_visibility"])
 
-    async def _send_settings(self) -> None:
-        for lender in self._connected():
-            try:
-                await lender.send(self._settings_msg())
-            except Exception:
-                pass  # one broken link must not keep the others from hearing; hello sends them again
+    def _settings_msg(self, lender: str) -> dict:
+        # thresholds stay in the message (empty) so that a v0.2 agent, which reads the key, keeps working
+        return protocol.msg("settings", thresholds={}, log_visibility=self.log_visibility_for(lender))
+
+    async def _send_settings(self, lender: Lender) -> None:
+        if not lender.connected or lender.send is None:
+            return
+        try:
+            await lender.send(self._settings_msg(lender.name))
+        except Exception:
+            pass  # a broken link must not fail the change; hello sends the settings again
 
     # ---- usage ---------------------------------------------------------
     def _usage_of(self, lender: Lender | None) -> dict:
         out = dict(lender.usage) if lender else {"five_hour": None, "weekly": None, "ts": None}
-        out["thresholds"] = dict(self.settings["thresholds"])
         for k in ("five_hour", "weekly"):
             if out.get(k):
                 out[k] = {**out[k], "resets_at_local": iso_local(out[k].get("resets_at"))}
-        out["blocked_until"] = iso_local(blocked_until(lender, self.settings["thresholds"])) if lender else None
+        out["blocked_until"] = iso_local(blocked_until(lender, NO_THRESHOLDS)) if lender else None
         return out
 
     def usage(self) -> dict:
@@ -426,23 +432,14 @@ class TaskManager:
         out["lenders"] = {l.name: self._usage_of(l) for l in self._lenders.values()}
         return out
 
-    async def set_thresholds(self, five_hour: float | None = None, weekly: float | None = None) -> dict:
-        for k, v in (("five_hour", five_hour), ("weekly", weekly)):
-            if v is not None:
-                if not 0 < float(v) <= 100:
-                    raise ToolError("しきい値は 0 より大きく 100 以下の数で指定してください")
-                self.settings["thresholds"][k] = v
-        self._save_settings()
-        await self._send_settings()
-        self._changed()
-        return dict(self.settings["thresholds"])
-
-    async def set_log_visibility(self, value: str) -> None:
+    async def set_log_visibility(self, value: str, lender: str) -> None:
         if value not in LOG_VISIBILITY:
             raise ToolError(f"log_visibility は {LOG_VISIBILITY} のどれかです")
-        self.settings["log_visibility"] = value
+        self.settings["lender_log_visibility"][lender] = value
         self._save_settings()
-        await self._send_settings()
+        if (l := self._lenders.get(lender)) is not None:
+            await self._send_settings(l)
+        self._changed()
 
     # ---- tasks ---------------------------------------------------------
     def current_task_id(self, lender: str | None = None) -> str | None:
@@ -467,14 +464,14 @@ class TaskManager:
             raise ToolError(BUSY.format("ほかの依頼主の作業中") + advice)
         if lender.current_task_id:
             raise ToolError(BUSY.format(lender.current_task_id) + advice)
-        blocked = blocked_until(lender, self.settings["thresholds"], now)
+        blocked = blocked_until(lender, NO_THRESHOLDS, now)
         if blocked:
             raise ToolError(QUOTA.format(iso_local(blocked)))
 
     def _pick(self, now: float, among: list[Lender] | None = None) -> Lender:
         """Automatic routing (design §3.3): the free lender with the most headroom."""
         online = among if among is not None else self._connected()
-        lender = pick_lender(online, self.settings["thresholds"], now)
+        lender = pick_lender(online, NO_THRESHOLDS, now)
         if lender is not None:
             return lender
         # nobody is free: everyone idle is over a limit (say when the first comes back), all are working,
@@ -482,7 +479,7 @@ class TaskManager:
         ready = [l for l in online if l.ready]
         waits = [t for l in ready
                  if l.current_task_id is None and not l.busy_elsewhere
-                 and (t := blocked_until(l, self.settings["thresholds"], now))]
+                 and (t := blocked_until(l, NO_THRESHOLDS, now))]
         if waits:
             raise ToolError(QUOTA.format(iso_local(min(waits))))
         busy = [l.current_task_id or "ほかの依頼主の作業中" for l in ready if l.current_task_id or l.busy_elsewhere]

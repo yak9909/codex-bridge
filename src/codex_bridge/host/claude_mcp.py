@@ -16,7 +16,7 @@ from ..common.protocol import LOG_VISIBILITY
 from .approvals import Approvals
 from .mcp_util import LoopbackOnly, McpEndpoint, OriginTag, error_result, json_result, make_endpoint
 from .paths import ToolError, UNSET_SHARE_MSG
-from .policy import EXEC_MODES, PolicyStore
+from .policy import PolicyStore
 from .policy_form import form_from_raw
 from .policy_form import set_folder_level as set_folder_level_
 from .snapshots import Snapshots
@@ -53,11 +53,11 @@ Codex を貸している人は、複数いることがあります。招待コ�
   - connected が true の人が 1 人もいなければ、どの人の PC でも codex-bridge の「貸す側」が動いていない。利用者にそう伝えて止まる。
   - ready が false の人は接続した直後で、まだ依頼を受けられない。数秒待ってから呼び直す。
   - usage.blocked_until がある人は、使用量の上限のため、その時刻まで新しい依頼を受けられない。
-    上限は、こちらのしきい値（usage.thresholds）と、その人が決めた上限（limits）の低いほう。
+    上限は、その人が決めた上限（limits）。
   - current_task_id がある人は作業中。
   - capabilities.resumable が false の人は、使い捨てのセッションで動いている。続きの依頼ができない。
   - capabilities.pre_approval が true の人は、依頼のたびにその人自身の承認が要る。始まるまで待つことがある。
-  - models が、その人が使わせているモデルと推論の強さ（max_effort が上限）。exec_mode が、その人のコマンド実行のモード（null は全体と同じ）。
+  - models が、その人が使わせているモデルと推論の強さ（max_effort が上限）。exec_mode が、その人だけに決めたコマンド実行のモード（null は未設定で、全体の設定に従う）。
   - protocol が 1 の人（v0.1 の exe）はメインのフォルダだけで作業できる。ほかのフォルダには v0.2 の exe が必要。
 
 ## 2. 依頼を書く（send_task）
@@ -101,11 +101,11 @@ Codex を貸している人は、複数いることがあります。招待コ�
 
 ## 7. 管理（利用者に頼まれたときだけ）
 - 権限: get_policy / set_folder_level(path, hidden|read|write|inherit) / set_policy
-- コマンド実行のモード: set_exec_mode(mode, lender)（lender を省くと全体。inherit で全体と同じに戻す）
+- コマンド実行のモード: set_exec_mode(mode, lender)（lender は必須。人ごとに決める。inherit でその人だけの設定を外す）
 - 共有フォルダ: add_shared_folder / remove_shared_folder / set_main_folder（フルパス）。
-  set_share_root は旧名で、フォルダを write（書ける）で追加し、メインにする。一時停止: set_paused、しきい値: set_thresholds
+  set_share_root は旧名で、フォルダを write（書ける）で追加し、メインにする。一時停止: set_paused
 - 招待コード: issue_invite / revoke_invite / list_invites（Codex を貸す人ごとに 1 つ。その名前が lender になる）
-- Codex を貸している人に見せるログ: set_log_visibility
+- Codex を貸している人に見せるログ: set_log_visibility(value, lender)（lender は必須）
 - セッション: list_sessions / read_session / delete_session（複数の人が接続しているときは lender を渡す）、タスク一覧: list_tasks
 """
 APPROVAL_NOTE = ("承認待ちがあります。中身を見て、decide_approval で許可か拒否をしてください"
@@ -222,18 +222,12 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
             return {"ok": True}
         return await run(f)
 
-    @tool("Codex の使用量（5 時間枠・週間枠の使用率と、戻る時刻）としきい値を返します。"
+    @tool("Codex の使用量（5 時間枠・週間枠の使用率と、戻る時刻）を返します。"
           "lenders に、Codex を貸している人の名前ごとの値があります（blocked_until があれば、その時刻まで新しい依頼を受けられません）。"
           "いちばん外側の five_hour / weekly は、最後に接続した 1 人の値です。")
     async def get_usage() -> CallToolResult:
         async def f():
             return mgr.usage()
-        return await run(f)
-
-    @tool("使用量のしきい値（%）を変えます。超えると作業中の Codex にすぐ止めて報告するよう指示し、新しい依頼を止めます。")
-    async def set_thresholds(five_hour: float | None = None, weekly: float | None = None) -> CallToolResult:
-        async def f():
-            return await mgr.set_thresholds(five_hour, weekly)
         return await run(f)
 
     @tool("タスクがファイル操作の道具で変えたファイルを、すべて元に戻します（コマンド実行による変更は戻りません）。")
@@ -322,23 +316,20 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
             return {"ok": True}
         return await run(f)
 
-    @tool("コマンド実行のモードを変えます: off（実行しない）/ allowlist（許可リスト外は承認待ち）/ ask（毎回承認待ち）/ all（すべて自動）。"
-          "lender に Codex を貸している人の名前を渡すと、その人だけのモードになります（inherit で全体と同じに戻す）。"
-          "利用者に頼まれたときだけ使ってください。")
+    @tool("コマンド実行のモードを、Codex を貸している人ごとに変えます（lender は必須）: "
+          "off（実行しない）/ allowlist（許可リスト外は承認待ち）/ ask（毎回承認待ち）/ all（すべて自動）。"
+          "inherit にすると、その人だけの設定を外します。利用者に頼まれたときだけ使ってください。")
     async def set_exec_mode(mode: str, lender: str | None = None) -> CallToolResult:
         async def f():
-            if lender is not None:
-                if lender not in {i["name"] for i in tokens.list()}:
-                    raise ToolError(f"その名前の招待コードがありません: {lender}")
-                try:
-                    policy.set_lender_exec_mode(lender, mode)
-                except ValueError as e:
-                    raise ToolError(str(e)) from e
-                return {"lender": lender, "exec_mode": policy.current().lender_exec_modes.get(lender)}
-            if mode not in EXEC_MODES:
-                raise ToolError(f"mode は {', '.join(EXEC_MODES)} のどれかです")
-            policy.update(exec_mode=mode)
-            return {"exec_mode": policy.current().exec_mode}
+            if lender is None:
+                raise ToolError("lender を指定してください")
+            if lender not in {i["name"] for i in tokens.list()}:
+                raise ToolError(f"その名前の招待コードがありません: {lender}")
+            try:
+                policy.set_lender_exec_mode(lender, mode)
+            except ValueError as e:
+                raise ToolError(str(e)) from e
+            return {"lender": lender, "exec_mode": policy.current().lender_exec_modes.get(lender)}
         return await run(f)
 
     @tool("全体の一時停止（paused=true）と解除（false）。一時停止中は Codex のすべての道具が「停止中」を返します。")
@@ -348,13 +339,18 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
             return {"paused": policy.current().paused}
         return await run(f)
 
-    @tool("知人の PC のログ画面に見せる範囲: summary（依頼と最終報告）/ files（＋道具と対象パス）/ all（すべて）。")
-    async def set_log_visibility(value: str) -> CallToolResult:
+    @tool("Codex を貸している人（lender は必須）の PC のログ画面に見せる範囲: "
+          "summary（依頼と最終報告）/ files（＋道具と対象パス）/ all（すべて）。")
+    async def set_log_visibility(value: str, lender: str | None = None) -> CallToolResult:
         async def f():
+            if lender is None:
+                raise ToolError("lender を指定してください")
+            if lender not in {i["name"] for i in tokens.list()}:
+                raise ToolError(f"その名前の招待コードがありません: {lender}")
             if value not in LOG_VISIBILITY:
                 raise ToolError(f"value は {', '.join(LOG_VISIBILITY)} のどれかです")
-            await mgr.set_log_visibility(value)
-            return {"log_visibility": value}
+            await mgr.set_log_visibility(value, lender)
+            return {"lender": lender, "log_visibility": value}
         return await run(f)
 
     @tool("タスクの一覧（新しい順）を返します。")
@@ -434,7 +430,7 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
                     "lender_exec_modes": p.lender_exec_modes,
                     "policy_problem": policy.problems(),
                     "current_task": mgr.current_task_id(), "pending_approvals": len(approvals.pending()),
-                    "usage": mgr.usage(), "log_visibility": mgr.settings["log_visibility"]}
+                    "usage": mgr.usage()}
         return await run(f)
 
     return make_endpoint(server, lambda app: LoopbackOnly(OriginTag(app)), dns_protection=True)

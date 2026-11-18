@@ -60,7 +60,6 @@ def admin_router(host) -> APIRouter:
             "policy_problem": host.policy.problems(),
             "agent": host.mgr.agent_info(), "current_task": host.mgr.current_task_id(),
             "pending_approvals": len(host.approvals.pending()), "usage": host.mgr.usage(),
-            "log_visibility": host.mgr.settings["log_visibility"],
         }
 
     @r.get("/api/policy")
@@ -188,15 +187,6 @@ def admin_router(host) -> APIRouter:
         host.events.notify()
         return {"paused": host.policy.current().paused}
 
-    @r.put("/api/exec-mode")
-    async def exec_mode(body: dict):
-        try:
-            host.policy.update(exec_mode=body.get("mode"))
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        host.events.notify()
-        return {"ok": True}
-
     @r.get("/api/notify/wait")
     async def notify_wait(request: Request, task_id: str | None = None, origin: str | None = None,
                           any: bool = False, session: str | None = None, timeout: float = WAIT_DEFAULT):
@@ -223,14 +213,40 @@ def admin_router(host) -> APIRouter:
     async def lenders():
         """One row per lender: connection, versions, usage, own limits, capabilities (disposable sessions,
         pre-approval) and the task in progress. Invited names that have not connected are listed too."""
-        modes = host.policy.current().lender_exec_modes
-        return [{**row, "exec_mode": modes.get(row["name"])}
-                for row in host.mgr.lenders(i["name"] for i in host.tokens.list())]
+        policy = host.policy.current()
+        invites = host.tokens.list()
+        created = {i["name"]: i["created"] for i in invites}
+        return [{**row, "exec_mode": policy.exec_mode_for(row["name"]),
+                 "delete_approval": policy.delete_approval_for(row["name"]),
+                 "log_visibility": host.mgr.log_visibility_for(row["name"]),
+                 "invite_created": created.get(row["name"])}
+                for row in host.mgr.lenders(i["name"] for i in invites)]
+
+    def _known_lender(name: str) -> None:
+        if name not in {i["name"] for i in host.tokens.list()}:
+            raise HTTPException(404, f"その名前の招待コードがありません: {name}")
+
+    @r.put("/api/lenders/{name}/delete-approval")
+    async def lender_delete_approval(name: str, body: dict):
+        _known_lender(name)
+        if not isinstance(body.get("value"), bool):
+            raise HTTPException(400, "value は true か false です")
+        host.policy.set_lender_delete_approval(name, body["value"])
+        host.events.notify()
+        return {"ok": True}
+
+    @r.put("/api/lenders/{name}/log-visibility")
+    async def lender_log_visibility(name: str, body: dict):
+        _known_lender(name)
+        try:
+            await host.mgr.set_log_visibility(body.get("value"), name)
+        except ToolError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True}
 
     @r.put("/api/lenders/{name}/exec-mode")
     async def lender_exec_mode(name: str, body: dict):
-        if name not in {i["name"] for i in host.tokens.list()}:
-            raise HTTPException(404, f"その名前の招待コードがありません: {name}")
+        _known_lender(name)
         try:
             host.policy.set_lender_exec_mode(name, body.get("mode"))
         except ValueError as e:
@@ -304,21 +320,6 @@ def admin_router(host) -> APIRouter:
     async def usage():
         return host.mgr.usage()
 
-    @r.put("/api/thresholds")
-    async def thresholds(body: dict):
-        try:
-            return await host.mgr.set_thresholds(body.get("five_hour"), body.get("weekly"))
-        except ToolError as e:
-            raise HTTPException(400, str(e))
-
-    @r.put("/api/log-visibility")
-    async def log_visibility(body: dict):
-        try:
-            await host.mgr.set_log_visibility(body.get("value"))
-        except ToolError as e:
-            raise HTTPException(400, str(e))
-        return {"ok": True}
-
     @r.get("/api/invites")
     async def invites():
         return host.tokens.list()
@@ -327,6 +328,17 @@ def admin_router(host) -> APIRouter:
     async def issue(body: dict):
         name = str(body.get("name") or "friend").strip()
         token = host.tokens.issue(name)
+        if name not in host.policy.current().lender_exec_modes:
+            host.policy.set_lender_exec_mode(name, "ask")  # a new lender starts at "ask every time"
+            host.events.notify()
+        return {"code": make_invite(f"http://{host.config.public_bind}", token, name)}
+
+    @r.post("/api/invites/{name}/reissue")
+    async def reissue(name: str):
+        try:
+            token = host.tokens.reissue(name)
+        except KeyError:
+            raise HTTPException(404, f"その名前の招待コードがありません: {name}")
         return {"code": make_invite(f"http://{host.config.public_bind}", token, name)}
 
     @r.delete("/api/invites/{name}")

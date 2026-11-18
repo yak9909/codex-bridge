@@ -231,13 +231,83 @@ async def test_invite_issue_and_revoke(admin, host):
     assert host.tokens.hashes() == set()
 
 
-async def test_pause_and_thresholds_and_visibility(admin, host):
+async def test_pause(admin, host):
     await admin.post("/admin/api/pause", json={"paused": True}, headers=H)
     assert host.policy.current().paused is True
-    await admin.put("/admin/api/thresholds", json={"five_hour": 70}, headers=H)
-    assert (await admin.get("/admin/api/usage")).json()["thresholds"]["five_hour"] == 70
-    assert (await admin.put("/admin/api/log-visibility", json={"value": "all"}, headers=H)).status_code == 200
-    assert (await admin.put("/admin/api/log-visibility", json={"value": "x"}, headers=H)).status_code == 400
+
+
+async def test_removed_endpoints_404(admin):
+    for path, body in (("thresholds", {"five_hour": 70}), ("exec-mode", {"mode": "off"}),
+                       ("log-visibility", {"value": "all"})):
+        r = await admin.put(f"/admin/api/{path}", json=body, headers=H)
+        assert r.status_code == 404, path
+
+
+async def test_invite_sets_ask(admin, host):
+    await admin.post("/admin/api/invites", json={"name": "alice"}, headers=H)
+    assert host.policy.current().lender_exec_modes == {"alice": "ask"}
+    row = (await admin.get("/admin/api/lenders")).json()[0]
+    assert row["exec_mode"] == "ask"
+
+
+async def test_invite_keeps_existing_mode(admin, host):
+    host.policy.update(lender_exec_modes={"alice": "all"})
+    await admin.post("/admin/api/invites", json={"name": "alice"}, headers=H)
+    assert host.policy.current().lender_exec_modes == {"alice": "all"}
+
+
+async def test_reissue_invalidates_old_code(admin, host):
+    old = parse_invite((await admin.post("/admin/api/invites", json={"name": "alice"}, headers=H)).json()["code"])
+    r = await admin.post("/admin/api/invites/alice/reissue", headers=H)
+    assert r.status_code == 200
+    new = parse_invite(r.json()["code"])
+    assert new.token != old.token and new.name == "alice"
+    assert host.tokens.match(old.token) is None and host.tokens.match(new.token) == "alice"
+    assert host.policy.current().lender_exec_modes == {"alice": "ask"}  # settings are kept
+
+
+async def test_reissue_unknown_404(admin, host):
+    r = await admin.post("/admin/api/invites/nobody/reissue", headers=H)
+    assert r.status_code == 404
+    assert (await admin.post("/admin/api/invites/nobody/reissue")).status_code == 403
+
+
+async def test_lender_rows_have_new_fields(admin, host):
+    host.policy.update(lender_exec_modes={"alice": "all"}, lender_delete_approval={"alice": False})
+    host.tokens.issue("alice")
+    host.tokens.issue("bob")
+    host.policy.update(exec_mode="off")
+    assert (await admin.put("/admin/api/lenders/alice/log-visibility", json={"value": "files"}, headers=H)).status_code == 200
+    rows = {r["name"]: r for r in (await admin.get("/admin/api/lenders")).json()}
+    created = {i["name"]: i["created"] for i in host.tokens.list()}
+    assert rows["alice"]["exec_mode"] == "all" and rows["bob"]["exec_mode"] == "off"  # the effective mode
+    assert (rows["alice"]["delete_approval"], rows["bob"]["delete_approval"]) == (False, True)
+    assert (rows["alice"]["log_visibility"], rows["bob"]["log_visibility"]) == ("files", "summary")
+    assert rows["alice"]["invite_created"] == created["alice"] and isinstance(rows["bob"]["invite_created"], float)
+
+
+async def test_put_lender_delete_approval(admin, host):
+    host.tokens.issue("alice")
+    r = await admin.put("/admin/api/lenders/alice/delete-approval", json={"value": False}, headers=H)
+    assert r.status_code == 200 and host.policy.current().delete_approval_for("alice") is False
+    assert host.policy.current().delete_approval_for("bob") is True
+    for body in ({"value": "no"}, {"value": 0}, {}):
+        assert (await admin.put("/admin/api/lenders/alice/delete-approval", json=body, headers=H)).status_code == 400
+    assert (await admin.put("/admin/api/lenders/nobody/delete-approval", json={"value": True}, headers=H)).status_code == 404
+
+
+async def test_put_lender_log_visibility(admin, host):
+    host.tokens.issue("alice")
+    sent = []
+    async def send(m):
+        sent.append(m)
+    link = host.mgr.attach("alice", send)
+    await host.mgr.on_agent_message(link, {"type": "hello"})
+    r = await admin.put("/admin/api/lenders/alice/log-visibility", json={"value": "all"}, headers=H)
+    assert r.status_code == 200 and sent[-1]["type"] == "settings" and sent[-1]["log_visibility"] == "all"
+    assert (await admin.put("/admin/api/lenders/alice/log-visibility", json={"value": "x"}, headers=H)).status_code == 400
+    assert (await admin.put("/admin/api/lenders/nobody/log-visibility", json={"value": "all"}, headers=H)).status_code == 404
+    assert host.mgr.log_visibility_for("alice") == "all"
 
 
 async def test_overview(admin):
@@ -274,7 +344,7 @@ async def test_overview_reports_policy_problem(admin, host):
                 await claude_call(admin, "remove_shared_folder", {"path": bad})
 
 
-@pytest.mark.parametrize("operation", ["remove", "hidden", "inherit", "pause", "exec_mode"])
+@pytest.mark.parametrize("operation", ["remove", "hidden", "inherit", "pause", "exec_mode"])  # exec_mode: per lender
 async def test_bad_folder_can_be_removed_or_hidden(admin, host, operation):
     bad = store_bad_folder(host)
     if operation == "remove":
@@ -286,7 +356,8 @@ async def test_bad_folder_can_be_removed_or_hidden(admin, host, operation):
     elif operation == "pause":
         response = await admin.post("/admin/api/pause", headers=H, json={"paused": True})
     else:
-        response = await admin.put("/admin/api/exec-mode", headers=H, json={"mode": "off"})
+        host.tokens.issue("alice")
+        response = await admin.put("/admin/api/lenders/alice/exec-mode", headers=H, json={"mode": "off"})
     assert response.status_code == 200, response.text
 
 
@@ -771,7 +842,7 @@ async def test_lenders_api_lists_each_lender(admin, host):
     # everything the table of lenders shows (design 3.2)
     assert a["connected"] is True and a["ready"] is True and a["current_task_id"] == tid
     assert a["usage"]["five_hour"]["used_percent"] == 60 and a["usage"]["weekly"] is None
-    assert a["usage"]["thresholds"] == {"five_hour": 90, "weekly": 95} and a["usage"]["blocked_until"] is None
+    assert "thresholds" not in a["usage"] and a["usage"]["blocked_until"] is None
     assert a["limits"] == {"five_hour": 70, "weekly": None, "force": True}
     assert a["capabilities"] == {"resumable": True, "pre_approval": False, "model_select": False}
     assert (a["agent_version"], a["codex_version"], a["auth_mode"]) == ("0.2.0", "x", "chatgpt")
@@ -869,7 +940,9 @@ async def test_put_lender_exec_mode(admin, host, monkeypatch):
         assert host.policy.current().lender_exec_modes == expected
         assert (await admin.get("/admin/api/overview")).json()["lender_exec_modes"] == expected
         rows = (await admin.get("/admin/api/lenders")).json()
-        assert {r["name"]: r["exec_mode"] for r in rows} == {"alice": expected.get("alice"), "bob": None}
+        global_mode = host.policy.current().exec_mode  # effective: the lender's own, else the global one
+        assert {r["name"]: r["exec_mode"] for r in rows} == {"alice": expected.get("alice", global_mode),
+                                                              "bob": global_mode}
     assert len(notices) == 5
     for body in ({"mode": "bad"}, {"mode": False}, {"mode": []}, {}):
         r = await admin.put("/admin/api/lenders/alice/exec-mode", json=body, headers=H)

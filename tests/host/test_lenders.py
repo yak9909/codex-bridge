@@ -310,9 +310,7 @@ class FakeAgent:
 
 @pytest.fixture
 def mgr(tmp_path):
-    m = TaskManager(tmp_path / "data", touched_fn=lambda tid: [])
-    m.settings["thresholds"] = dict(TH)
-    return m
+    return TaskManager(tmp_path / "data", touched_fn=lambda tid: [])
 
 
 async def test_two_lenders_work_in_parallel(mgr):
@@ -358,7 +356,8 @@ async def test_explicit_lender_is_used(mgr):
 
 
 async def test_explicit_lender_over_its_limit_is_refused(mgr):
-    alice, bob = await FakeAgent.join(mgr, "alice"), await FakeAgent.join(mgr, "bob")
+    alice = await FakeAgent.join(mgr, "alice", limits=TH)
+    bob = await FakeAgent.join(mgr, "bob", limits=TH)
     await alice.push("usage", **usage(five_hour=10))
     await bob.push("usage", **usage(five_hour=95))
     with pytest.raises(ToolError, match="再開可能"):
@@ -503,7 +502,8 @@ async def test_nothing_a_lender_sends_keeps_the_lists_from_being_json(mgr):
 
 
 async def test_a_bogus_percent_does_not_put_a_lender_first(mgr):
-    alice, bob = await FakeAgent.join(mgr, "alice"), await FakeAgent.join(mgr, "bob")
+    alice = await FakeAgent.join(mgr, "alice", limits=TH)
+    bob = await FakeAgent.join(mgr, "bob", limits=TH)
     await alice.push("usage", five_hour={"used_percent": -500, "resets_at": int(time.time()) + 60}, weekly=None, ts=0)
     await bob.push("usage", **usage(five_hour=70))
     assert mgr.usage()["lenders"]["alice"]["five_hour"] is None
@@ -520,7 +520,7 @@ async def test_invited_names_are_listed_even_before_they_connect(mgr):
     assert carol["connected"] is False and carol["ready"] is False and carol["since"] is None
     assert carol["capabilities"] is None and carol["limits"] is None and carol["current_task_id"] is None
     assert carol["usage"]["five_hour"] is None and carol["usage"]["weekly"] is None
-    assert carol["usage"]["blocked_until"] is None and carol["usage"]["thresholds"] == TH
+    assert carol["usage"]["blocked_until"] is None and "thresholds" not in carol["usage"]
     assert [r["name"] for r in mgr.lenders()] == ["alice"]  # without the invite list: as before
     with pytest.raises(ToolError, match="接続されていません"):  # being listed does not make one reachable
         await mgr.start("one", lender="carol")
@@ -537,13 +537,14 @@ async def test_limits_that_are_not_an_object_leave_the_known_ones_in_place(mgr):
 
 async def test_usage_and_lenders_are_per_lender(mgr):
     assert mgr.lenders() == [] and mgr.usage()["lenders"] == {} and mgr.agent_info() == {"connected": False}
-    alice, bob = await FakeAgent.join(mgr, "alice"), await FakeAgent.join(mgr, "bob")
+    alice = await FakeAgent.join(mgr, "alice", limits=TH)
+    bob = await FakeAgent.join(mgr, "bob", limits=TH)
     await alice.push("usage", **usage(five_hour=10))
     await bob.push("usage", **usage(five_hour=95))
     u = mgr.usage()
     assert u["lenders"]["alice"]["five_hour"]["used_percent"] == 10 and u["lenders"]["alice"]["blocked_until"] is None
     assert u["lenders"]["bob"]["five_hour"]["used_percent"] == 95 and u["lenders"]["bob"]["blocked_until"]
-    assert u["five_hour"]["used_percent"] == 95 and u["thresholds"] == TH  # top level: the latest connection
+    assert u["five_hour"]["used_percent"] == 95  # top level: the latest connection
     tid = await mgr.start("one")
     rows = {r["name"]: r for r in mgr.lenders()}
     assert rows["alice"]["connected"] and rows["alice"]["current_task_id"] == tid

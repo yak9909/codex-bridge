@@ -90,7 +90,7 @@ def build_host(config: HostConfig, config_path: Path | None = None) -> Host:
         return mgr.current_task_id(lender) if lender is not None else None
 
     write = WriteTools(paths, policy, snapshots, audit, task_id_fn,
-                       make_approve_fn(approvals, task_id_fn, wait_sec=30))
+                       make_approve_fn(approvals, task_id_fn, wait_sec=30), lender_fn=current_lender.get)
     services = HostServices(
         paths=paths, policy=policy, read=ReadTools(paths, policy), search=SearchTools(paths, policy, config.rg_path),
         write=write, runner=CommandRunner(paths, policy, approvals, snapshots, audit, task_id_fn,

@@ -111,6 +111,7 @@ class Policy:
     paused: bool = False
     confirm_modified_scripts: bool = False
     delete_needs_approval: bool = True
+    lender_delete_approval: dict[str, bool] = field(default_factory=dict)
     limits: Limits = Limits()
     folders: tuple[Folder, ...] = ()  # v2: absolute folders
     main: Path | None = None          # v2: relative paths are resolved from here
@@ -118,6 +119,11 @@ class Policy:
 
     def exec_mode_for(self, lender: str | None) -> str:
         return self.lender_exec_modes.get(lender, self.exec_mode) if lender is not None else self.exec_mode
+
+    def delete_approval_for(self, lender: str | None) -> bool:
+        """Whether a delete by this lender waits for approval (the global value when it has none of its own)."""
+        return self.lender_delete_approval.get(lender, self.delete_needs_approval) if lender is not None \
+            else self.delete_needs_approval
 
     def level_for_abs(self, p: Path) -> Level | None:
         """v2: the level of an absolute path, or None if no registered folder contains it."""
@@ -215,6 +221,12 @@ def parse_policy(data: dict | None) -> Policy:
         if not isinstance(name, str) or value not in EXEC_MODES:
             raise ValueError(f"lender_exec_modes の値は {EXEC_MODES} のどれかです: {name}")
         lender_exec_modes[name] = value
+    approvals = data.get("lender_delete_approval")
+    if approvals is None:
+        approvals = {}
+    if not isinstance(approvals, dict) or not all(isinstance(n, str) and isinstance(v, bool)
+                                                  for n, v in approvals.items()):
+        raise ValueError("lender_delete_approval は 名前: true/false の形で書いてください")
     allow = ex.get("allow") or []
     if not isinstance(allow, list) or not all(isinstance(a, str) for a in allow):
         raise ValueError("exec.allow must be a list of strings")
@@ -232,6 +244,7 @@ def parse_policy(data: dict | None) -> Policy:
         paused=bool(data.get("paused", False)),
         confirm_modified_scripts=bool(ex.get("confirm_modified_scripts", False)),
         delete_needs_approval=bool(data.get("delete_needs_approval", True)),
+        lender_delete_approval=dict(approvals),
         limits=limits,
         folders=tuple(folders),
         main=main,
@@ -349,8 +362,16 @@ class PolicyStore:
             return
         self.update(lender_exec_modes={**self.current().lender_exec_modes, name: mode})
 
+    def set_lender_delete_approval(self, name: str, value: bool) -> None:
+        self.update(lender_delete_approval={**self.current().lender_delete_approval, name: bool(value)})
+
     def drop_lender(self, name: str) -> None:
-        modes = dict(self.current().lender_exec_modes)
-        if name in modes:
-            del modes[name]
-            self.update(lender_exec_modes=modes)
+        current = self.current()
+        changes = {}
+        if name in current.lender_exec_modes:
+            changes["lender_exec_modes"] = {k: v for k, v in current.lender_exec_modes.items() if k != name}
+        if name in current.lender_delete_approval:
+            changes["lender_delete_approval"] = {k: v for k, v in current.lender_delete_approval.items()
+                                                 if k != name}
+        if changes:
+            self.update(**changes)

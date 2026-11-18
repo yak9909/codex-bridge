@@ -9,6 +9,7 @@ form = {
   "exec": {"mode": "allowlist", "allow": [...], "confirm_modified_scripts": False},
   "lender_exec_modes": {"friend": "ask"},                      # only the mode varies per lender
   "delete_needs_approval": True,
+  "lender_delete_approval": {"friend": False},                 # per-lender override of the line above
   "paused": False,
 }
 """
@@ -51,6 +52,7 @@ def form_from_raw(raw: dict | None) -> dict:
         "lender_exec_modes": {name: ("off" if v is False else v)
                               for name, v in (raw.get("lender_exec_modes") or {}).items()},
         "delete_needs_approval": bool(raw.get("delete_needs_approval", True)),
+        "lender_delete_approval": {name: bool(v) for name, v in (raw.get("lender_delete_approval") or {}).items()},
         "paused": bool(raw.get("paused", False)),
     }
 
@@ -82,6 +84,7 @@ def yaml_from_form(form: dict) -> str:
     if mode not in EXEC_MODES:
         raise ValueError(f"exec.mode は {EXEC_MODES} のどれかです")
     lender_modes = parse_policy({"lender_exec_modes": form.get("lender_exec_modes")}).lender_exec_modes
+    delete_approvals = parse_policy({"lender_delete_approval": form.get("lender_delete_approval")}).lender_delete_approval
     allow = [a.strip() for a in ex.get("allow") or [] if a and a.strip()]
 
     lines = [
@@ -130,6 +133,12 @@ def yaml_from_form(form: dict) -> str:
         "",
         "# 削除するときは承認待ちにする",
         f"delete_needs_approval: {str(bool(form.get('delete_needs_approval', True))).lower()}",
+    ]
+    if delete_approvals:
+        lines += ["# Codex を貸している人ごとの削除の承認（書いていない人は、上の delete_needs_approval と同じ）",
+                  "lender_delete_approval:"]
+        lines += [f"  {_q(name)}: {str(value).lower()}" for name, value in delete_approvals.items()]
+    lines += [
         "",
         "# 全体の一時停止（true の間、Codex の道具はすべて止まる）",
         f"paused: {str(bool(form.get('paused', False))).lower()}",
@@ -139,8 +148,10 @@ def yaml_from_form(form: dict) -> str:
 
 
 def save_form(store: PolicyStore, form: dict) -> None:
-    if "lender_exec_modes" not in form:
-        form = {**form, "lender_exec_modes": form_from_raw(store.as_dict())["lender_exec_modes"]}
+    current = form_from_raw(store.as_dict())
+    for key in ("lender_exec_modes", "lender_delete_approval"):
+        if key not in form:
+            form = {**form, key: current[key]}
     store.save_text(yaml_from_form(form))
 
 
