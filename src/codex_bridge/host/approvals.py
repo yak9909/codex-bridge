@@ -44,6 +44,13 @@ class Approvals:
         self._items: dict[str, Approval] = {}
         self._ids = itertools.count(1)
         self.on_change: list[Callable[[], None]] = []
+        self.log: Callable[[str, str], None] = lambda level, text: None  # (level, text); set by the app
+
+    def _say(self, level: str, text: str) -> None:
+        try:
+            self.log(level, text)
+        except Exception:
+            pass
 
     def _changed(self) -> None:
         for cb in list(self.on_change):
@@ -62,6 +69,7 @@ class Approvals:
                      created_at=time.monotonic(), key=key, cwd=cwd,
                      _timeout=self.policy.current().limits.approval_timeout_sec)
         self._items[a.id] = a
+        self._say("warn", f"承認待ち: {kind} {summary}（{task_id}）")
         self._changed()
         return a
 
@@ -74,6 +82,7 @@ class Approvals:
             raise KeyError(approval_id)
         a.decided = "approved" if approve else "denied"
         a._event.set()
+        self._say("info", f"{'許可' if approve else '拒否'}: {a.kind} {a.summary}（{a.task_id}）")
         self._changed()
 
     def consume(self, approval_id: str) -> None:

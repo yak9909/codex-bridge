@@ -17,7 +17,9 @@ from urllib.parse import urlsplit
 import uvicorn
 
 from .. import __version__
+from ..common.applog import AppLog
 from ..common.invite import Invite, make_invite, parse_invite
+from ..common.protocol import FINAL_STATES
 from .appserver import AppServer, codex_command
 from .control_client import ControlClient
 from .connections import ConnectionStore
@@ -185,9 +187,16 @@ class AgentConnections:
         runner.catalog = self.catalog
         runner.last_usage = self.slot.last_usage
         runner.log_visibility = current["log_visibility"]
+        last_status = [None]
+
+        def on_status(text):  # connection state changes only: the client repeats its status on every retry
+            if text != last_status[0]:
+                last_status[0] = text
+                self.on_log({"type": "connection", "text": f"{runner.host_name}: {text}"})
+
         client = ControlClient(connection.invite, runner,
                                hello=lambda: {**self.versions, **hello_fields(runner.settings, runner.catalog)},
-                               initial_backoff=self.initial_backoff)
+                               initial_backoff=self.initial_backoff, on_status=on_status)
         client.paused = self.paused
         self.runners[connection.id], self.clients[connection.id] = runner, client
         # The existing applier handles a deferred restart, using the combined settings of this connection.
@@ -386,7 +395,24 @@ class AgentConnections:
                 for id, runner in self.runners.items()]
 
 
-async def run_agent(invite: Invite | None, codex: Path, home: Path) -> bool:
+def applog_line(message: dict) -> tuple[str, str] | None:
+    """(level, text) for the shared app log, or None when a runner message is not worth a line.
+    Never includes prompts or file contents."""
+    kind = message.get("type")
+    if kind == "error":
+        return "error", str(message.get("text", ""))
+    if kind == "task_state":
+        task_id, state = message.get("task_id"), message.get("state")
+        if state in FINAL_STATES:
+            return "info", f"{task_id} が終わりました"
+        if state == "running":
+            return "info", f"{task_id} を受け付けました"
+    if kind == "connection":
+        return "warn", str(message.get("text", ""))
+    return None
+
+
+async def run_agent(invite: Invite | None, codex: Path, home: Path, applog: AppLog | None = None) -> bool:
     """Runs all saved hosts until quit; True asks the exe to relaunch after moving its data."""
     cmd = codex_command(codex)
     store = LogStore(home / "logs")
@@ -418,6 +444,8 @@ async def run_agent(invite: Invite | None, codex: Path, home: Path) -> bool:
         nonlocal notified
         if message.get("type") in {"settings", "error"}:
             store.add(message)
+        if applog is not None and (line := applog_line(message)) is not None:
+            applog.add("lend", *line)
         if message.get("type") == "task_state" and message.get("state") == "awaiting_lender":
             runner = runtime.runners.get(message.get("connection_id"))
             pending = runner.pending_approval if runner else None

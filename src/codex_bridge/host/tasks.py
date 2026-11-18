@@ -128,6 +128,7 @@ class TaskManager:
         self._req_ids = itertools.count(1)
         self._task_ids = itertools.count(1)
         self.on_change: list[Callable[[], None]] = []
+        self.log: Callable[[str, str], None] = lambda level, text: None  # (level, text); set by the app
         self.invited_names: Callable[[], set[str]] | None = None
         # "log_visibility" is the default for lenders without their own value in "lender_log_visibility"
         self.settings = {"log_visibility": "summary", "lender_log_visibility": {}}
@@ -177,6 +178,12 @@ class TaskManager:
     def _save_settings(self) -> None:
         self.settings_path.write_text(json.dumps(self.settings, ensure_ascii=False), encoding="utf-8")
 
+    def _say(self, level: str, text: str) -> None:
+        try:
+            self.log(level, text)
+        except Exception:
+            pass
+
     def _changed(self) -> None:
         for cb in list(self.on_change):
             try:
@@ -199,6 +206,7 @@ class TaskManager:
         lender.send, lender.connected, lender.since = send, True, time.time()
         lender.ready = False  # until this connection's hello
         lender.busy_elsewhere = False
+        self._say("warn", f"{name} とつながりました")
         self._changed()
         return link_id
 
@@ -207,6 +215,7 @@ class TaskManager:
         if lender is None:
             return
         lender.send, lender.connected, lender.ready = None, False, False
+        self._say("warn", f"{lender.name} との接続が切れました")
         for rec in self.tasks.values():
             if rec.lender == lender.name and rec.state in ("queued", "running", "awaiting_lender"):
                 rec.state_before_offline = rec.state
@@ -376,6 +385,8 @@ class TaskManager:
             if resume_at is not None:
                 rec.resume_at = resume_at
             self._save(rec)
+            if state in FINAL_STATES:
+                self._say("error" if state == "failed" else "info", f"{rec.task_id} が終わりました（{state}）")
         elif t == "reply":
             owner, fut = self._pending.get(m.get("req_id"), (None, None))
             if owner != lender.name:
@@ -553,6 +564,7 @@ class TaskManager:
         self._save(rec)  # also marks the lender as working
         spec = {k: v for k, v in (("model", model), ("effort", effort)) if v is not None}
         await target.send(protocol.msg("task_start", task_id=task_id, prompt=prompt, continue_thread_id=thread_id, **spec))
+        self._say("info", f"{task_id} を {target.name} に送りました")
         return task_id
 
     async def _send_for(self, rec: TaskRecord, m: dict) -> None:

@@ -280,6 +280,24 @@ async def test_start_sends_task_and_tracks_state(mgr, agent):
     assert mgr.status(tid)["state"] == "running"
 
 
+async def test_task_sent_logged(mgr, agent):
+    lines = []
+    mgr.log = lambda level, text: lines.append((level, text))
+    tid = await mgr.start("secret prompt")
+    await agent.push("task_state", task_id=tid, state="failed", report="x")
+    assert (("info", f"{tid} を friend に送りました")) in lines
+    assert ("error", f"{tid} が終わりました（failed）") in lines
+    assert not any("secret prompt" in t for _, t in lines)
+
+
+def test_lender_connect_logged(mgr):
+    lines = []
+    mgr.log = lambda level, text: lines.append((level, text))
+    link = mgr.attach("friend", lambda m: None)
+    mgr.detach(link)
+    assert lines == [("warn", "friend とつながりました"), ("warn", "friend との接続が切れました")]
+
+
 async def test_no_agent_is_clear_error(mgr):
     with pytest.raises(ToolError, match="接続されていません"):
         await mgr.start("a")

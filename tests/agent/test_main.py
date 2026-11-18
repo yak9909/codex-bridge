@@ -229,3 +229,12 @@ async def test_final_review_move_pauses_before_copy_and_restores_on_failure(tmp_
         assert runtime.moving is (not fails)
     finally:
         await runtime.stop()
+
+
+def test_applog_line_maps_runner_messages():
+    from codex_bridge.agent.main import applog_line
+    assert applog_line({"type": "error", "text": "boom"}) == ("error", "boom")
+    assert applog_line({"type": "task_state", "task_id": "t1", "state": "running"}) == ("info", "t1 を受け付けました")
+    assert applog_line({"type": "task_state", "task_id": "t1", "state": "completed"}) == ("info", "t1 が終わりました")
+    assert applog_line({"type": "connection", "text": "x: 接続しました"}) == ("warn", "x: 接続しました")
+    assert applog_line({"type": "task_prompt", "task_id": "t1", "prompt": "secret"}) is None
