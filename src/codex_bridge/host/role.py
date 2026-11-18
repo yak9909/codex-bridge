@@ -7,11 +7,13 @@ import errno
 import socket
 import sys
 from pathlib import Path
+from typing import Callable
 
 import uvicorn
 import yaml
 
 from ..common.applog import AppLog
+from . import setup_tools as st
 from .app import Host, build_host, create_local_app, create_public_app
 from .config import effective_share_root, load_host_config
 
@@ -40,7 +42,11 @@ def bind_socket(host: str, port: int) -> socket.socket:
 
 
 class HostRole:
-    def __init__(self, config_path: Path, applog: AppLog, page_url: str | None = None) -> None:
+    def __init__(self, config_path: Path, applog: AppLog, page_url: str | None = None,
+                 tailscale_ip: Callable[[], str | None] | None = st.tailscale_ip) -> None:
+        # tailscale_ip: looked up (in a worker thread) before every start; None switches the lookup off
+        self.tailscale_ip = tailscale_ip
+        self._logged_error: str | None = None
         self.config_path = Path(config_path)
         self.applog = applog
         self.page_url = page_url  # where /admin/ on the local port sends the browser
@@ -54,16 +60,35 @@ class HostRole:
     async def start(self) -> None:
         if self.running:
             return
+        await self._teardown()  # leftovers of a server that died by itself
         self.error = None
         try:
+            await self._refresh_public_bind()
             await self._start()
         except HostStartError as e:
             await self._teardown()
             self.error = str(e)
-            self.applog.add("use", "error", self.error)
+            if self.error != self._logged_error:  # the app retries; do not repeat the same line
+                self._logged_error = self.error
+                self.applog.add("use", "error", self.error)
             raise
         self.running = True
+        self._logged_error = None
         self.applog.add("use", "info", "使う側を始めました")
+
+    async def _refresh_public_bind(self) -> None:
+        """Point public_bind at this PC's Tailscale IP (it changes, and is missing until Tailscale is up)."""
+        if self.tailscale_ip is None:
+            return
+        ip = await asyncio.to_thread(self.tailscale_ip)
+        if not ip:
+            raise HostStartError("Tailscale につながっていません。つながると自動で起動します。")
+        try:
+            changed = await asyncio.to_thread(st.update_public_bind, self.config_path, ip)
+        except OSError as e:
+            raise HostStartError(f"設定ファイル（{self.config_path.name}）を書き換えられません: {e}") from e
+        if changed:
+            self.applog.add("use", "warn", "Tailscale の IP が変わったので設定を更新しました。招待コードは発行し直してください。")
 
     async def _start(self) -> None:
         try:
@@ -120,7 +145,11 @@ class HostRole:
         raise HostStartError(f"サーバーを始められませんでした: {failure}" if failure else "サーバーを始められませんでした")
 
     def _ended(self, task: asyncio.Task) -> None:
-        if self._stopping or not self.running:
+        if self._stopping:
+            return
+        for server in self._servers:  # one listener gone: do not leave the other holding its port
+            server.should_exit = True
+        if not self.running:
             return
         self.running = False
         failure = None if task.cancelled() else task.exception()

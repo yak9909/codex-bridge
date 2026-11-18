@@ -20,6 +20,7 @@ from starlette.datastructures import MutableHeaders
 from starlette.routing import Route
 
 from .common.applog import AppLog
+from .host.config import load_host_config
 from .host.role import HostStartError, bind_socket
 from .host.web.app import APP_PAGE, _guard, admin_router
 
@@ -156,7 +157,12 @@ def create_resident_app(state: "Resident") -> FastAPI:
             raise HTTPException(409, "使う側はもう動いています")
         if state.setup_running:
             raise HTTPException(409, "初期設定はもう開いています")
-        state.start_setup()
+        try:
+            state.start_setup()
+        except OSError as e:
+            text = f"初期設定を始められませんでした: {e}"
+            state.applog.add("use", "error", text)
+            raise HTTPException(500, text) from e
         return {"started": True}
 
     @app.get("/app/api/logs")
@@ -276,6 +282,8 @@ class Resident:
         self.stop_event: asyncio.Event | None = None
         self._background: list[asyncio.Task] = []
         self._seen_approvals: set[str] = set()
+        self.retry_interval = 10.0
+        self._retry: asyncio.Task | None = None
 
     # -- what the screen and the tray read
     @property
@@ -344,28 +352,48 @@ class Resident:
             code = await asyncio.to_thread(proc.wait)
         finally:
             self.setup_proc = None
-        if code == 0:
-            self.applog.add("use", "info", "初期設定が終わりました")
-            await self.start_host()
+        # Closing the finished console with X gives a non-zero code: what counts is a usable host.yaml.
+        try:
+            load_host_config(self.config_path)
+        except Exception:
+            self.setup_error = "初期設定が終わっていません。もう一度「準備を始める」を押してください"
+            self.applog.add("use", "error", f"{self.setup_error}（終了コード {code}）")
+            return
+        if code != 0:
+            self.applog.add("use", "warn", "初期設定が途中で終わった可能性があります。"
+                                           "うまく動かないときは、もう一度「準備を始める」を押してください。")
         else:
-            self.setup_error = f"初期設定が終わりませんでした（終了コード {code}）。もう一度開いてください"
-            self.applog.add("use", "error", self.setup_error)
+            self.applog.add("use", "info", "初期設定が終わりました")
+        await self.start_host()
 
     async def start_host(self) -> None:
-        """Start the borrower's side. A failure is kept for the screen (host_role.error); the app goes on."""
+        """Start the borrower's side. A failure is kept for the screen (host_role.error), the app goes on,
+        and the start is tried again every retry_interval seconds until the host runs or the app quits."""
+        if not await self._try_start_host():
+            if self._retry is None or self._retry.done():
+                self._retry = asyncio.create_task(self._retry_host())
+                self._background.append(self._retry)
+
+    async def _try_start_host(self) -> bool:
         try:
             await self.host_role.start()
         except HostStartError:
-            return
+            return False
         except Exception as e:  # never let the borrower's side take the lender's side down
             self.host_role.error = f"使う側を始められませんでした: {type(e).__name__}: {e}"
             self.applog.add("use", "error", self.host_role.error)
-            return
+            return False
         host = self.host_role.host
-        if host is None:
-            return
-        host.approvals.on_change.append(self._approvals_changed)
-        self._background.append(asyncio.create_task(self._watch_shutdown(host)))
+        if host is not None:
+            host.approvals.on_change.append(self._approvals_changed)
+            self._background.append(asyncio.create_task(self._watch_shutdown(host)))
+        return True
+
+    async def _retry_host(self) -> None:
+        while not self.host_role.running:
+            await asyncio.sleep(self.retry_interval)
+            if self.host_role.running or await self._try_start_host():
+                return
 
     def _approvals_changed(self) -> None:
         host = self.host_role.host

@@ -82,7 +82,7 @@ def run_setup(config_path: Path, *, then_start: bool = False, from_app: bool = F
     if _yes("今、権限の規則をメモ帳で開きますか？", default=False):
         subprocess.Popen(["notepad.exe", str(policy)])
 
-    _step(4, total, "ファイアウォールの許可（知人の PC からの接続を通す）")
+    _step(4, total, "ファイアウォールの許可（" + ("貸す人" if from_app else "知人") + "の PC からの接続を通す）")
     if st.firewall_rule_exists():
         _say("設定済みです。")
     else:
@@ -105,10 +105,15 @@ def run_setup(config_path: Path, *, then_start: bool = False, from_app: bool = F
     n += 1
     _say(f"  {n}. install-mcp.bat を実行して、Claude Code / Codex から codex-bridge を使えるようにする")
     n += 1
-    _say(f"  {n}. 管理画面の「招待コード」を発行し、同じ zip と一緒に知人に渡す（知人は exe をダブルクリックして「貸す側」）")
+    if from_app:
+        _say(f"  {n}. codex-bridge の画面の「使う」タブで「招待」を押してコードを発行し、同じ zip と一緒に貸す人に渡す"
+             "（貸す人は exe をダブルクリックし、「貸す」タブにコードを貼る）")
+    else:
+        _say(f"  {n}. 管理画面の「招待コード」を発行し、同じ zip と一緒に知人に渡す（知人は exe をダブルクリックして「貸す側」）")
     n += 1
-    _say(f"  {n}. Tailscale の管理画面でこの PC を知人と共有する（この画面を開きます）")
-    _say("     → この PC の行の「…」→「Share...」→ リンクをコピーして知人に送る")
+    who = "貸す人" if from_app else "知人"
+    _say(f"  {n}. Tailscale の管理画面でこの PC を{who}と共有する（この画面を開きます）")
+    _say(f"     → この PC の行の「…」→「Share...」→ リンクをコピーして{who}に送る")
     if then_start:
         _say("次回からは、start.bat か、exe をダブルクリックして「使う側」を選ぶと起動できます。")
     if _yes("Tailscale の管理画面を開きますか？"):

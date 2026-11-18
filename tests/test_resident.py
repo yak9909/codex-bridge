@@ -216,26 +216,75 @@ async def test_setup_409_when_running(web, res, popen):
     await res.setup_task
 
 
-async def test_host_starts_after_setup_exit_0(web, res, popen):
+async def test_host_starts_after_setup_exit_0(web, res, popen, tmp_path):
+    make_host(tmp_path)  # the setup wrote a valid host.yaml
     await web.post("/app/api/host/setup", headers=H)
     await res.setup_task
     assert res.host_role.starts == 1 and res.host_role.running
     assert (await web.get("/app/api/state")).json()["use"]["running"] is True
     assert res.setup_running is False
+    assert not res.applog.entries(min_level="warn")
 
 
-async def test_setup_failure_shown(web, res, popen):
-    popen.proc = FakeProc(code=1)
+async def test_host_starts_after_setup_closed_with_nonzero_exit(web, res, popen, tmp_path):
+    make_host(tmp_path)  # closing the finished console with X gives a non-zero code, but host.yaml is fine
+    popen.proc = FakeProc(code=-1073741510)
+    await web.post("/app/api/host/setup", headers=H)
+    await res.setup_task
+    assert res.host_role.starts == 1 and res.host_role.running
+    warns = [e["text"] for e in res.applog.entries(min_level="warn")]
+    assert warns == ["初期設定が途中で終わった可能性があります。"
+                     "うまく動かないときは、もう一度「準備を始める」を押してください。"]
+
+
+async def test_setup_failure_shown(web, res, popen, tmp_path):
+    popen.proc = FakeProc(code=1)  # no host.yaml was written
     await web.post("/app/api/host/setup", headers=H)
     await res.setup_task
     assert res.host_role.starts == 0
     error = (await web.get("/admin/api/overview")).json()["error"]
-    assert "初期設定" in error and "1" in error
+    assert "初期設定" in error
     assert res.setup_running is False  # it can be opened again
+    (tmp_path / "host.yaml").write_text("public_bind: [unclosed", encoding="utf-8")  # invalid counts as failed too
+    await web.post("/app/api/host/setup", headers=H)
+    await res.setup_task
+    assert res.host_role.starts == 0 and "初期設定" in res.use_error()
+    make_host(tmp_path)
     popen.proc = FakeProc(code=0)
     assert (await web.post("/app/api/host/setup", headers=H)).status_code == 202
     await res.setup_task
-    assert res.setup_error is None
+    assert res.setup_error is None and res.host_role.starts == 1
+
+
+async def test_setup_popen_failure_is_a_500_with_a_log_line(web, res, monkeypatch):
+    def boom(args, **kwargs):
+        raise OSError("access denied")
+
+    monkeypatch.setattr(resident.subprocess, "Popen", boom)
+    r = await web.post("/app/api/host/setup", headers=H)
+    assert r.status_code == 500 and r.json()["detail"] == "初期設定を始められませんでした: access denied"
+    assert res.applog.entries(side="use", min_level="error")[-1]["text"] == r.json()["detail"]
+    assert res.setup_running is False
+
+
+async def test_host_start_is_retried_until_it_runs(tmp_path):
+    class Flaky(FakeHostRole):
+        async def start(self):
+            self.starts += 1
+            if self.starts < 3:
+                self.error = "Tailscale につながっていません。つながると自動で起動します。"
+                raise HostStartError(self.error)
+            self.error, self.running = None, True
+
+    res = make_resident(tmp_path, host_role=Flaky())
+    res.retry_interval = 0.01
+    await res.start_host()
+    assert res.use_error().startswith("Tailscale につながっていません")
+    for _ in range(200):
+        if res.host_role.running:
+            break
+        await asyncio.sleep(0.01)
+    assert res.host_role.running and res.host_role.starts == 3 and res.use_error() is None
 
 
 def test_setup_from_app_text(tmp_path, monkeypatch, capsys):
@@ -250,7 +299,8 @@ def test_setup_from_app_text(tmp_path, monkeypatch, capsys):
     run_setup(tmp_path / "host.yaml", from_app=True)
     out = capsys.readouterr().out
     assert "画面に戻ってください" in out
-    assert "start.bat" not in out and "使う側" not in out
+    assert "start.bat" not in out and "使う側" not in out and "知人" not in out
+    assert "「使う」タブで「招待」を押してコードを発行し" in out and "「貸す」タブにコードを貼る" in out
     assert prompts[-1].startswith("Enter キーを押すと閉じます")  # it waits for Enter before the exit code 0
     assert (tmp_path / "host.yaml").exists()
 
@@ -580,7 +630,7 @@ def role_config(tmp_path, **overrides):
 
 async def test_host_role_starts_and_stops(tmp_path):
     applog = AppLog(tmp_path / "app.jsonl")
-    role = HostRole(role_config(tmp_path), applog)
+    role = HostRole(role_config(tmp_path), applog, tailscale_ip=None)
     await role.start()
     try:
         assert role.running and role.error is None and role.host is not None
@@ -596,7 +646,7 @@ async def test_host_role_starts_and_stops(tmp_path):
 async def test_host_role_reports_a_bad_config(tmp_path):
     bad = tmp_path / "host.yaml"
     bad.write_text("public_bind: [unclosed", encoding="utf-8")
-    role = HostRole(bad, AppLog(tmp_path / "app.jsonl"))
+    role = HostRole(bad, AppLog(tmp_path / "app.jsonl"), tailscale_ip=None)
     with pytest.raises(HostStartError, match="host.yaml"):
         await role.start()
     assert role.running is False and "host.yaml" in role.error
@@ -609,7 +659,7 @@ async def test_host_role_reports_a_taken_port(tmp_path):
     port = blocker.getsockname()[1]
     try:
         config = make_host(tmp_path, public_bind="127.0.0.1:0", local_port=port).config_path
-        role = HostRole(config, AppLog(tmp_path / "app.jsonl"))
+        role = HostRole(config, AppLog(tmp_path / "app.jsonl"), tailscale_ip=None)
         with pytest.raises(HostStartError) as error:
             await role.start()
         assert f"ポート {port} は使われています" == str(error.value) and role.error == str(error.value)
@@ -625,3 +675,59 @@ def test_bind_socket_is_exclusive():
             bind_socket("127.0.0.1", first.getsockname()[1])
     finally:
         first.close()
+
+
+async def test_host_role_waits_for_tailscale_then_starts(tmp_path):
+    config = role_config(tmp_path)
+    ips = [None, "127.0.0.1"]  # not signed in yet, then up
+    role = HostRole(config, AppLog(tmp_path / "app.jsonl"), tailscale_ip=lambda: ips.pop(0))
+    with pytest.raises(HostStartError) as error:
+        await role.start()
+    assert str(error.value) == "Tailscale につながっていません。つながると自動で起動します。"
+    assert role.error == str(error.value) and role.running is False
+    try:
+        await role.start()
+        assert role.running and role.error is None
+    finally:
+        await role.stop()
+
+
+async def test_host_role_updates_public_bind_to_the_current_tailscale_ip(tmp_path):
+    config = role_config(tmp_path)
+    applog = AppLog(tmp_path / "app.jsonl")
+    role = HostRole(config, applog, tailscale_ip=lambda: "127.0.0.1")
+    config.write_text(config.read_text(encoding="utf-8").replace("127.0.0.1:0", "100.64.0.1:0"), encoding="utf-8")
+    assert load_host_config(config).public_bind == "100.64.0.1:0"
+    try:
+        await role.start()
+        assert load_host_config(config).public_bind == "127.0.0.1:0"
+        assert role.running
+        assert applog.entries(min_level="warn")[-1]["text"] == (
+            "Tailscale の IP が変わったので設定を更新しました。招待コードは発行し直してください。")
+    finally:
+        await role.stop()
+    again = HostRole(config, applog, tailscale_ip=lambda: "127.0.0.1")
+    before = len(applog.entries(min_level="warn"))
+    try:
+        await again.start()
+        assert len(applog.entries(min_level="warn")) == before  # unchanged IP: no line
+    finally:
+        await again.stop()
+
+
+async def test_one_server_dying_stops_the_other_and_a_retry_works(tmp_path):
+    role = HostRole(role_config(tmp_path), AppLog(tmp_path / "app.jsonl"), tailscale_ip=None)
+    await role.start()
+    public, local = role._servers
+    role._tasks[0].cancel()  # the public listener dies
+    for _ in range(200):
+        if local.should_exit and role._tasks[1].done():
+            break
+        await asyncio.sleep(0.01)
+    assert local.should_exit and role._tasks[1].done()  # its port is released too
+    assert role.running is False and "止まりました" in role.error
+    await role.start()  # the retry is not blocked by our own leftover listener
+    try:
+        assert role.running and role.error is None
+    finally:
+        await role.stop()
