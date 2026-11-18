@@ -73,6 +73,7 @@ async def test_not_allowlisted_waits_for_approval(share):
     share.set_policy(limits={"sync_wait_sec": 1})
     r = await share.runner.run_command(f'{PY} -c "print(1)"')
     assert r["status"] == "waiting_approval" and r["job_id"]
+    assert share.approvals.pending()[0].cwd == "."
 
 
 async def test_ask_mode_waits_then_runs_after_approval(share):

@@ -94,6 +94,55 @@ async def test_admin_api_not_served_on_public_bind(public):
     assert (await public.get("/admin/")).status_code == 404
 
 
+async def test_notify_wait_requires_target(admin):
+    r = await admin.get("/admin/api/notify/wait")
+    assert r.status_code == 400
+    assert r.json()["detail"] == "task_id か origin を指定してください"
+
+
+async def test_notify_wait_returns_notice(admin, host):
+    link = await join(host, "friend")
+    tid = await host.mgr.start("work")
+    await host.mgr.on_agent_message(link, {"type": "task_state", "task_id": tid,
+                                           "state": "completed", "report": "done"})
+    r = await admin.get("/admin/api/notify/wait", params={"task_id": tid, "timeout": 1})
+    assert r.status_code == 200 and r.json()["status"] == "notice"
+    assert r.json()["notices"][0]["task_id"] == tid
+
+
+async def test_notify_wait_not_served_on_public_bind(public):
+    r = await public.get("/admin/api/notify/wait", params={"task_id": "t1", "timeout": 1})
+    assert r.status_code == 404
+
+
+@pytest.mark.parametrize("timeout, expected", [(None, 3300), (0, 1), (-5, 1), (9999, 3600)])
+async def test_notify_wait_passes_clamped_timeout_and_disconnect(admin, host, monkeypatch, timeout, expected):
+    calls = []
+
+    async def wait(**kwargs):
+        calls.append(kwargs)
+        assert await kwargs["disconnected"]() is False
+        return {"status": "timeout", "notices": []}
+
+    monkeypatch.setattr(host.notifier, "wait", wait)
+    params = {"origin": "claude", "any": 1}
+    if timeout is not None:
+        params["timeout"] = timeout
+    r = await admin.get("/admin/api/notify/wait", params=params)
+    assert r.status_code == 200 and r.json()["status"] == "timeout"
+    assert calls[0]["timeout"] == expected and calls[0]["any_unwatched"] is True
+    assert "session" not in calls[0]
+
+
+async def test_notify_wait_passes_codex_session(admin, host):
+    link = await join(host, "friend")
+    tid = await host.mgr.start("work", origin="codex", session="s1")
+    await host.mgr.on_agent_message(link, {"type": "task_state", "task_id": tid, "state": "completed"})
+    for session, status in (("s2", "none"), ("s1", "notice")):
+        r = await admin.get("/admin/api/notify/wait", params={"origin": "codex", "session": session, "timeout": 1})
+        assert r.status_code == 200 and r.json()["status"] == status
+
+
 async def test_admin_page_served(admin):
     r = await admin.get("/admin/")
     assert r.status_code == 200 and "codex-bridge" in r.text

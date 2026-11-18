@@ -132,7 +132,7 @@ class CommandRunner:
             return job.snapshot()
         timeout = min(int(timeout_sec or p.limits.exec_timeout_sec), p.limits.exec_timeout_sec)
         if self._needs_approval(command, task_id, mode):
-            a = self.approvals.request("command", command, task_id)
+            a = self.approvals.request("command", command, task_id, cwd=job.cwd or ".")
             job.approval_id = a.id
             job.status = "waiting_approval"
             job.message = "管理者の承認待ちです。get_command_result で結果を確かめてください。"

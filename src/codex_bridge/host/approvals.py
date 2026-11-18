@@ -21,6 +21,7 @@ class Approval:
     task_id: str | None
     created_at: float
     key: str | None = None
+    cwd: str | None = None
     decided: Status = "pending"
     consumed: bool = False
     _timeout: float = 1800.0
@@ -34,7 +35,7 @@ class Approval:
 
     def to_dict(self) -> dict:
         return {"id": self.id, "kind": self.kind, "summary": self.summary, "task_id": self.task_id,
-                "status": self.status, "age_sec": int(time.monotonic() - self.created_at)}
+                "cwd": self.cwd, "status": self.status, "age_sec": int(time.monotonic() - self.created_at)}
 
 
 class Approvals:
@@ -51,13 +52,14 @@ class Approvals:
             except Exception:
                 pass
 
-    def request(self, kind: str, summary: str, task_id: str | None, key: str | None = None) -> Approval:
+    def request(self, kind: str, summary: str, task_id: str | None, key: str | None = None,
+                cwd: str | None = None) -> Approval:
         if key is not None:
             for a in self._items.values():
                 if a.key == key and not a.consumed and a.status != "expired":
                     return a
         a = Approval(id=f"a{next(self._ids)}", kind=kind, summary=summary, task_id=task_id,
-                     created_at=time.monotonic(), key=key,
+                     created_at=time.monotonic(), key=key, cwd=cwd,
                      _timeout=self.policy.current().limits.approval_timeout_sec)
         self._items[a.id] = a
         self._changed()

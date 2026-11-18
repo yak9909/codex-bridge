@@ -24,6 +24,7 @@ from .share import (add_shared_folder, change_share_root, remove_shared_folder,
 from .fs_read import ReadTools
 from .fs_write import WriteTools
 from .mcp_util import LoopbackOnly, McpEndpoint
+from .notify import Notifier
 from .paths import SafePaths
 from .policy import PolicyStore
 from .runner import CommandRunner
@@ -54,6 +55,7 @@ class Host:
     snapshots: Snapshots
     approvals: Approvals
     mgr: TaskManager
+    notifier: Notifier
     tokens: TokenStore
     services: HostServices
     codex_ep: McpEndpoint
@@ -75,6 +77,7 @@ def build_host(config: HostConfig, config_path: Path | None = None) -> Host:
     snapshots = Snapshots(data)
     approvals = Approvals(policy)
     mgr = TaskManager(data, touched_fn=snapshots.touched, check_start=paths.check_configured)
+    notifier = Notifier(mgr, approvals)
     tokens = TokenStore(data)
     tokens.on_change.append(lambda name: None if name in {i["name"] for i in tokens.list()}
                             else policy.drop_lender(name))
@@ -98,7 +101,7 @@ def build_host(config: HostConfig, config_path: Path | None = None) -> Host:
     mgr.on_change.append(events.notify)
     ref: dict = {}  # the agents' tools need the finished Host (share folder can change at runtime)
     host = Host(config=config, policy=policy, audit=audit, paths=paths, snapshots=snapshots, approvals=approvals,
-                mgr=mgr, tokens=tokens, services=services, codex_ep=build_codex_mcp(services, tokens.match),
+                mgr=mgr, notifier=notifier, tokens=tokens, services=services, codex_ep=build_codex_mcp(services, tokens.match),
                 claude_ep=build_claude_mcp(mgr, approvals, snapshots, policy=policy, tokens=tokens,
                                            public_bind=config.public_bind,
                                            share_root=lambda: ref["host"].paths.root,

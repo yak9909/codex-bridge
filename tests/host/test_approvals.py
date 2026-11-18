@@ -10,6 +10,13 @@ async def test_request_and_decide(share):
     assert share.approvals.get(a.id).status == "approved" and share.approvals.pending() == []
 
 
+def test_request_records_cwd(share):
+    a = share.approvals.request("command", "npm test", "t1", cwd="web")
+    assert a.cwd == "web" and a.to_dict()["cwd"] == "web"
+    default = share.approvals.request("command", "npm test", "t2")
+    assert default.cwd is None and default.to_dict()["cwd"] is None
+
+
 async def test_wait_wakes_on_decision(share):
     a = share.approvals.request("command", "x", task_id=None)
     asyncio.get_running_loop().call_later(0.1, share.approvals.decide, a.id, False)

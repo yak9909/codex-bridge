@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from ...common.invite import make_invite
+from ..notify import WAIT_DEFAULT, WAIT_MAX
 from ..paths import ToolError, UNSET_SHARE_MSG
 from ..policy import OUTPUTS_TOP, normalize_rel
 from ..policy_form import _abs, form_from_raw, save_form
@@ -194,6 +195,16 @@ def admin_router(host) -> APIRouter:
             raise HTTPException(400, str(e))
         host.events.notify()
         return {"ok": True}
+
+    @r.get("/api/notify/wait")
+    async def notify_wait(request: Request, task_id: str | None = None, origin: str | None = None,
+                          any: bool = False, session: str | None = None, timeout: float = WAIT_DEFAULT):
+        if not task_id and not origin:
+            raise HTTPException(400, "task_id か origin を指定してください")
+        options = {"session": session} if session is not None else {}
+        return await host.notifier.wait(task_id=task_id, origin=origin, any_unwatched=any,
+                                        timeout=max(1, min(WAIT_MAX, timeout)),
+                                        disconnected=request.is_disconnected, **options)
 
     @r.get("/api/approvals")
     async def approvals():

@@ -159,6 +159,11 @@ class TaskManager:
             lender.current_task_id = self.current_task_id(lender.name)
         self._changed()
 
+    def mark_notified_final(self, task_id: str) -> None:
+        rec = self._get(task_id)
+        rec.notified_final = True
+        self._save(rec)
+
     def _append_event(self, task_id: str, ev: dict) -> None:
         self._events.setdefault(task_id, []).append(ev)
         with open(self.dir / f"{task_id}.jsonl", "a", encoding="utf-8") as f:
