@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from codex_bridge.agent.appserver import AppServerError
+from codex_bridge.agent.appserver import AppServerError, launch_args
 from codex_bridge.agent.usage import Window
 from fake_helpers import Fake
 
@@ -17,7 +17,7 @@ async def fake(tmp_path, request):
 async def test_launch_args_env_and_thread_params(fake):
     await fake.app.start()
     tid = await fake.app.thread_start("前置き")
-    assert tid == "th1"
+    assert tid == {"id": "th1", "model": "gpt-fake", "effort": "medium"}
     argv = fake.argv
     assert argv[0] == "app-server" and "--disable" in argv and "shell_tool" in argv
     assert 'mcp_servers.bridge.url="http://100.64.0.1:8765/codex/mcp"' in argv
@@ -150,3 +150,63 @@ async def test_restart_uses_the_new_features_and_reports_no_crash_but_a_real_exi
     fake.app.proc.kill()
     ev = await asyncio.wait_for(fake.app.events.get(), 5)
     assert ev["method"] == "_exited"
+
+
+@pytest.mark.parametrize("fake", [{"responses": {"model/list": [
+    {"data": [{"model": "m1"}], "nextCursor": "c2"},
+    {"data": [{"model": "m2"}], "nextCursor": None},
+]}}], indirect=True)
+async def test_model_list_follows_cursor(fake):
+    await fake.app.start()
+    assert await fake.app.model_list() == [{"model": "m1"}, {"model": "m2"}]
+    calls = [l["received"]["params"] for l in fake._lines()
+             if l.get("received", {}).get("method") == "model/list"]
+    assert calls == [{}, {"cursor": "c2"}]
+
+
+async def test_thread_start_passes_model_and_returns_effort(fake):
+    await fake.app.start()
+    result = await fake.app.thread_start("前置き", ephemeral=True, model="gpt-fake")
+    assert result == {"id": "th1", "model": "gpt-fake", "effort": "medium"}
+    assert fake.received("thread/start")["model"] == "gpt-fake"
+    assert fake.received("thread/start")["ephemeral"] is True
+
+
+async def test_thread_resume_passes_model_and_returns_effort(fake):
+    await fake.app.start()
+    assert await fake.app.thread_resume("th1", "前置き", model="gpt-fake") == {
+        "id": "th1", "model": "gpt-fake", "effort": "medium"}
+    params = fake.received("thread/resume")
+    assert params["threadId"] == "th1" and params["model"] == "gpt-fake"
+    assert params["developerInstructions"] == "前置き" and params["approvalPolicy"] == "never"
+    assert params["sandbox"] == "read-only" and params["cwd"] == str(fake.app.workdir)
+
+
+@pytest.mark.parametrize("fake", [{"responses": {"thread/start": {"thread": {"id": "other"}},
+                                                 "thread/resume": {"thread": {"id": "other"}}}}], indirect=True)
+async def test_thread_helpers_omit_none_model_and_keep_missing_response_fields(fake):
+    await fake.app.start()
+    assert await fake.app.thread_start("a") == {"id": "other", "model": None, "effort": None}
+    assert "model" not in fake.received("thread/start")
+    assert await fake.app.thread_resume("other", "b") == {"id": "other", "model": None, "effort": None}
+    assert "model" not in fake.received("thread/resume")
+
+
+async def test_turn_start_omits_none_model_and_effort(fake):
+    await fake.app.start()
+    assert await fake.app.turn_start("th1", "hello", model=None, effort=None) == "u1"
+    assert fake.received("turn/start") == {"threadId": "th1", "input": [{"type": "text", "text": "hello"}]}
+
+
+@pytest.mark.parametrize("model,effort,extra", [("gpt-fake", "high", {"model": "gpt-fake", "effort": "high"}),
+                                              ("gpt-fake", None, {"model": "gpt-fake"}),
+                                              (None, "low", {"effort": "low"})])
+async def test_turn_start_passes_model_and_effort(fake, model, effort, extra):
+    await fake.app.start()
+    assert await fake.app.turn_start("th1", "hello", model=model, effort=effort) == "u1"
+    assert fake.received("turn/start") == {"threadId": "th1", "input": [{"type": "text", "text": "hello"}], **extra}
+
+
+def test_launch_args_disable_hooks():
+    args = launch_args("http://h")
+    assert args[args.index("hooks") - 1] == "--disable"

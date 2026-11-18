@@ -47,6 +47,18 @@ def start(task_id):
     return {"type": "task_start", "task_id": task_id, "prompt": "依頼"}
 
 
+def test_connection_settings_keep_model_limits(tmp_path):
+    store = ConnectionStore(tmp_path)
+    a = store.add(make_invite("http://a.invalid", "secret-a", "friend"))
+    b = store.add(make_invite("http://b.invalid", "secret-b", "friend"))
+    patch = {"allowed_models": ["m1"], "max_effort": "high"}
+    updated = store.update_settings(a.id, patch)
+    reread = {c.id: c.settings for c in ConnectionStore(tmp_path).list()}
+    assert updated["allowed_models"] == ["m1"] and updated["max_effort"] == "high"
+    assert reread[a.id]["allowed_models"] == ["m1"] and reread[a.id]["max_effort"] == "high"
+    assert reread[b.id]["allowed_models"] is None and reread[b.id]["max_effort"] == "xhigh"
+
+
 @pytest.mark.parametrize("damaged", [False, True])
 async def test_unreadable_connection_is_skipped_and_logged_without_blocking_startup(multi, damaged):
     bad_id = "000000000000"

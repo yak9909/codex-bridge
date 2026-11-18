@@ -361,9 +361,9 @@ class AgentRunner:
                     raise AppServerError(NO_RESUME)
                 if not self.sessions.owns(cont):
                     raise AppServerError(NOT_OWNED)
-                self.cur.thread_id = await self.app.thread_resume(cont, self._instructions())
+                self.cur.thread_id = (await self.app.thread_resume(cont, self._instructions()))["id"]
             else:
-                self.cur.thread_id = await self.app.thread_start(self._instructions(), self.cur.ephemeral)
+                self.cur.thread_id = (await self.app.thread_start(self._instructions(), self.cur.ephemeral))["id"]
             self.sessions.add(self.cur.thread_id, self.cur.task_id, self.cur.ephemeral)
             await self._state("running")
             await self._event("started")

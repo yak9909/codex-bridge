@@ -204,22 +204,43 @@ class AppServer:
         await self._write({"id": msg["id"], "result": result})
 
     # ---- typed helpers -------------------------------------------------
-    async def thread_start(self, developer_instructions: str, ephemeral: bool = False) -> str:
+    async def model_list(self) -> list[dict]:
+        entries = []
+        params = {}
+        while True:
+            r = await self.request("model/list", params)
+            entries.extend(r["data"])
+            cursor = r.get("nextCursor")
+            if cursor is None:
+                return entries
+            params = {"cursor": cursor}
+
+    async def thread_start(self, developer_instructions: str, ephemeral: bool = False,
+                           model: str | None = None) -> dict:
         params = {"cwd": str(self.workdir), "sandbox": "read-only", "approvalPolicy": "never",
                   "developerInstructions": developer_instructions, "serviceName": "codex-bridge"}
         if ephemeral:  # disposable session (design 4.6): no conversation record is written under ~/.codex
             params["ephemeral"] = True
+        if model is not None:
+            params["model"] = model
         r = await self.request("thread/start", params)
-        return r["thread"]["id"]
+        return {"id": r["thread"]["id"], "model": r.get("model"), "effort": r.get("reasoningEffort")}
 
-    async def thread_resume(self, thread_id: str, developer_instructions: str) -> str:
-        r = await self.request("thread/resume", {
-            "threadId": thread_id, "cwd": str(self.workdir), "sandbox": "read-only", "approvalPolicy": "never",
-            "developerInstructions": developer_instructions})
-        return r["thread"]["id"]
+    async def thread_resume(self, thread_id: str, developer_instructions: str, model: str | None = None) -> dict:
+        params = {"threadId": thread_id, "cwd": str(self.workdir), "sandbox": "read-only", "approvalPolicy": "never",
+                  "developerInstructions": developer_instructions}
+        if model is not None:
+            params["model"] = model
+        r = await self.request("thread/resume", params)
+        return {"id": r["thread"]["id"], "model": r.get("model"), "effort": r.get("reasoningEffort")}
 
-    async def turn_start(self, thread_id: str, text: str) -> str:
-        r = await self.request("turn/start", {"threadId": thread_id, "input": _text(text)})
+    async def turn_start(self, thread_id: str, text: str, model: str | None = None, effort: str | None = None) -> str:
+        params = {"threadId": thread_id, "input": _text(text)}
+        if model is not None:
+            params["model"] = model
+        if effort is not None:
+            params["effort"] = effort
+        r = await self.request("turn/start", params)
         return r["turn"]["id"]
 
     async def turn_steer(self, thread_id: str, turn_id: str, text: str) -> None:

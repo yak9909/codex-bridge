@@ -29,7 +29,7 @@ class App:
         return UsageSnapshot(Window(46, 2000000000), Window(23, 2000100000))
 
     async def thread_start(self, *args):
-        return "new-thread"
+        return {"id": "new-thread", "model": None, "effort": None}
 
     async def turn_start(self, *args):
         return "turn"
