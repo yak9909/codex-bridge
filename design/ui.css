@@ -85,13 +85,12 @@ label.field > span { font-size: var(--fs-sub); color: var(--muted); letter-spaci
 .listbox li.off .ic { visibility: hidden; }
 .listbox li .tag { margin-left: auto; }
 
-/* field-level disclosure: one summary line, the long list only on demand */
-details.field-more > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: var(--s2); }
-details.field-more > summary::-webkit-details-marker { display: none; }
-details.field-more > summary .more { color: var(--accent); font-size: var(--fs-sub); letter-spacing: 0; display: inline-flex; align-items: center; gap: var(--s1); }
-details.field-more > summary .more .ic { width: 16px; height: 16px; transition: transform .15s; }
-details.field-more[open] > summary .more .ic { transform: rotate(90deg); }
-details.field-more > .listbox { margin-top: var(--s2); }
+/* read-only combobox: looks like the editable one; opens a check-marked list over the page */
+details.combo { position: relative; }
+details.combo > summary { list-style: none; }
+details.combo > summary::-webkit-details-marker { display: none; }
+details.combo > .listbox { position: absolute; z-index: 10; top: calc(var(--ctl) + var(--s1)); left: 0; width: 100%; background: var(--surface);
+  border-color: #c4cad5; box-shadow: 0 6px 20px rgba(0, 0, 0, .12); max-width: none; }
 
 /* multi-select combobox: closed = summary; open = search + check list */
 .combo { position: relative; max-width: 24em; }
