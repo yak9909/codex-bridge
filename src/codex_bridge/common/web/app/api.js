@@ -32,7 +32,6 @@ async function call(method, path, body) {
     error.status = r.status;
     throw error;
   }
-  clearError();
   return data;
 }
 
@@ -43,11 +42,18 @@ function describe(data) {
   return "";
 }
 
-// ---- the error bar: one line under the topbar, gone on the next success ----
-export function showError(text) {
+// ---- the error bar: one line per failing source under the topbar; a source's error goes on that source's next success ----
+const errors = new Map();
+
+function drawErrors() {
   const frame = document.querySelector(".frame");
   if (!frame) return;
   let bar = frame.querySelector(":scope > .note-warn");
+  if (!errors.size) {
+    if (bar) bar.remove();
+    frame.classList.remove("has-note");
+    return;
+  }
   if (!bar) {
     bar = document.createElement("p");
     bar.className = "note-warn";
@@ -55,14 +61,17 @@ export function showError(text) {
     frame.querySelector(":scope > .topbar").after(bar);
     frame.classList.add("has-note");
   }
+  const text = [...errors.values()].join(" / ");
   bar.innerHTML = `<svg class="ic"><use href="/app/static/icons.svg#i-triangle-alert"/></svg><span>${esc(text)}</span>`;
 }
 
-export function clearError() {
-  const frame = document.querySelector(".frame");
-  const bar = frame && frame.querySelector(":scope > .note-warn");
-  if (bar) bar.remove();
-  if (frame) frame.classList.remove("has-note");
+export function showError(text, key = "general") {
+  errors.set(key, text);
+  drawErrors();
+}
+
+export function clearError(key = "general") {
+  if (errors.delete(key)) drawErrors();
 }
 
 // ---- the change feed: the borrower's event stream when it runs, and a 3 s timer in any case ----

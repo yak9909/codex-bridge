@@ -278,7 +278,7 @@ table.grid .indent { padding-left: var(--s4); }
 @media (prefers-reduced-motion: reduce) { .ent-head .chev, .switch .track::after { transition: none; } }
 
 /* ---- product page ---- */
-.frame { height: 100vh; }
+@media (min-width: 721px) { .frame { height: 100vh; } }
 .frame.has-note { grid-template-rows: auto auto minmax(0, 1fr); }
 .frame > .note-warn { padding: var(--s2) var(--s4); background: var(--warn-soft); border-bottom: 1px solid var(--warn-line); align-items: center; }
 .frame > .pane { overflow: hidden; }

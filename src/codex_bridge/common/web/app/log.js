@@ -1,5 +1,5 @@
 // The log tab: side and level filters, search, follow-the-newest, export and open-folder.
-import { get, send, showError, esc } from "/app/static/api.js";
+import { get, send, showError, clearError, esc } from "/app/static/api.js";
 
 const SIDES = { use: "使う", lend: "貸す" };
 const LEVELS = { info: ["情報", ""], warn: ["警告", " warn"], error: ["失敗", " err"] };
@@ -21,7 +21,7 @@ export function renderLog(root) {
       <div class="log-tools">
         <span class="seg"><label><input type="radio" name="src" value="" checked>すべて</label><label><input type="radio" name="src" value="use">使う側</label><label><input type="radio" name="src" value="lend">貸す側</label></span>
         <span class="seg"><label><input type="radio" name="lv" value="" checked>すべて</label><label><input type="radio" name="lv" value="warn">警告以上</label></span>
-        <input class="sm" type="search" id="log-q" placeholder="検索" style="flex:1;max-width:24em">
+        <input class="sm" type="search" id="log-q" placeholder="検索" style="flex:1;min-width:10em;max-width:24em">
         <label class="check cap"><input type="checkbox" id="log-follow" checked>最新に追従</label>
         <span class="spacer"></span>
         <button class="secondary sm" id="log-export">書き出す</button>
@@ -48,6 +48,7 @@ export function renderLog(root) {
       if (q.value.trim()) params.set("q", q.value.trim());
       const entries = await get(`/app/api/logs?${params}`);
       if (!alive) return;
+      clearError("log-read");
       const html = entries.map(line).join("");
       if (html !== shown) {
         shown = html;
@@ -55,7 +56,7 @@ export function renderLog(root) {
         if (follow.checked) view.scrollTop = view.scrollHeight;
       }
     } catch (e) {
-      if (alive) showError(`ログを読めませんでした: ${e.message}`);
+      if (alive) showError(`ログを読めませんでした: ${e.message}`, "log-read");
     } finally {
       busy = false;
     }
@@ -81,8 +82,9 @@ export function renderLog(root) {
   root.querySelector("#log-folder").addEventListener("click", async () => {
     try {
       await send("POST", "/app/api/logs/open-folder");
+      clearError("log-folder");
     } catch (e) {
-      showError(e.message);
+      showError(e.message, "log-folder");
     }
   });
 
@@ -92,5 +94,7 @@ export function renderLog(root) {
     alive = false;
     clearInterval(interval);
     clearTimeout(timer);
+    clearError("log-read");
+    clearError("log-folder");
   };
 }

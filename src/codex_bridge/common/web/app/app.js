@@ -1,23 +1,23 @@
 // The page shell: topbar (tabs, connection text, pause) and the pane of the chosen tab.
-import { get, send, onChange, showError, esc } from "/app/static/api.js";
+import { get, send, onChange, showError, clearError, esc } from "/app/static/api.js";
 import { renderLog } from "/app/static/log.js";
 
 const ICONS = "/app/static/icons.svg";
 const TABS = [["use", "使う"], ["lend", "貸す"], ["log", "ログ"]];
 
 // use.js / lend.js come with later changes: until they exist the tab shows an empty pane
-async function loadRenderer(name) {
+async function loadRenderer(name, exportName) {
   try {
     const module = await import(`/app/static/${name}.js`);
-    return module.renderUse || module.renderLend || null;
+    return typeof module[exportName] === "function" ? module[exportName] : null;
   } catch (e) {
     return null;
   }
 }
 
 const RENDERERS = {
-  use: async (root) => ((await loadRenderer("use")) || empty)(root),
-  lend: async (root) => ((await loadRenderer("lend")) || empty)(root),
+  use: async (root) => ((await loadRenderer("use", "renderUse")) || empty)(root),
+  lend: async (root) => ((await loadRenderer("lend", "renderLend")) || empty)(root),
   log: (root) => renderLog(root),
 };
 
@@ -139,8 +139,9 @@ async function refresh() {
     try {
       const s = await get("/app/api/state");
       setPause(!!s.paused);
+      clearError("state");
     } catch (e) {
-      showError("この画面の本体につながりません");
+      showError("この画面の本体につながりません", "state");
     }
     setCount("use", await pendingUse());
     const pending = await tryGet("/lend/api/pending", null);
@@ -160,8 +161,9 @@ pauseButton.addEventListener("click", async () => {
     const path = state.console ? "/admin/api/pause" : "/app/api/pause";
     const r = await send("POST", path, { paused: !state.paused });
     setPause(!!r.paused);
+    clearError("pause");
   } catch (e) {
-    showError(e.message);
+    showError(e.message, "pause");
   }
 });
 
