@@ -34,6 +34,7 @@ class Lender:
     capabilities: dict = field(default_factory=lambda: dict(V1_CAPABILITIES))
     models: list[dict] | None = None  # unknown until an agent sends its model offer
     max_effort: str | None = None
+    view: dict | None = None  # the lender's own settings (protocol 4 `lender_view`); None when not sent or malformed
     limits: dict | None = None  # the lender's own limits: {five_hour, weekly, force}, via normalize_limits
     usage: dict = field(default_factory=_no_usage)
     current_task_id: str | None = None
@@ -93,6 +94,49 @@ def normalize_models(raw) -> list[dict] | None:
                     "default_effort": as_text(entry.get("default_effort")),
                     "is_default": entry.get("is_default") is True})
     return out
+
+
+LENDER_FEATURES = ("web_search", "image_generation", "multi_agent", "goals")
+
+
+def _flag(v) -> bool:
+    if not isinstance(v, bool):
+        raise ValueError("not a flag")
+    return v
+
+
+def normalize_lender_view(raw) -> dict | None:
+    """The lender's own settings as its agent (protocol 4) sent them, for the read-only view. Anything that is not
+    exactly the expected shape gives None (the screen shows 「—」); it never raises. Unknown keys are dropped."""
+    try:
+        if not isinstance(raw, dict):
+            return None
+        feats, pre = raw.get("features"), raw.get("pre_approval")
+        if not isinstance(feats, dict) or not isinstance(pre, dict):
+            return None
+        timeout = pre.get("timeout_min")
+        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1):
+            return None
+        over, effort = raw.get("over_limit"), raw.get("max_effort")
+        if over not in ("report", "stop") or not isinstance(effort, str) or effort not in EFFORT_ORDER:
+            return None
+        models = raw.get("models_all")
+        if models is not None:
+            if not isinstance(models, list):
+                return None
+            kept = []
+            for m in models[:200]:  # one bad entry makes the whole list unusable
+                if not isinstance(m, dict) or not isinstance(m.get("model"), str) or not m["model"]:
+                    return None
+                kept.append({"model": m["model"], "allowed": _flag(m["allowed"]), "is_default": _flag(m["is_default"])})
+            models = kept
+        return {"features": {f: _flag(feats[f]) for f in LENDER_FEATURES},
+                "pre_approval": {"new_task": _flag(pre["new_task"]), "followup": _flag(pre["followup"]),
+                                 "timeout_min": timeout},
+                "resumable": _flag(raw["resumable"]), "over_limit": over, "max_effort": effort,
+                "models_all": models}
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def normalize_effort(v) -> str | None:

@@ -73,6 +73,50 @@ async def test_lender_models_message_updates_offer(mgr, model_agent):
     assert len(changes) == 2 and changes[-1]["models"] is None and changes[-1]["max_effort"] is None
 
 
+VIEW = {"features": {"web_search": True, "image_generation": False, "multi_agent": False, "goals": True},
+        "pre_approval": {"new_task": True, "followup": False, "timeout_min": 30},
+        "resumable": True, "over_limit": "stop", "max_effort": "high",
+        "models_all": [{"model": "m1", "allowed": True, "is_default": True},
+                       {"model": "m2", "allowed": False, "is_default": False}]}
+
+
+async def test_lender_view_normalized(mgr):
+    a = FakeAgent(mgr)
+    await a.push("hello", protocol=4, lender_view={**VIEW, "extra": 1, "features": {**VIEW["features"], "x": True}})
+    assert mgr.lenders()[0]["lender_view"] == VIEW
+    await a.push("lender_models", models=[], max_effort="high",
+                 lender_view={**VIEW, "over_limit": "report", "models_all": None, "pre_approval": {
+                     "new_task": False, "followup": True, "timeout_min": None}})
+    view = mgr.lenders()[0]["lender_view"]
+    assert view["over_limit"] == "report" and view["models_all"] is None
+    assert view["pre_approval"] == {"new_task": False, "followup": True, "timeout_min": None}
+
+
+async def test_lender_view_missing_is_none(mgr):
+    a = FakeAgent(mgr)
+    await a.push("hello", protocol=3, capabilities={"model_select": True}, models=[], max_effort="xhigh")
+    assert mgr.lenders()[0]["lender_view"] is None
+    assert mgr.lenders(["never"])[-1]["lender_view"] is None
+
+
+@pytest.mark.parametrize("bad", [
+    "x", 5, [], {}, {**VIEW, "features": "x"}, {**VIEW, "features": {"web_search": "yes"}},
+    {**VIEW, "pre_approval": {"new_task": 1, "followup": False, "timeout_min": 30}},
+    {**VIEW, "pre_approval": {"new_task": True, "followup": False, "timeout_min": True}},
+    {**VIEW, "over_limit": "maybe"}, {**VIEW, "max_effort": "huge"}, {**VIEW, "resumable": "yes"},
+    {**VIEW, "models_all": [1]}, {**VIEW, "models_all": "x"},
+    {**VIEW, "models_all": [{"model": "m", "allowed": "yes", "is_default": False}]},
+])
+async def test_lender_view_garbage_is_none(mgr, bad):
+    a = FakeAgent(mgr)
+    await a.push("hello", protocol=4, lender_view=VIEW)
+    assert mgr.lenders()[0]["lender_view"] == VIEW
+    await a.push("lender_models", models=[], max_effort="high", lender_view=bad)  # never an exception
+    assert mgr.lenders()[0]["lender_view"] is None
+    await a.push("hello", protocol=4, lender_view=bad)
+    assert mgr.lenders()[0]["lender_view"] is None
+
+
 async def test_start_sends_model_and_effort(mgr, model_agent):
     tid = await mgr.start("do it", model="m1", effort="high", origin="claude", session="caller-session")
     msg = model_agent.last("task_start")

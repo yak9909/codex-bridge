@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 from ..common.invite import Invite, parse_invite
 from ..common.protocol import LOG_VISIBILITY
-from .settings import CONNECTION_KEYS, SettingsStore, _merge, defaults
+from .settings import CONNECTION_KEYS, SettingsStore, _merge, defaults, expand_legacy_pre_approval
 from .setup import load_invite, save_invite
 
 SAFE_ID = re.compile(r"[a-f0-9]{12}")
@@ -191,6 +191,8 @@ class ConnectionStore:
         with self._lock:
             current = self._read(id).settings
             connection_settings(patch, strict=True)
+            if "pre_approval" in patch:  # an old-shape patch (`enabled`) must not be undone by the stored new keys
+                patch = {**patch, "pre_approval": expand_legacy_pre_approval(patch["pre_approval"])}
             merged = {**current, **patch}
             for key in ("features", "pre_approval"):
                 if key in patch:

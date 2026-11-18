@@ -300,7 +300,7 @@ class AgentRunner:
         if t == "ack":
             self._unacked.pop(m["seq"], None)
         elif t == "settings":
-            self.guard.set_thresholds(m.get("thresholds") or {})
+            # m["thresholds"] is ignored: the borrower sets none any more, the lender's own limits are the only ones
             if self.connection_id is None:  # v0.1-style single runner: keep the old host-controlled display
                 self.log_visibility = m.get("log_visibility", self.log_visibility)
             self.on_log({"type": "settings", "log_visibility": self.log_visibility})
@@ -345,7 +345,7 @@ class AgentRunner:
                 await self._state("failed", report="別のタスクが作業中です", task_id=m["task_id"])
                 return
             await self._claim_slot()
-            if self.approval.enabled:
+            if self.approval.applies(START):
                 await self.approval.hold(m, START)
                 return
             await self._start_locked(m)
@@ -405,7 +405,7 @@ class AgentRunner:
         cur = self.cur
         if cur is None or cur.task_id != m["task_id"] or cur.thread_id is None:
             return
-        if self.approval.enabled:
+        if self.approval.applies(FOLLOWUP):
             await self.approval.hold(m, FOLLOWUP)
             return
         await self._deliver_followup(m)

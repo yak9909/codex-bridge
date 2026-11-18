@@ -331,6 +331,7 @@ class AgentConnections:
         runner = self.runners[id]
         runner.apply_settings({**self.settings.get(), **saved})
         await self.clients[id].refresh_hello()
+        await runner.send_models()  # the borrower's read-only view of this connection's settings
         if runner.app.running:
             await self.appliers[id].settle()
         runner.log_visibility = saved["log_visibility"]
@@ -342,6 +343,7 @@ class AgentConnections:
             if runner.app.running:
                 await self.appliers[id].settle()
             await self.clients[id].refresh_hello()  # limits also appear in hello even when Codex is still lazy
+            await runner.send_models()  # the over-limit behaviour (limits.force) is part of the lender's view
 
     async def settle(self):
         if self.moving:

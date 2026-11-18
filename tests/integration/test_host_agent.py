@@ -326,7 +326,7 @@ def pre_approval(runner, on=True):
     runner.apply_settings({"limits": {"five_hour": 80, "weekly": 80, "force": False},
                            "features": {"web_search": False, "image_generation": False, "multi_agent": False,
                                         "goals": False},
-                           "pre_approval": {"enabled": on, "timeout_min": 30}, "disposable": False,
+                           "pre_approval": {"new_task": on, "followup": on, "timeout_min": 30}, "disposable": False,
                            "workdir": None, "log_retention_days": 30,
                            "allowed_models": None, "max_effort": "xhigh"})
 

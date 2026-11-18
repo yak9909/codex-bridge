@@ -169,6 +169,50 @@ async def test_replace_invite_and_remove_refused_while_that_connection_is_busy(m
     assert (await multi.http.delete(f"/api/connections/{b}", headers=WRITE)).status_code == 200
 
 
+@pytest.mark.parametrize("legacy", [True, False])
+def test_pre_approval_legacy_enabled_in_the_connections_store(tmp_path, legacy):
+    store = ConnectionStore(tmp_path)
+    c = store.add(make_invite("http://a.invalid", "secret-a", "friend"))
+    path = tmp_path / "connections" / c.id / "settings.json"
+    path.write_text(json.dumps({"pre_approval": {"enabled": legacy, "timeout_min": 5}}), encoding="utf-8")
+    assert ConnectionStore(tmp_path).list()[0].settings["pre_approval"] == {
+        "new_task": legacy, "followup": legacy, "timeout_min": 5}
+    saved = store.update_settings(c.id, {"pre_approval": {"followup": True}})["pre_approval"]
+    assert saved == {"new_task": legacy, "followup": True, "timeout_min": 5}
+    assert json.loads(path.read_text(encoding="utf-8"))["pre_approval"] == saved
+
+
+async def test_lender_models_resent_on_settings_change(multi):
+    m, a, b = multi.runtime, multi.a.id, multi.b.id
+    sent = {a: [], b: []}
+    for id in (a, b):
+        async def send(msg, id=id):
+            sent[id].append(msg)
+        m.runners[id].send = send
+    await m.update_settings(a, {"pre_approval": {"new_task": True}})
+    models = [x for x in sent[a] if x["type"] == "lender_models"]
+    assert models and models[-1]["lender_view"]["pre_approval"]["new_task"] is True
+    assert not [x for x in sent[b] if x["type"] == "lender_models"]
+    await m.apply_shared({"limits": {"five_hour": 35, "weekly": 45, "force": True}})
+    for id in (a, b):
+        assert [x for x in sent[id] if x["type"] == "lender_models"][-1]["lender_view"]["over_limit"] == "stop"
+
+
+async def test_clear_one_connection_log(multi):
+    m, a, b = multi.runtime, multi.a.id, multi.b.id
+    for id, task in ((a, "a-task"), (b, "b-task")):
+        m.runners[id].worklog.add(task, "task_prompt", {"text": "依頼"})
+    response = await multi.http.post(f"/api/connections/{a}/logs/clear", headers=WRITE)
+    assert response.status_code == 200 and response.json() == {"cleared": 1}
+    assert m.runners[a].worklog.tasks() == []
+    assert [t["task_id"] for t in m.runners[b].worklog.tasks()] == ["b-task"]  # the other connection stays
+    assert (await multi.http.post(f"/api/connections/{a}/logs/clear")).status_code == 403  # needs the header
+
+
+async def test_clear_unknown_connection_404(multi):
+    assert (await multi.http.post("/api/connections/000000000000/logs/clear", headers=WRITE)).status_code == 404
+
+
 def test_migrates_single_invite_to_first_connection(tmp_path):
     code = make_invite("http://old.invalid", "secret", "friend")
     save_invite(tmp_path, parse_invite(code))
@@ -180,7 +224,7 @@ def test_migrates_single_invite_to_first_connection(tmp_path):
     (tmp_path / "sessions.json").write_text(json.dumps({"thread-old": {"created": 1, "task_ids": ["old-task"]}}))
     first, = ConnectionStore(tmp_path).list()
     assert first.invite == parse_invite(code)
-    assert first.settings["pre_approval"] == {"enabled": True, "timeout_min": None}
+    assert first.settings["pre_approval"] == {"new_task": True, "followup": True, "timeout_min": None}
     assert first.settings["disposable"] is True
     assert first.settings["log_visibility"] == "files"
     assert not (tmp_path / "invite.bin").exists()

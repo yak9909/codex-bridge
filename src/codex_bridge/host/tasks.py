@@ -14,7 +14,8 @@ from typing import Callable, Iterable
 from ..common import protocol
 from ..common.protocol import FINAL_STATES, LOG_VISIBILITY, TASK_STATES
 from .lenders import (Lender, SendFn, as_protocol, as_text, blocked_until, lender_accepts, moment,
-                      normalize_capabilities, normalize_effort, normalize_limits, normalize_models,
+                      normalize_capabilities, normalize_effort, normalize_lender_view, normalize_limits,
+                      normalize_models,
                       normalize_window, number, pick_lender)
 from .paths import ToolError
 
@@ -270,7 +271,7 @@ class TaskManager:
         """One row per lender seen since the host started, then one per invited name that has not
         connected since: not connected, no usage, and what it can do is not known (capabilities None)."""
         def row(l: Lender) -> dict:
-            return {**self._info(l), "limits": l.limits, "usage": self._usage_of(l),
+            return {**self._info(l), "limits": l.limits, "lender_view": l.view, "usage": self._usage_of(l),
                     "current_task_id": l.current_task_id, "last_assigned": l.last_assigned,
                     "busy_elsewhere": l.busy_elsewhere}
         never = [{**row(Lender(name=n, current_task_id=self.current_task_id(n))), "capabilities": None}
@@ -301,6 +302,7 @@ class TaskManager:
             lender.capabilities = normalize_capabilities(m.get("capabilities"))
             lender.models = normalize_models(m.get("models"))
             lender.max_effort = normalize_effort(m.get("max_effort"))
+            lender.view = normalize_lender_view(m.get("lender_view"))
             limits = normalize_limits(m.get("limits"))
             if limits is not None:
                 lender.limits = limits
@@ -312,6 +314,7 @@ class TaskManager:
         elif t == "lender_models":
             lender.models = normalize_models(m.get("models"))
             lender.max_effort = normalize_effort(m.get("max_effort"))
+            lender.view = normalize_lender_view(m.get("lender_view"))
             self._changed()
         elif t == "lender_status":
             if isinstance(m.get("busy_elsewhere"), bool):

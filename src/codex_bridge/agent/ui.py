@@ -296,6 +296,17 @@ def create_ui_app(runner, settings: SettingsStore, client, *, versions: dict, da
                 raise HTTPException(409, "起動し直すのを待ってください")
             return {"cleared": sum(r.worklog.clear() for r in runners() if r.worklog)}
 
+    @app.post("/api/connections/{id}/logs/clear")
+    async def clear_connection(id: str):
+        require_connections()
+        async with mutations:
+            if moving:
+                raise HTTPException(409, "起動し直すのを待ってください")
+            runner, = runners(id)  # 404 for an unknown connection
+            if getattr(connections, "moving", False):
+                raise HTTPException(409, "保存場所を移動中です")
+            return {"cleared": runner.worklog.clear() if runner.worklog else 0}
+
     @app.post("/api/pause")
     async def pause(body: Pause):
         if on_pause:

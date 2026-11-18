@@ -247,17 +247,22 @@ async def test_unacked_messages_are_resent(env):
 
 
 @pytest.mark.parametrize("env", [QUOTA_SCRIPT], indirect=True)
-async def test_lowering_threshold_takes_effect_immediately(env):
+async def test_lowering_own_limit_takes_effect_immediately(env):
     env.guard.set_thresholds({"five_hour": 99})
     await env.runner.handle({"type": "task_start", "task_id": "t1", "prompt": "do", "continue_thread_id": None})
     await env.wait_state("running")
     await asyncio.sleep(0.2)
     assert env.fake.received("turn/steer") is None
-    await env.runner.handle({"type": "settings", "thresholds": {"five_hour": 50, "weekly": 95},
-                             "log_visibility": "summary"})
+    env.runner.apply_local_limits({"five_hour": 50, "weekly": None, "force": False})
     steer = await env.fake.wait_for(lambda: env.fake.received("turn/steer"))
     assert steer["input"][0]["text"] == STOP_TEXT
     await env.wait_state("suspended_quota")
+
+
+async def test_agent_ignores_host_thresholds(env):
+    env.runner.apply_settings({**env.runner.settings, "limits": {"five_hour": 80, "weekly": 80, "force": False}})
+    await env.runner.handle({"type": "settings", "thresholds": {"five_hour": 10}, "log_visibility": "summary"})
+    assert env.guard.effective_limits()["five_hour"] == 80
 
 
 def test_session_registry_persists(tmp_path):

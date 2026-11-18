@@ -56,9 +56,9 @@ class PreApproval:
         self.runner = runner
         self.pending: Pending | None = None
 
-    @property
-    def enabled(self) -> bool:
-        return bool(self.runner.settings["pre_approval"]["enabled"])
+    def applies(self, kind: str) -> bool:
+        """Whether the lender wants to say yes first to this kind of request (START or FOLLOWUP)."""
+        return bool(self.runner.settings["pre_approval"]["new_task" if kind == START else "followup"])
 
     def holds(self, task_id: str) -> bool:
         return self.pending is not None and self.pending.task_id == task_id

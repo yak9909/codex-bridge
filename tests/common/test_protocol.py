@@ -11,6 +11,14 @@ def test_lender_models_is_a_known_type():
     assert protocol.decode('{"type":"lender_models","models":[]}')["type"] == "lender_models"
 
 
+def test_protocol_4_carries_the_lender_view():
+    assert protocol.PROTOCOL == 4
+    view = {"features": {"goals": True}, "pre_approval": {"new_task": True, "followup": False, "timeout_min": None},
+            "resumable": True, "over_limit": "report", "max_effort": "high", "models_all": None}
+    raw = protocol.encode(protocol.msg("lender_models", models=None, max_effort="high", lender_view=view))
+    assert protocol.decode(raw)["lender_view"] == view
+
+
 def test_effort_order():
     assert protocol.EFFORT_ORDER == ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 

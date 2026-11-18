@@ -152,7 +152,7 @@ async def test_overview_reports_live_state_versions_usage_and_both_limits_withou
     assert data["usage"]["five_hour"]["used_percent"] == 46
     assert data["usage"]["five_hour"]["resets_at_local"]
     assert data["limits"] == {"five_hour": 80, "weekly": 80, "force": False}
-    assert data["thresholds"] == {"five_hour": 90, "weekly": 70}
+    assert data["thresholds"] == {"five_hour": 90, "weekly": 70}  # the guard's own, not the host's
     assert data["effective_limits"] == {"five_hour": 80, "weekly": 70}
     assert "SECRET" not in str(data)
     env.runner.cur = Current("t1", "s1")
@@ -214,7 +214,7 @@ async def test_live_task_uses_memory_progress_and_does_not_record_deltas(env):
 
 
 async def hold(env, task_id="t1"):
-    env.runner.settings["pre_approval"]["enabled"] = True
+    env.runner.settings["pre_approval"].update(new_task=True, followup=True)
     await env.runner.handle({"type": "task_start", "task_id": task_id, "prompt": "承認して <b>"})
 
 
@@ -279,7 +279,7 @@ async def test_settings_defaults_validation_and_apply(env):
     data = (await env.http.get("/api/settings")).json()
     assert data["settings"]["limits"] == {"five_hour": 80, "weekly": 80, "force": False}
     assert all(v is False for v in data["settings"]["features"].values())
-    assert data["settings"]["pre_approval"] == {"enabled": False, "timeout_min": 30}
+    assert data["settings"]["pre_approval"] == {"new_task": False, "followup": False, "timeout_min": 30}
     assert data["settings"]["disposable"] is False and data["settings"]["log_retention_days"] == 30
     assert data["feature_info"]["multi_agent"]["best_effort"] is True
     assert data["data_root"] == str(env.root) and data["workdir"] == str(env.runner.app.workdir)

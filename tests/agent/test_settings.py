@@ -29,7 +29,7 @@ from fakes import notifications as n
 DEFAULTS = {
     "limits": {"five_hour": 80, "weekly": 80, "force": False},
     "features": {"web_search": False, "image_generation": False, "multi_agent": False, "goals": False},
-    "pre_approval": {"enabled": False, "timeout_min": 30},
+    "pre_approval": {"new_task": False, "followup": False, "timeout_min": 30},
     "disposable": False,
     "workdir": None,
     "log_retention_days": 30,
@@ -115,10 +115,11 @@ def test_update_merges_a_partial_patch_saves_it_and_returns_everything(tmp_path)
     assert out == expected
     assert st.SettingsStore(tmp_path / "sub" / "settings.json").get() == expected  # it is on the disk
     out2 = store.update({"limits": {"weekly": None}, "workdir": "D:\\work", "log_retention_days": 7,
-                         "pre_approval": {"enabled": True}})
+                         "pre_approval": {"new_task": True}})
     assert out2["limits"] == {"five_hour": 70, "weekly": None, "force": False}  # None: no limit of its own
     assert out2["workdir"] == "D:\\work" and out2["log_retention_days"] == 7
-    assert out2["pre_approval"] == {"enabled": True, "timeout_min": 30} and out2["disposable"] is True
+    assert out2["pre_approval"] == {"new_task": True, "followup": False, "timeout_min": 30}
+    assert out2["disposable"] is True
     assert store.update({"workdir": None})["workdir"] is None
     assert store.update({"limits": {"five_hour": 70.0}})["limits"]["five_hour"] == 70  # a whole number stays one
 
@@ -224,28 +225,68 @@ def test_stopping_sub_agents_is_also_asked_for_in_the_instructions():
 
 
 # ---- hello (design 6) ----------------------------------------------------------------------
-def test_hello_says_protocol_3_what_this_agent_can_do_and_its_limits():
+def test_hello_says_protocol_4_what_this_agent_can_do_and_its_limits():
     h = st.hello_fields(DEFAULTS)
-    assert h == {"protocol": 3, "capabilities": {"resumable": True, "pre_approval": False, "model_select": True},
-                 "limits": {"five_hour": 80, "weekly": 80, "force": False}, "models": None, "max_effort": "xhigh"}
+    assert h == {"protocol": 4, "capabilities": {"resumable": True, "pre_approval": False, "model_select": True},
+                 "limits": {"five_hour": 80, "weekly": 80, "force": False}, "models": None, "max_effort": "xhigh",
+                 "lender_view": h["lender_view"]}
     s = copy.deepcopy(DEFAULTS)
     s["disposable"] = True
-    s["pre_approval"]["enabled"] = True
+    s["pre_approval"]["followup"] = True
     s["limits"] = {"five_hour": 60, "weekly": None, "force": True}
     h = st.hello_fields(s)
     assert h["capabilities"] == {"resumable": False, "pre_approval": True, "model_select": True}
     assert h["limits"] == {"five_hour": 60, "weekly": None, "force": True}
     # what the host makes of it (host/lenders.py): the same, nothing dropped or turned around
-    assert lenders.as_protocol(h["protocol"]) == 3
+    assert lenders.as_protocol(h["protocol"]) == 4
     assert lenders.normalize_capabilities(h["capabilities"]) == h["capabilities"]
     assert lenders.normalize_limits(h["limits"]) == h["limits"]
     h["limits"]["five_hour"] = 1  # a copy: the settings are not changed through it
     assert s["limits"]["five_hour"] == 60
 
 
+CATALOG = [{"model": "m1", "name": "m1", "efforts": ["low", "high"], "default_effort": "low", "is_default": True},
+           {"model": "m2", "name": "m2", "efforts": ["low"], "default_effort": "low", "is_default": False}]
+
+
+def test_hello_has_lender_view():
+    s = copy.deepcopy(DEFAULTS)
+    s["features"]["goals"] = True
+    s["pre_approval"] = {"new_task": True, "followup": False, "timeout_min": None}
+    s["disposable"] = True
+    s["allowed_models"] = ["m1"]
+    s["max_effort"] = "high"
+    s["limits"]["force"] = True
+    view = st.hello_fields(s, CATALOG)["lender_view"]
+    assert view == {"features": {"web_search": False, "image_generation": False, "multi_agent": False, "goals": True},
+                    "pre_approval": {"new_task": True, "followup": False, "timeout_min": None},
+                    "resumable": False, "over_limit": "stop", "max_effort": "high",
+                    "models_all": [{"model": "m1", "allowed": True, "is_default": True},
+                                   {"model": "m2", "allowed": False, "is_default": False}]}
+    assert set(view) == {"features", "pre_approval", "resumable", "over_limit", "max_effort", "models_all"}
+    plain = st.hello_fields(DEFAULTS, None)["lender_view"]
+    assert plain["over_limit"] == "report" and plain["resumable"] is True and plain["models_all"] is None
+    assert [m["allowed"] for m in st.hello_fields(DEFAULTS, CATALOG)["lender_view"]["models_all"]] == [True, True]
+    assert st.models_fields(s, CATALOG)["lender_view"] == view  # lender_models carries it too
+
+
+@pytest.mark.parametrize("legacy,expected", [(True, True), (False, False)])
+def test_pre_approval_legacy_enabled(tmp_path, legacy, expected):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"pre_approval": {"enabled": legacy, "timeout_min": None}}), encoding="utf-8")
+    pre = st.SettingsStore(path).get()["pre_approval"]
+    assert pre == {"new_task": expected, "followup": expected, "timeout_min": None}
+    assert st.hello_fields(st.SettingsStore(path).get())["capabilities"]["pre_approval"] is expected
+    # a patch in the old shape still works, and an explicit new key wins over it
+    store = st.SettingsStore(tmp_path / "other.json")
+    assert store.update({"pre_approval": {"enabled": True}})["pre_approval"]["followup"] is True
+    got = store.update({"pre_approval": {"enabled": False, "followup": True}})["pre_approval"]
+    assert got["new_task"] is False and got["followup"] is True
+
+
 def test_hello_fields_v03():
     h = st.hello_fields(st.defaults())
-    assert h["protocol"] == 3
+    assert h["protocol"] == 4
     assert h["capabilities"]["model_select"] is True
     assert h["models"] is None and h["max_effort"] == "xhigh"
 
@@ -255,7 +296,10 @@ def test_models_fields_filters_catalog_for_the_connection():
                 "default_effort": "max", "is_default": model == "m1"} for model in ("m1", "m2")]
     settings = {**st.defaults(), "allowed_models": ["m2"], "max_effort": "high"}
     expected = {"models": [{**catalog[1], "efforts": ["low", "high"], "is_default": True}], "max_effort": "high"}
-    assert st.models_fields(settings, catalog) == expected
+    fields = st.models_fields(settings, catalog)
+    assert fields.pop("lender_view")["models_all"] == [{"model": "m1", "allowed": False, "is_default": True},
+                                                       {"model": "m2", "allowed": True, "is_default": False}]
+    assert fields == expected
     hello = st.hello_fields(settings, catalog)
     assert {key: hello[key] for key in expected} == expected
 
@@ -843,7 +887,7 @@ async def test_hello_is_sent_again_only_when_what_it_says_about_the_agent_change
     assert rig.hellos == 1
     await rig.change({"disposable": True})
     assert rig.hellos == 1
-    await rig.change({"pre_approval": {"enabled": True}})
+    await rig.change({"pre_approval": {"followup": True}})
     assert rig.hellos == 2
     await rig.change({"pre_approval": {"timeout_min": 10}})
     assert rig.hellos == 2

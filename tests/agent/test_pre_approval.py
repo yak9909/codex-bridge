@@ -18,7 +18,7 @@ from fakes import notifications as n
 DEFAULTS = {
     "limits": {"five_hour": 80, "weekly": 80, "force": False},
     "features": {"web_search": False, "image_generation": False, "multi_agent": False, "goals": False},
-    "pre_approval": {"enabled": False, "timeout_min": 30},
+    "pre_approval": {"new_task": False, "followup": False, "timeout_min": 30},
     "disposable": False, "workdir": None, "log_retention_days": 30,
     "allowed_models": None, "max_effort": "xhigh",
 }
@@ -49,9 +49,10 @@ class Env:
                                   tick_interval=3600, on_log=self.logged.append, clock=self.clock)
         self.setting(on, timeout_min)
 
-    def setting(self, on=True, timeout_min=30):
+    def setting(self, on=True, timeout_min=30, new_task=None, followup=None):
         s = copy.deepcopy(DEFAULTS)
-        s["pre_approval"] = {"enabled": on, "timeout_min": timeout_min}
+        s["pre_approval"] = {"new_task": on if new_task is None else new_task,
+                             "followup": on if followup is None else followup, "timeout_min": timeout_min}
         self.runner.apply_settings(s)
 
     def states(self):
@@ -101,6 +102,32 @@ async def test_with_pre_approval_off_a_task_starts_at_once_as_before(env):
     await env.wait_state("completed")
     assert "awaiting_lender" not in env.states() and env.runner.pending_approval is None
     assert env.fake.received("thread/start") is not None
+
+
+@pytest.mark.parametrize("env", [RUNNING], indirect=True)
+async def test_pre_approval_only_followup(env):
+    env.setting(new_task=False, followup=True)
+    await env.start()  # a new task starts at once
+    await env.wait_state("running")
+    await env.fake.wait_for(lambda: env.runner.cur and env.runner.cur.turn_id)
+    assert env.runner.pending_approval is None and "awaiting_lender" not in env.states()
+    await env.followup("こうもして")  # a follow-up waits
+    assert env.runner.pending_approval["kind"] == "followup"
+    assert env.fake.received("turn/steer") is None
+    assert env.runner.approval.applies("followup") and not env.runner.approval.applies("start")
+
+
+@pytest.mark.parametrize("env", [RUNNING], indirect=True)
+async def test_pre_approval_only_new_task(env):
+    env.setting(new_task=True, followup=False)
+    await env.start()  # a new task waits
+    assert env.runner.pending_approval["kind"] == "start" and env.fake.received("thread/start") is None
+    await env.runner.decide_pending(True)
+    await env.wait_state("running")
+    await env.fake.wait_for(lambda: env.runner.cur and env.runner.cur.turn_id)
+    await env.followup("こうもして")  # a follow-up goes on at once
+    assert env.runner.pending_approval is None
+    assert (await env.fake.wait_for(lambda: env.fake.received("turn/steer")))["input"][0]["text"] == "こうもして"
 
 
 async def test_decide_pending_with_nothing_pending_does_nothing(env):
