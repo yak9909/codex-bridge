@@ -49,7 +49,7 @@ def write_host_config(path: Path, share_root: Path | None, data_dir: Path, ip: s
                       port: int = PUBLIC_PORT, local_port: int = 8770, rg_path: str = "vendor/rg.exe") -> None:
     share_line = "null" if share_root is None else json.dumps(Path(share_root).as_posix(), ensure_ascii=False)
     text = (
-        "# codex-bridge host settings (made by setup.bat)\n"
+        "# codex-bridge host settings (made by setup)\n"
         "# share_root: the folder the friend's Codex may work in (choose it on the admin page)\n"
         f"share_root: {share_line}\n"
         "# data_dir: logs, snapshots, tokens (must be OUTSIDE share_root)\n"

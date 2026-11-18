@@ -82,8 +82,13 @@ def main() -> None:
     out = ROOT / "release"
     out.mkdir(exist_ok=True)
     # Earlier builds made separate admin/friend zips; drop only this version's.
-    for role in ("admin", "friend"):
-        (out / f"codex-bridge-{role}-v{VERSION}.zip").unlink(missing_ok=True)
+    stale = [out / f"codex-bridge-{role}-v{VERSION}.zip" for role in ("admin", "friend")]
+    stale.append(out / f"codex-bridge-v{VERSION}.zip")
+    for old in stale:
+        try:
+            old.unlink(missing_ok=True)
+        except PermissionError:
+            raise SystemExit(f"release\\{old.name} が開かれています。7-Zip などを閉じてからもう一度実行してください。")
     # Stage outside the repository so old release folders and files stay intact.
     with tempfile.TemporaryDirectory(prefix="codex-bridge-release-") as staging:
         pkg = Path(staging) / f"codex-bridge-v{VERSION}"

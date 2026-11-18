@@ -46,7 +46,7 @@ v0.1 の exe も、v0.2 の依頼主側につなげられます。知人側の�
 
 ## こちらの準備
 
-**ふつうは `setup.bat`（最初に 1 回）・`start.bat`（起動）・`stop.bat`（停止）をダブルクリックするだけで済みます。** 詳しくは [docs/operation-guide.md](docs/operation-guide.md)。以下は手作業で行う場合の手順です。
+**ふつうは配布物の zip を使います（上の節）。以下はソースから動かす開発者向けの手順です。** zip 内の `setup.bat`（最初に 1 回）・`start.bat`（起動）・`stop.bat`（停止）の使い方は [docs/operation-guide.md](docs/operation-guide.md) を見てください。
 
 1. 依存関係を入れる: `uv sync`
 2. ripgrep を取得する: `powershell -ExecutionPolicy Bypass -File scripts/fetch_rg.ps1`
@@ -64,7 +64,7 @@ v0.1 の exe も、v0.2 の依頼主側につなげられます。知人側の�
    claude mcp add --transport http codex-bridge http://127.0.0.1:8770/claude/mcp
    ```
 
-## 知人に渡すもの
+## 知人に渡すもの（ソースから動かす場合）
 
 1. `uv run pyinstaller codex-bridge.spec` で作った `dist/codex-bridge.exe`（ダブルクリックして「貸す側」を選びます）
 2. Tailscale の共有の招待: Tailscale の管理画面 → Machines → このPC → Share → 招待リンクを作成

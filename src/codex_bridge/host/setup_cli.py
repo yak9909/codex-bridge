@@ -93,13 +93,14 @@ def run_setup(config_path: Path, *, then_start: bool = False) -> None:
 
     _step(5, total, "完了")
     _say("初期設定が終わりました。次にやること:")
-    _say("  1. install-mcp.bat を実行して、Claude Code / Codex から codex-bridge を使えるようにする")
-    n = 1
+    n = 0
     if not then_start:
         n += 1
         _say(f"  {n}. start.bat（または exe をダブルクリックして「使う側」）で codex-bridge を起動する（管理画面が開きます）")
     n += 1
     _say(f"  {n}. 管理画面で共有フォルダを選ぶ")
+    n += 1
+    _say(f"  {n}. install-mcp.bat を実行して、Claude Code / Codex から codex-bridge を使えるようにする")
     n += 1
     _say(f"  {n}. 管理画面の「招待コード」を発行し、同じ zip と一緒に知人に渡す（知人は exe をダブルクリックして「貸す側」）")
     n += 1
@@ -111,7 +112,7 @@ def run_setup(config_path: Path, *, then_start: bool = False) -> None:
         webbrowser.open("https://login.tailscale.com/admin/machines")
     if then_start:
         _say()
-        _say("初期設定が終わりました。このまま codex-bridge を起動します。"
+        _say("このまま codex-bridge を起動します。"
              "この黒いウィンドウは閉じないでください（閉じると止まります）。")
         run_start(config_path)
 
@@ -152,6 +153,8 @@ def run_start(config_path: Path) -> None:
     if effective_share_root(cfg) is None:
         from .paths import UNSET_SHARE_MSG
         _say(UNSET_SHARE_MSG)
+    if not st.firewall_rule_exists():
+        _say("ファイアウォールの許可がまだです。知人の PC から接続できないので、setup.bat をもう一度実行してください。")
     if _admin_alive(cfg.local_port):
         _say("codex-bridge はすでに動いています。管理画面を開きます。")
         webbrowser.open(admin)

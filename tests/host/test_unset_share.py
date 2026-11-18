@@ -392,7 +392,9 @@ def test_setup_then_start_calls_run_start(tmp_path, monkeypatch, capsys):
     assert "閉じないでください" in out
     assert "start.bat" in out  # still told for next time
     assert "2. start.bat" not in out
+    assert out.count("初期設定が終わりました") == 1
     assert out.index("初期設定が終わりました") < out.index("このまま codex-bridge を起動します")
+    assert out.index("共有フォルダを選ぶ") < out.index("install-mcp.bat")
 
 
 def test_setup_without_then_start_does_not_start(tmp_path, monkeypatch, capsys):
@@ -447,6 +449,7 @@ def test_start_explains_admin_setup_and_still_serves(tmp_path, monkeypatch, caps
     monkeypatch.setattr(setup_cli, "_admin_alive", lambda port: False)
     monkeypatch.setattr(setup_cli, "_wait_tailscale_ip", lambda: "127.0.0.1")
     monkeypatch.setattr(setup_cli.threading.Thread, "start", lambda self: None)
+    monkeypatch.setattr(setup_cli.st, "firewall_rule_exists", lambda: True)
     called = []
     async def serve(path):
         called.append(path)
@@ -454,6 +457,27 @@ def test_start_explains_admin_setup_and_still_serves(tmp_path, monkeypatch, caps
     setup_cli.run_start(cfg)
     assert called == [cfg]
     assert MESSAGE in capsys.readouterr().out
+
+
+FIREWALL_HINT = "ファイアウォールの許可がまだです"
+
+
+@pytest.mark.parametrize("exists", [False, True])
+def test_start_hints_when_firewall_rule_is_missing(tmp_path, monkeypatch, capsys, exists):
+    cfg = config_file(tmp_path)
+    monkeypatch.setattr(setup_cli, "_admin_alive", lambda port: False)
+    monkeypatch.setattr(setup_cli, "_wait_tailscale_ip", lambda: "127.0.0.1")
+    monkeypatch.setattr(setup_cli.threading.Thread, "start", lambda self: None)
+    monkeypatch.setattr(setup_cli.st, "firewall_rule_exists", lambda: exists)
+    monkeypatch.setattr(setup_cli.st, "add_firewall_rule_elevated", lambda: pytest.fail("must not trigger UAC"))
+    called = []
+
+    async def serve(path):
+        called.append(path)
+    monkeypatch.setattr(main, "serve", serve)
+    setup_cli.run_start(cfg)
+    assert called == [cfg]  # never blocks
+    assert (FIREWALL_HINT in capsys.readouterr().out) is (not exists)
 
 
 # ---- final-review fixes (I-1, M-1..M-4, 11-a) ---------------------------------
@@ -514,6 +538,7 @@ def test_start_and_setup_trust_the_policy_main_not_a_sample_host_yaml(tmp_path, 
     monkeypatch.setattr(setup_cli, "_admin_alive", lambda port: False)
     monkeypatch.setattr(setup_cli, "_wait_tailscale_ip", lambda: "127.0.0.1")
     monkeypatch.setattr(setup_cli.threading.Thread, "start", lambda self: None)
+    monkeypatch.setattr(setup_cli.st, "firewall_rule_exists", lambda: True)
 
     async def serve(path):
         pass
@@ -557,6 +582,7 @@ def test_start_warns_when_host_yaml_keeps_a_folder_the_policy_no_longer_has(tmp_
     monkeypatch.setattr(setup_cli, "_admin_alive", lambda port: False)
     monkeypatch.setattr(setup_cli, "_wait_tailscale_ip", lambda: "127.0.0.1")
     monkeypatch.setattr(setup_cli.threading.Thread, "start", lambda self: None)
+    monkeypatch.setattr(setup_cli.st, "firewall_rule_exists", lambda: True)
 
     async def serve(path):
         pass
