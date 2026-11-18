@@ -31,7 +31,7 @@
     <div class="table-wrap">
       <table class="lenders">
         <thead><tr><th>名前</th><th>接続</th><th>使用量</th><th>本人が決めた上限</th><th>作業中のタスク</th>
-          <th>事前承認</th><th>セッション</th></tr></thead>
+          <th>事前承認</th><th>続きの依頼</th><th>モデル</th><th>コマンド実行</th></tr></thead>
         <tbody id="lenders"></tbody>
       </table>
     </div>
@@ -61,6 +61,8 @@
     <textarea id="req-prompt" class="req" placeholder="例: analysis/report.md を読み、要点を 5 行でまとめて analysis/summary.md に書いてください。&#10;メインの共有フォルダの中は相対パスで、ほかの共有フォルダの中はフルパスで書きます。"></textarea>
     <div class="row">
       <label>送り先 <select id="req-lender"><option value="">自動（使用量に余裕のある人）</option></select></label>
+      <label>モデル <select id="req-model"></select></label>
+      <label>推論の強さ <select id="req-effort"></select></label>
       <label class="check"><input type="checkbox" id="req-continue" disabled><span id="req-continue-label">続きとして依頼する（下のタスク一覧で選んだタスクの会話を続ける）</span></label>
     </div>
     <div class="row"><button id="req-send">依頼する</button><span id="req-msg" class="small"></span></div>

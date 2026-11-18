@@ -5,6 +5,8 @@ const LenderSettings = (() => {
   const flagChoices = (id, value, options) => UI.choiceCards($(id), id, options, String(value));
   const selected = (id) => $(id).querySelector("input:checked").value === "true";
   let connectionId = null;
+  let connectionModels = null;
+  let allowedModels = null;
 
   function fill(data) {
     const s = data.settings;
@@ -19,6 +21,14 @@ const LenderSettings = (() => {
 
   function fillConnection(data) {
     const s = data.settings;
+    connectionModels = data.models;
+    allowedModels = s.allowed_models;
+    $("model-options").innerHTML = connectionModels === null
+      ? '<p class="small">Codex のモデルの一覧をまだ取得していません（依頼が来るか、起動して少したつと表示されます）。今は全部のモデルを使わせます。</p>'
+      : connectionModels.map((m) => `<label class="check"><input type="checkbox" data-model value="${UI.esc(m.model)}"${
+        allowedModels === null || allowedModels.includes(m.model) ? " checked" : ""}><span>${UI.esc(m.name)}</span></label>`).join("");
+    $("max-effort").innerHTML = data.efforts.map((e) => `<option value="${UI.esc(e)}">${UI.esc(e)}</option>`).join("");
+    $("max-effort").value = s.max_effort;
     $("approval-no-timeout").checked = s.pre_approval.timeout_min === null;
     $("approval-timeout").value = s.pre_approval.timeout_min ?? 30;
     $("approval-timeout").disabled = $("approval-no-timeout").checked;
@@ -77,6 +87,15 @@ const LenderSettings = (() => {
     $("connection-settings-form").onsubmit = async (event) => {
       event.preventDefault();
       if (!connectionId) return;
+      let allowed = allowedModels;
+      if (connectionModels !== null) {
+        const checked = [...$("model-options").querySelectorAll("input[data-model]:checked")].map((i) => i.value);
+        if (!checked.length) {
+          $("connection-settings-message").textContent = "少なくとも 1 つのモデルを選んでください";
+          return;
+        }
+        allowed = checked.length === connectionModels.length ? null : checked;
+      }
       const button = $("save-connection-settings");
       button.disabled = true;
       const patch = {
@@ -84,6 +103,7 @@ const LenderSettings = (() => {
         pre_approval: { enabled: selected("pre-choices"),
           timeout_min: $("approval-no-timeout").checked ? null : Number($("approval-timeout").value) },
         disposable: selected("disposable-choices"), log_visibility: $("log-visibility").value,
+        allowed_models: allowed, max_effort: $("max-effort").value,
       };
       try {
         await api("PUT", `/connections/${encodeURIComponent(connectionId)}/settings`, patch);

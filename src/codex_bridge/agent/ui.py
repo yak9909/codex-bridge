@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictFloat, StrictStr
 
+from ..common.protocol import EFFORT_ORDER
 from .appserver import AppServerError
 from .settings import FEATURE_INFO, SettingsStore
 from .ui_tasks import task_view
@@ -124,7 +125,8 @@ def create_ui_app(runner, settings: SettingsStore, client, *, versions: dict, da
     async def get_connection_settings(id: str):
         require_connections()
         one(id)
-        return {"settings": connections.store._read(id).settings, "feature_info": FEATURE_INFO}
+        return {"settings": connections.store._read(id).settings, "feature_info": FEATURE_INFO,
+                "models": connections.catalog, "efforts": list(EFFORT_ORDER)}
 
     @app.put("/api/connections/{id}/settings")
     async def put_connection_settings(id: str, body: dict):

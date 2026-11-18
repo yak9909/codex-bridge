@@ -20,6 +20,7 @@ const MODE_KEY = "codex-bridge.detail-mode";
 let selected = null;        // the task shown on the right
 let paused = false;
 let thresholdsDirty = false;
+let lenderRows = [];
 let detailMode = localStorage.getItem(MODE_KEY) === "advanced" ? "advanced" : "simple";
 
 // ---- top bar, the table of lenders, where a request goes ---------------------
@@ -80,6 +81,11 @@ function lenderRow(l, i) {
     ? `<button type="button" class="link" data-task="${esc(l.current_task_id)}">${esc(l.current_task_id)}</button>`
     : seen ? "なし" : "—";
   const caps = l.capabilities;
+  const models = !caps ? "—" : !caps.model_select ? "指定できません（古い版）"
+    : l.models == null ? "一覧を待っています"
+    : l.models.map((m) => esc(m.name)).join("<br>") + `<div class="small">推論の強さ: 〜${esc(l.max_effort)}</div>`;
+  const execModes = [["inherit", "全体と同じ"], ["off", "実行しない"], ["allowlist", "許可リストだけ自動"],
+    ["ask", "毎回確認"], ["all", "すべて自動"]];
   return `<tr class="${l.connected ? "" : "off"}">
     <td class="nowrap"><b>${esc(l.name)}</b><div class="small">${about}</div></td>
     <td class="nowrap">${conn}</td>
@@ -87,26 +93,45 @@ function lenderRow(l, i) {
     <td class="nowrap">${limits}</td>
     <td class="nowrap">${task}</td>
     <td class="nowrap">${!caps ? "—" : caps.pre_approval ? "あり" : "なし"}</td>
-    <td class="nowrap">${!caps ? "—" : caps.resumable ? "続けられる" : "使い捨て"}</td></tr>`;
+    <td class="nowrap">${!caps ? "—" : caps.resumable ? "続けられる" : "使い捨て"}</td>
+    <td class="nowrap">${models}</td>
+    <td><select data-exec="${esc(l.name)}" aria-label="${esc(l.name)} のコマンド実行">${execModes.map(([value, label]) =>
+      `<option value="${esc(value)}"${value === (l.exec_mode || "inherit") ? " selected" : ""}>${esc(label)}</option>`).join("")}</select></td></tr>`;
 }
 
 function drawLenders(rows, th) {
   const body = $("lenders"), sig = JSON.stringify([rows, th]);
-  if (body._sig === sig) return;
+  if (body._sig === sig || body.querySelector("select[data-exec]:focus")) return;
   body._sig = sig;
   body.innerHTML = rows.map(lenderRow).join("")
-    || '<tr><td colspan="7" class="empty">まだ誰もいません。下の「招待コード」で、Codex を貸してくれる人ごとにコードを発行してください。</td></tr>';
+    || '<tr><td colspan="9" class="empty">まだ誰もいません。下の「招待コード」で、Codex を貸してくれる人ごとにコードを発行してください。</td></tr>';
   rows.forEach((l, i) => ["five_hour", "weekly"].forEach((k) => {
     const marks = [{ value: th[k], label: "依頼主", kind: "host" }];
     if (l.limits && l.limits[k] != null) marks.push({ value: l.limits[k], label: "貸している人", kind: "lender" });
     UI.meter(body.querySelector(`[data-m="${i}:${k}"]`), l.usage[k], marks);
   }));
+  body.querySelectorAll("select[data-exec]").forEach((sel) => {
+    let saved = sel.value;
+    sel.onchange = async () => {
+      sel.disabled = true;
+      try {
+        await api("PUT", `/lenders/${enc(sel.dataset.exec)}/exec-mode`, { mode: sel.value });
+        saved = sel.value;
+      } catch (e) {
+        alert(e.message);
+        sel.value = saved;
+        body._sig = null;
+      } finally { sel.disabled = false; }
+      await refreshTop().catch((e) => console.error(e));
+    };
+  });
 }
 
 // "自動" and every lender by name; those who cannot take a request now say why and cannot be picked.
 // The one already chosen stays chosen whatever becomes of it (busy, stopped, gone from the list): a
 // request must never go to somebody else than the person named, so the host is left to refuse it.
 function drawTargets(rows) {
+  lenderRows = rows;
   const sel = $("req-lender"), chosen = sel.value;
   const why = (l) => (!l.connected ? "未接続" : !l.ready ? "準備中" : l.busy_elsewhere ? "ほかの依頼主の作業中" : l.current_task_id ? "作業中"
     : l.usage.blocked_until ? "上限のため停止中" : "");
@@ -114,10 +139,43 @@ function drawTargets(rows) {
     `<option value="${esc(name)}"${w && name !== chosen ? " disabled" : ""}>${esc(name)}${w ? `（${w}）` : ""}</option>`;
   const html = '<option value="">自動（使用量に余裕のある人）</option>' + rows.map((l) => option(l.name, why(l))).join("")
     + (chosen && !rows.some((l) => l.name === chosen) ? option(chosen, "一覧にいません") : "");
-  if (sel._html === html) return;
-  sel.innerHTML = sel._html = html;
-  sel.value = chosen;
+  if (sel._html !== html) {
+    sel.innerHTML = sel._html = html;
+    sel.value = chosen;
+  }
+  drawModels();
 }
+
+function requestModels() {
+  const lender = $("req-lender").value;
+  return lenderRows.filter((l) => lender ? l.name === lender : l.connected).flatMap((l) => l.models || []);
+}
+
+function drawRequestOptions(id, options) {
+  const sel = $(id), chosen = sel.value;
+  const html = '<option value="">既定</option>' + options.map(([value, label]) =>
+    `<option value="${esc(value)}">${esc(label)}</option>`).join("");
+  if (sel._html !== html) {
+    sel.innerHTML = sel._html = html;
+    sel.value = options.some(([value]) => value === chosen) ? chosen : "";
+  }
+}
+
+function drawModels() {
+  const models = new Map();
+  requestModels().forEach((m) => { if (!models.has(m.model)) models.set(m.model, m.name); });
+  drawRequestOptions("req-model", [...models]);
+  drawEfforts();
+}
+
+function drawEfforts() {
+  const model = $("req-model").value;
+  const efforts = new Set(requestModels().filter((m) => model ? m.model === model : m.is_default).flatMap((m) => m.efforts));
+  drawRequestOptions("req-effort", [...efforts].map((e) => [e, e]));
+}
+
+$("req-lender").onchange = drawModels;
+$("req-model").onchange = drawEfforts;
 
 $("lenders").onclick = (ev) => {
   const b = ev.target.closest("button[data-task]");
@@ -130,7 +188,7 @@ $("lenders").onclick = (ev) => {
 async function refreshApprovals() {
   const list = await api("GET", "/approvals");
   UI.approvals($("approvals"), list.map((a) => ({ id: a.id, tag: a.kind === "command" ? "コマンド実行" : "削除",
-    meta: [a.task_id, `${a.age_sec} 秒前`], body: a.summary })), async (id, approve) => {
+    meta: [a.task_id, `${a.age_sec} 秒前`, a.cwd ? `場所: ${a.cwd}` : ""], body: a.summary })), async (id, approve) => {
     try { await api("POST", "/approvals/" + enc(id), { approve }); } catch (e) { alert(e.message); }
     refreshApprovals();
   });
@@ -183,12 +241,14 @@ $("req-send").onclick = async () => {
   const prompt = $("req-prompt").value.trim();
   if (!prompt) { $("req-msg").textContent = "依頼の内容を書いてください"; return; }
   const body = { prompt };
+  if ($("req-model").value) body.model = $("req-model").value;
+  if ($("req-effort").value) body.effort = $("req-effort").value;
   if ($("req-continue").checked && selected) body.continue_task_id = selected;
   else if ($("req-lender").value) body.lender = $("req-lender").value;
   try {
     const r = await api("POST", "/tasks", body);
     $("req-prompt").value = ""; $("req-continue").checked = false;
-    $("req-msg").textContent = `依頼しました（${r.task_id}・担当: ${r.lender}）`;
+    $("req-msg").textContent = `依頼しました（${r.task_id}・担当: ${r.lender}・${r.model || "既定"} / ${r.effort || "既定"}）`;
     select(r.task_id);
   } catch (e) { $("req-msg").textContent = "依頼できません: " + e.message; }
 };

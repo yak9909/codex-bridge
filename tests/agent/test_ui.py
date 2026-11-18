@@ -8,13 +8,14 @@ import httpx
 import pytest
 
 from codex_bridge.agent.appserver import AppServerError
+from codex_bridge.agent.connections import ConnectionStore
 from codex_bridge.agent.runner import AgentRunner, Current
 from codex_bridge.agent.sessions import SessionRegistry
 from codex_bridge.agent.settings import SettingsStore
 from codex_bridge.agent.ui import create_ui_app
 from codex_bridge.agent.usage import QuotaGuard, UsageSnapshot, Window
 from codex_bridge.agent.worklog import WorkLog
-from codex_bridge.common.invite import Invite
+from codex_bridge.common.invite import Invite, make_invite
 
 WRITE = {"X-Codex-Bridge": "1"}
 
@@ -287,6 +288,58 @@ async def test_settings_defaults_validation_and_apply(env):
     for bad in ({"disposable": "true"}, {"limits": {"weekly": 0}}, {"unexpected": True}):
         assert (await env.http.put("/api/settings", json=bad, headers=WRITE)).status_code == 400
     assert len(env.changed) == 1
+
+
+@pytest.fixture
+async def connection_ui(env):
+    store = ConnectionStore(env.root)
+    connection = store.add(make_invite("http://host.invalid", "SECRET", "friend"))
+
+    async def update_settings(id, patch):
+        return store.update_settings(id, patch)
+
+    connections = SimpleNamespace(
+        store=store, runners={connection.id: env.runner}, update_settings=update_settings,
+        catalog=[{"model": "m1", "name": "Model 1", "efforts": ["low", "high"],
+                  "default_effort": "low", "is_default": True}],
+    )
+    app = create_ui_app(env.runner, env.settings, env.client, versions={}, data_root=env.root,
+                        connections=connections)
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 1))
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8766") as http:
+        yield SimpleNamespace(http=http, path=f"/api/connections/{connection.id}/settings",
+                              connections=connections)
+
+
+@pytest.mark.parametrize("known", [True, False])
+async def test_connection_settings_include_catalog(connection_ui, known):
+    if not known:
+        connection_ui.connections.catalog = None
+    response = await connection_ui.http.get(connection_ui.path)
+    assert response.status_code == 200
+    data = response.json()
+    if known:
+        assert data["models"][0]["model"] == "m1"
+        assert data["models"] == connection_ui.connections.catalog
+    else:
+        assert data["models"] is None
+    assert "xhigh" in data["efforts"]
+
+
+async def test_put_connection_settings_model_limits(connection_ui):
+    patch = {"allowed_models": ["m1"], "max_effort": "high"}
+    response = await connection_ui.http.put(connection_ui.path, json=patch, headers=WRITE)
+    assert response.status_code == 200
+    saved = (await connection_ui.http.get(connection_ui.path)).json()["settings"]
+    assert saved["allowed_models"] == ["m1"] and saved["max_effort"] == "high"
+
+
+async def test_put_connection_settings_bad_effort_400(connection_ui):
+    response = await connection_ui.http.put(connection_ui.path, json={"max_effort": "bad"}, headers=WRITE)
+    assert response.status_code == 400
+    assert "推論の強さの上限" in response.json()["detail"]
+    saved = (await connection_ui.http.get(connection_ui.path)).json()["settings"]
+    assert saved["max_effort"] == "xhigh"
 
 
 async def test_data_root_route_reports_failure_and_requires_absolute_path(env):

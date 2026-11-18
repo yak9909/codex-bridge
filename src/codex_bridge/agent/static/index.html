@@ -51,6 +51,11 @@
         <p class="small">チェックした機能を止めます。作業中の変更は、作業が終わってから Codex を起動し直して反映します。</p>
         <div id="feature-options"></div>
       </fieldset>
+      <fieldset><legend>使わせるモデル</legend>
+        <div id="model-options"></div>
+        <label>推論の強さの上限 <select id="max-effort"></select></label>
+        <p class="small">これより強い推論は使わせません（おすすめ: xhigh）。</p>
+      </fieldset>
       <fieldset><legend>事前承認</legend><div id="pre-choices"></div>
         <div class="row approval-wait"><label>承認の待ち時間 <input id="approval-timeout" type="number" min="1" max="1440" required> 分</label>
           <label class="check"><input id="approval-no-timeout" type="checkbox"><span>待ち時間なし（期限なしで待つ）</span></label></div>

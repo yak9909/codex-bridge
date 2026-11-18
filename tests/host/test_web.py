@@ -148,6 +148,15 @@ async def test_admin_page_served(admin):
     assert r.status_code == 200 and "codex-bridge" in r.text
 
 
+async def test_admin_page_has_model_and_exec_controls(admin):
+    page = (await admin.get("/admin/")).text
+    assert 'id="req-model"' in page
+    assert 'id="req-effort"' in page
+    source = Path(__file__).resolve().parents[2] / "src/codex_bridge/host/web/static/app.js"
+    js = source.read_text(encoding="utf-8")
+    assert "data-exec" in js and "/exec-mode" in js
+
+
 async def test_invite_copy_feedback_is_served(admin):
     r = await admin.get("/admin/static/app.js")
     assert r.status_code == 200

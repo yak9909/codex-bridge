@@ -11,8 +11,10 @@
      approval       {id, tag, meta: [text, ...], body}
      task (list)    {task_id, state, prompt, lender?, created?}
      task (detail)  {task_id, state, prompt, report, lender?, created?, finished?, thread_id?, resume_at?,
-                     changed_files?, events: [{ts, kind, data}], event_count?, progress?}
+                     changed_files?, events: [{ts, kind, data}], event_count?, progress?,
+                     model?, effort?, actual_model?, actual_effort?, rerouted?: {from, reason}}
      event kinds    agent_message{text}   plan{steps: [{step, status}]}   reasoning_summary{text}
+                    model{model, effort, rerouted_from?, reason?}
                     tool_started / tool_finished{tool, arguments, duration_ms, success, result_summary}
                     tool_call{tool, arguments, status} (v0.1)   token_usage{input, output}
                     progress{text}: the message being written; shown under "working", never in the record
@@ -158,6 +160,9 @@ const UI = (() => {
       case "task_prompt": return { kind: "say", text: `依頼・追加の指示: ${text(d.text, 8000)}` };
       case "final_report": return { kind: "say", text: text(d.text, 8000) };
       case "state": return { kind: "state", text: own(STATE_JA, d.state) || text(d.state) };
+      case "model": return { kind: "state", text: d.rerouted_from
+        ? `モデルが ${text(d.rerouted_from)} から ${text(d.model)} に切り替わりました（理由: ${text(d.reason) || "不明"}）`
+        : `モデル: ${text(d.model) || "既定"} / 推論の強さ: ${text(d.effort) || "既定"}` };
       case "agent_message": return { kind: "say", text: text(d.text, 8000) };
       case "plan": {
         const steps = planSteps(d);
@@ -288,6 +293,16 @@ const UI = (() => {
     }
     setHtml(part("sum"), sum.map(([k, v]) => `<span><b>${k}</b>${v}</span>`).join(""));
     const rows = [];
+    if (Object.hasOwn(t, "model") || Object.hasOwn(t, "actual_model")) {
+      const requestedModel = t.model || "既定", requestedEffort = t.effort || "既定";
+      const model = t.actual_model || requestedModel, effort = t.actual_effort || requestedEffort;
+      let value = `${esc(model)} / ${esc(effort)}`;
+      if (mode === "advanced" && (model !== requestedModel || effort !== requestedEffort)) {
+        value += `（指定: ${esc(requestedModel)} / ${esc(requestedEffort)}）`;
+      }
+      if (t.rerouted) value += `<br>途中で ${esc(t.rerouted.from)} から切り替わりました（理由: ${esc(t.rerouted.reason || "不明")}）`;
+      rows.push(["モデル", value]);
+    }
     if (t.resume_at) rows.push(["再開できる時刻", esc(typeof t.resume_at === "number" ? fmtTime(t.resume_at) : fmtIso(t.resume_at) || t.resume_at)]);
     if (Array.isArray(t.changed_files)) rows.push(["変更したファイル", t.changed_files.map(esc).join("<br>") || "—"]);
     if (mode === "advanced") rows.push(["セッション", esc(t.thread_id || "—")]);
