@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -27,22 +26,28 @@ def sha256_hex(token: str) -> str:
 
 
 class BearerAuth:
-    """ASGI wrapper: accept only requests whose bearer token hash is currently valid."""
+    """ASGI wrapper: accept only requests whose bearer token is currently valid, and note whose it is.
 
-    def __init__(self, app, hashes_fn: Callable[[], set[str]]) -> None:
+    match_fn(token) is the invite name the token was issued under, or None when it is not valid.
+    The name goes to scope["state"]["lender"], so a request never gets in without one.
+    """
+
+    def __init__(self, app, match_fn: Callable[[str], str | None]) -> None:
         self.app = app
-        self.hashes_fn = hashes_fn
+        self.match_fn = match_fn
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] == "http":
             header = dict(scope.get("headers") or []).get(b"authorization", b"").decode("latin-1")
             token = header[7:].strip() if header.lower().startswith("bearer ") else ""
-            digest = sha256_hex(token) if token else ""
-            if not token or not any(hmac.compare_digest(digest, h) for h in self.hashes_fn()):
+            name = self.match_fn(token) if token else None
+            if name is None:
                 await send({"type": "http.response.start", "status": 401,
                             "headers": [(b"content-type", b"text/plain; charset=utf-8")]})
                 await send({"type": "http.response.body", "body": b"unauthorized"})
                 return
+            # New dicts: the server may hand the same state object to every request.
+            scope = {**scope, "state": {**(scope.get("state") or {}), "lender": name}}
         await self.app(scope, receive, send)
 
 

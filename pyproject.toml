@@ -1,6 +1,6 @@
 [project]
 name = "codex-bridge"
-version = "0.1.0"
+version = "0.2.0"
 description = "Let a friend's Codex work on local files through MCP"
 readme = "README.md"
 authors = [
@@ -19,6 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
+codex-bridge = "codex_bridge.entry:main"
 codex-bridge-host = "codex_bridge.host.main:main"
 codex-bridge-agent = "codex_bridge.agent.main:main"
 

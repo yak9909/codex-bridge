@@ -140,8 +140,8 @@ async def test_delete_folder_containing_hidden_is_refused(share):
 
 
 async def test_delete_folder_containing_read_only_is_refused(share):
-    share.set_policy(rules=[{"path": "out", "level": "write"}, {"path": "out/keep", "level": "read"}])
     (share.root / "out/keep").mkdir()
+    share.add_folder(share.root / "out" / "keep", "read")
     (share.root / "out/keep/k.txt").write_text("k", encoding="utf-8")
     share.approve_all()
     with pytest.raises(ToolError, match="削除できません"):

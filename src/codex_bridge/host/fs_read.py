@@ -53,32 +53,46 @@ class ReadTools:
             "mtime": _mtime(st),
         }
 
-    def list_dir(self, path: str = ".") -> list[dict]:
+    def list_dir(self, path: str = "/") -> list[dict]:
+        if str(path).strip() in ("", "/", "\\"):
+            # The top: every shared folder Codex may see (absolute paths).
+            self.paths.check_running()
+            return [{"name": r["path"], "path": r["path"], "type": "dir", "level": r["level"], "main": r["main"]}
+                    for r in self.paths.roots()]
         real = self.paths.resolve(path, "read")
         if not real.is_dir():
             raise not_found(path) if not real.exists() else ToolError(f"フォルダではありません: {normalize_rel(path)}")
+        if not self.paths.discoverable(real):
+            return []
         out = []
         for child in sorted(real.iterdir(), key=lambda c: c.name.lower()):
-            if self.paths.visible(child):
+            if self.paths.discoverable(child):
                 try:
                     out.append(self._entry(child))
                 except OSError:
                     continue
         return out
 
-    def find_files(self, pattern: str, path: str = ".", limit: int = 1000) -> list[str]:
-        base = self.paths.resolve(path, "read")
-        if not base.is_dir():
-            raise not_found(path)
+    def find_files(self, pattern: str, path: str | None = None, limit: int = 1000) -> list[str]:
+        """Without a path: every shared folder. Patterns match the path below each searched folder."""
+        if path and path.strip():
+            base = self.paths.resolve(path, "read")
+            if not self.paths.discoverable(base):
+                return []
+            if not base.is_dir():
+                raise not_found(path)
+            bases = [base]
+        else:
+            self.paths.check_running()
+            bases = self.paths.root_paths()
         found: list[str] = []
-        for dirpath, dirnames, filenames in os.walk(base):
-            d = Path(dirpath)
-            dirnames[:] = sorted(n for n in dirnames if self.paths.visible(d / n))
-            for name in sorted(filenames):
-                fp = d / name
-                rel_to_base = Path(os.path.relpath(fp, base)).as_posix()
-                if glob_match(pattern, rel_to_base) and self.paths.visible(fp):
-                    found.append(self.paths.to_rel(fp))
+        display = self.paths.display_formatter()
+        for base in bases:
+            prefix_length = len(str(base).rstrip(os.sep)) + 1
+            for _, entry in self.paths.walk(base, "read"):
+                rel_to_base = entry.path[prefix_length:].replace(os.sep, "/")
+                if glob_match(pattern, rel_to_base):
+                    found.append(display(entry.path))
                     if len(found) >= limit:
                         return found
         return found

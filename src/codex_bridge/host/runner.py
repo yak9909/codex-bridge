@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-import os
+import secrets
 import shlex
 import subprocess
 from dataclasses import dataclass, field
@@ -13,7 +13,7 @@ from typing import Callable
 
 from ..common.audit import AuditLog
 from .approvals import Approvals
-from .paths import SafePaths, ToolError, not_found
+from .paths import UNSET_SHARE_MSG, SafePaths, ToolError, not_found
 from .policy import OUTPUTS_TOP, PolicyStore, glob_to_regex, normalize_rel
 from .snapshots import Snapshots
 
@@ -66,6 +66,7 @@ class Job:
     command: str
     cwd: str
     task_id: str | None
+    lender: str | None = None  # who started it; only that lender can read the result
     status: str = "starting"
     exit_code: int | None = None
     stdout: str = ""
@@ -87,13 +88,15 @@ class Job:
 
 class CommandRunner:
     def __init__(self, paths: SafePaths, policy: PolicyStore, approvals: Approvals,
-                 snapshots: Snapshots, audit: AuditLog, task_id_fn: Callable[[], str | None]) -> None:
+                 snapshots: Snapshots, audit: AuditLog, task_id_fn: Callable[[], str | None],
+                 lender_fn: Callable[[], str | None] = lambda: None) -> None:
         self.paths = paths
         self.policy = policy
         self.approvals = approvals
         self.snapshots = snapshots
         self.audit = audit
         self.task_id_fn = task_id_fn
+        self.lender_fn = lender_fn  # invite name of the lender making the current call (None: not known)
         self.jobs: dict[str, Job] = {}
         self._ids = itertools.count(1)
         self._tasks: set[asyncio.Task] = set()
@@ -118,7 +121,8 @@ class CommandRunner:
         if not real_cwd.is_dir():
             raise not_found(cwd)
         task_id = self.task_id_fn()
-        job = Job(id=f"j{next(self._ids)}", command=command, cwd=normalize_rel(cwd), task_id=task_id)
+        job = Job(id=f"j{next(self._ids)}", command=command, cwd=normalize_rel(cwd), task_id=task_id,
+                  lender=self.lender_fn())
         self.jobs[job.id] = job
         if p.exec_mode == "off":
             job.status, job.message = "denied", "実行は許可されていません（実行モードが off です）"
@@ -138,7 +142,8 @@ class CommandRunner:
 
     async def get_command_result(self, job_id: str, wait_sec: int = 30) -> dict:
         job = self.jobs.get(job_id)
-        if job is None:
+        # Another lender's job gets the same answer as a job that does not exist.
+        if job is None or job.lender != self.lender_fn():
             raise ToolError(f"ジョブが見つかりません: {job_id}")
         return await self._wait(job, min(wait_sec, self.policy.current().limits.sync_wait_sec))
 
@@ -172,30 +177,27 @@ class CommandRunner:
                              exit_code=job.exit_code, changed_files=job.changed_files, task_id=job.task_id)
 
     def _write_area_state(self) -> dict[str, tuple[int, int]]:
+        """(mtime, size) of every writable file in every shared folder."""
         state: dict[str, tuple[int, int]] = {}
-        root = self.paths.root
-        policy = self.policy.current()
-        for dirpath, dirnames, filenames in os.walk(root):
-            d = Path(dirpath)
-            dirnames[:] = [n for n in dirnames if self.paths.visible(d / n)
-                           and not (d == root and n.lower() == OUTPUTS_TOP)]
-            for name in filenames:
-                fp = d / name
-                rel = self.paths.to_rel(fp)
-                if policy.level_for(rel) == "write" and self.paths.visible(fp):
-                    try:
-                        st = fp.stat()
-                    except OSError:
-                        continue
-                    state[rel] = (st.st_mtime_ns, st.st_size)
+        display = self.paths.display_formatter()
+        for root in self.paths.root_paths():
+            for _, entry in self.paths.walk(root, "write"):
+                try:
+                    st = entry.stat()
+                except OSError:
+                    continue
+                state[display(entry.path)] = (st.st_mtime_ns, st.st_size)
         return state
 
     async def _execute(self, job: Job, real_cwd: Path, timeout: int) -> None:
         limits = self.policy.current().limits
         before = await asyncio.to_thread(self._write_area_state)
-        out_dir = self.paths.root / OUTPUTS_TOP / "outputs"
+        root = self.paths.root  # read once: the main folder can vanish while a command starts
+        if root is None:
+            raise ToolError(UNSET_SHARE_MSG)
+        out_dir = root / OUTPUTS_TOP / "outputs"
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{job.id}.stdout.txt"
+        out_path = out_dir / f"{secrets.token_hex(16)}.stdout.txt"
         proc = await asyncio.create_subprocess_shell(
             job.command, cwd=str(real_cwd), stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, creationflags=CREATIONFLAGS)

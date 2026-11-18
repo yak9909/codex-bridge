@@ -1,9 +1,11 @@
-"""A simple form view of policy.yaml (used by the admin page and Claude Code).
+"""A simple form view of policy.yaml v2 (used by the admin page and the agents' tools).
 
 form = {
-  "default": "read",                                   # places no rule mentions
-  "folders": [{"path": "analysis", "level": "write"}],  # one rule per folder (path and everything below)
-  "advanced_rules": [{"path": "raw/**/*.csv", "level": "read"}],  # wildcard rules (kept, edited as YAML)
+  "main": "D:/work/project",                                    # relative paths start here
+  "folders": [{"path": "D:/work/project", "level": "write"},    # absolute folders (and folders inside them)
+              {"path": "D:/tools/lib", "level": "read"},
+              {"path": "D:/work/project/secret", "level": "hidden"}],
+  "advanced_rules": [{"path": "**/*.lock", "level": "hidden"}],  # wildcard rules, relative to main
   "exec": {"mode": "allowlist", "allow": [...], "confirm_modified_scripts": False},
   "delete_needs_approval": True,
   "paused": False,
@@ -13,29 +15,36 @@ form = {
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path, PureWindowsPath
 
 from .policy import EXEC_MODES, LEVELS, PolicyStore, normalize_rel
 
 INHERIT = "inherit"
 
 
-def _is_glob(path: str) -> bool:
-    return any(c in path for c in "*?[")
+def _abs(path: str) -> str:
+    """Normalize an absolute path to 'D:/a/b' form; ValueError for relative paths."""
+    raw = str(path or "").strip().strip('"')
+    if not raw or not PureWindowsPath(raw).drive:
+        raise ValueError(f"フォルダはフルパスで指定してください（例: D:/work/project）: {path}")
+    return Path(os.path.abspath(raw)).as_posix()
+
+
+def _key(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
 
 
 def form_from_raw(raw: dict | None) -> dict:
     raw = raw or {}
     ex = raw.get("exec") or {}
     mode = ex.get("mode", "allowlist")
-    folders, advanced = [], []
-    for r in raw.get("rules") or []:
-        entry = {"path": normalize_rel(str(r.get("path", ""))) if not _is_glob(str(r.get("path", ""))) else r["path"],
-                 "level": r.get("level")}
-        (advanced if _is_glob(str(r.get("path", ""))) else folders).append(entry)
     return {
-        "default": raw.get("default", "read"),
-        "folders": folders,
-        "advanced_rules": advanced,
+        "main": raw.get("main") or next((f["path"] for f in raw.get("folders") or []
+                                         if f.get("level") in ("read", "write")), None),
+        "folders": [{"path": Path(str(f["path"])).as_posix(), "level": f.get("level")}
+                    for f in raw.get("folders") or []],
+        "advanced_rules": list(raw.get("advanced_rules") or []),
         "exec": {"mode": "off" if mode is False else mode, "allow": list(ex.get("allow") or []),
                  "confirm_modified_scripts": bool(ex.get("confirm_modified_scripts", False))},
         "delete_needs_approval": bool(raw.get("delete_needs_approval", True)),
@@ -49,18 +58,22 @@ def _q(s: str) -> str:
 
 def yaml_from_form(form: dict) -> str:
     """Build a commented policy.yaml from the form (raises ValueError on bad values)."""
-    default = form.get("default", "read")
-    if default not in LEVELS:
-        raise ValueError(f"default は {LEVELS} のどれかです")
-    folders = []
+    folders: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for f in form.get("folders") or []:
-        path, level = normalize_rel(str(f.get("path", ""))), f.get("level")
-        if not path or level == INHERIT:
+        level = f.get("level")
+        if level == INHERIT:
             continue
         if level not in LEVELS:
-            raise ValueError(f"{path}: level は {LEVELS} のどれかです")
-        folders.append((path, level))
-    folders.sort(key=lambda pl: (pl[0].count("/"), pl[0].lower()))  # deeper folders later = they win
+            raise ValueError(f"{f.get('path')}: level は {LEVELS} のどれかです")
+        path = _abs(f.get("path"))
+        if _key(path) in seen:
+            continue
+        seen.add(_key(path))
+        folders.append((path, level))  # keep the owner's order (the deepest rule wins regardless of order)
+    main = form.get("main")
+    if main:
+        main = _abs(main)
     ex = form.get("exec") or {}
     mode = ex.get("mode", "allowlist")
     if mode not in EXEC_MODES:
@@ -68,25 +81,26 @@ def yaml_from_form(form: dict) -> str:
     allow = [a.strip() for a in ex.get("allow") or [] if a and a.strip()]
 
     lines = [
-        "# codex-bridge 権限の規則（管理画面の「権限」で編集できます）",
+        "# codex-bridge 権限の規則（管理画面の「共有フォルダと権限」で編集できます）",
         "#   hidden = 見せない（Codex からは存在しないように見える。中のフォルダもすべて）",
         "#   read   = 読むだけ",
         "#   write  = 読み書きできる",
+        "# 一覧にない場所は、Codex からは見えません。",
         "",
-        "# 規則に当たらない場所の扱い",
-        f"default: {default}",
+        "# 相対パスで指定されたときの起点（メインのフォルダ）",
+        f"main: {_q(main)}" if main else "main: null",
         "",
-        "# フォルダごとの規則（そのフォルダと中身すべて。深いフォルダの規則が優先。hidden は常に優先）",
-        "rules:",
+        "# 共有フォルダ（フルパス）。フォルダの中に別の規則を書くと、深いほうが優先。hidden は常に優先",
+        "folders:" if folders else "folders: []",
     ]
-    for r in form.get("advanced_rules") or []:
-        if r.get("level") not in LEVELS:
-            raise ValueError(f"{r.get('path')}: level は {LEVELS} のどれかです")
-        lines.append(f"  - {{path: {_q(str(r['path']))}, level: {r['level']}}}")
-    for path, level in folders:
-        lines.append(f"  - {{path: {_q(path)}, level: {level}}}")
-    if lines[-1] == "rules:":
-        lines[-1] = "rules: []"
+    lines += [f"  - {{path: {_q(p)}, level: {lv}}}" for p, lv in folders]
+    adv = form.get("advanced_rules") or []
+    if adv:
+        lines += ["", "# ワイルドカードを使った細かい規則（メインのフォルダからの相対）", "advanced_rules:"]
+        for r in adv:
+            if r.get("level") not in LEVELS:
+                raise ValueError(f"{r.get('path')}: level は {LEVELS} のどれかです")
+            lines.append(f"  - {{path: {_q(str(r['path']))}, level: {r['level']}}}")
     lines += [
         "",
         "# コマンド実行",
@@ -118,16 +132,57 @@ def save_form(store: PolicyStore, form: dict) -> None:
     store.save_text(yaml_from_form(form))
 
 
+def _form(store: PolicyStore) -> dict:
+    return form_from_raw(store.as_dict())
+
+
 def set_folder_level(store: PolicyStore, path: str, level: str) -> dict:
-    """Set (or with level='inherit', remove) the rule for one folder; returns the new form."""
-    path = normalize_rel(path)
-    if not path:
-        raise ValueError("共有フォルダ全体は default で設定してください")
+    """Set (or with level='inherit', remove) the rule for one folder. Relative paths start at main."""
     if level not in (*LEVELS, INHERIT):
-        raise ValueError(f"level は hidden / read / write / inherit のどれかです")
-    form = form_from_raw(store.as_dict())
-    form["folders"] = [f for f in form["folders"] if f["path"].lower() != path.lower()]
+        raise ValueError("level は hidden / read / write / inherit のどれかです")
+    form = _form(store)
+    if PureWindowsPath(str(path)).drive:
+        target = _abs(path)
+    else:
+        rel = normalize_rel(path)
+        if not rel or not form["main"]:
+            raise ValueError("フォルダを指定してください")
+        target = (Path(form["main"]) / rel).as_posix()
+    form["folders"] = [f for f in form["folders"] if _key(f["path"]) != _key(target)]
     if level != INHERIT:
-        form["folders"].append({"path": path, "level": level})
+        form["folders"].append({"path": target, "level": level})
+    save_form(store, form)
+    return form
+
+
+def add_folder(store: PolicyStore, path: str, level: str) -> dict:
+    target = _abs(path)
+    if not Path(target).is_dir():
+        raise ValueError(f"フォルダが見つかりません: {target}")
+    if level not in ("read", "write"):
+        raise ValueError("追加するフォルダは read（読むだけ）か write（書ける）です")
+    return set_folder_level(store, target, level)
+
+
+def remove_folder(store: PolicyStore, path: str) -> dict:
+    target = _abs(path)
+    form = _form(store)
+    before = len(form["folders"])
+    form["folders"] = [f for f in form["folders"] if _key(f["path"]) != _key(target)]
+    if len(form["folders"]) == before:
+        raise ValueError(f"登録されていないフォルダです: {target}")
+    if form["main"] and _key(form["main"]) == _key(target):
+        form["main"] = next((f["path"] for f in form["folders"] if f["level"] in ("read", "write")), None)
+    save_form(store, form)
+    return form
+
+
+def set_main_folder(store: PolicyStore, path: str) -> dict:
+    target = _abs(path)
+    level = store.current().level_for_abs(Path(target))
+    if level not in ("read", "write"):
+        raise ValueError(f"メインにできるのは、読める共有フォルダだけです: {target}")
+    form = _form(store)
+    form["main"] = target
     save_form(store, form)
     return form

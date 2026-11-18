@@ -1,8 +1,13 @@
-# PyInstaller spec: uv run pyinstaller codex-bridge-host.spec
+# PyInstaller spec: uv run pyinstaller codex-bridge.spec
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
-datas = [("src/codex_bridge/host/web/static", "codex_bridge/host/web/static")]
+datas = [
+    ("src/codex_bridge/host/web/static", "codex_bridge/host/web/static"),
+    ("src/codex_bridge/agent/static", "codex_bridge/agent/static"),
+    ("src/codex_bridge/common/web", "codex_bridge/common/web"),
+    ("src/codex_bridge/assets/codex-bridge.ico", "codex_bridge/assets"),
+]
 for pkg in ("mcp", "mcp_types", "fastapi", "starlette", "pydantic", "uvicorn", "websockets"):
     try:
         datas += copy_metadata(pkg)
@@ -12,11 +17,12 @@ datas += collect_data_files("mcp")
 
 hidden = collect_submodules("mcp", filter=lambda n: not n.startswith(("mcp.cli", "mcp.os"))) + \
     collect_submodules("mcp_types") + collect_submodules("uvicorn") + [
-    "codex_bridge.host.setup_cli",
+    "codex_bridge.host.setup_cli", "pystray._win32", "uvicorn.logging", "uvicorn.loops.auto",
+    "uvicorn.protocols.http.auto", "uvicorn.lifespan.on",
 ]
 
 a = Analysis(
-    ["scripts/host_entry.py"],
+    ["scripts/codex_bridge_entry.py"],
     pathex=["src"],
     datas=datas,
     hiddenimports=hidden,
@@ -28,7 +34,9 @@ exe = EXE(
     a.scripts,
     a.binaries,
     a.datas,
-    name="codex-bridge-host",
+    name="codex-bridge",
+    icon="src/codex_bridge/assets/codex-bridge.ico",
     console=True,
+    hide_console="hide-early",
     upx=False,
 )

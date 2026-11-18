@@ -14,6 +14,7 @@ import urllib.request
 from pathlib import Path
 
 from ..common.invite import Invite
+from .settings import default_home, read_location
 
 RELEASE_API = "https://api.github.com/repos/openai/codex/releases/latest"
 PACKAGE_ASSET = "codex-package-x86_64-pc-windows-msvc.tar.gz"
@@ -21,10 +22,18 @@ UA = {"User-Agent": "codex-bridge-agent"}
 
 
 def data_root() -> Path:
-    base = os.environ.get("CODEX_BRIDGE_AGENT_HOME") or Path(os.environ["LOCALAPPDATA"]) / "codex-bridge-agent"
-    p = Path(base)
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    """Where codex-bridge keeps its data (design 4.7): the folder named by location.txt (see settings.move_data_root)
+    if that can be used, else the default folder, which also holds location.txt itself."""
+    home = default_home()
+    home.mkdir(parents=True, exist_ok=True)
+    chosen = read_location(home)
+    if chosen is not None:
+        try:
+            chosen.mkdir(parents=True, exist_ok=True)
+            return chosen
+        except OSError:
+            pass  # e.g. the drive is not there: nothing is lost, it is just not used
+    return home
 
 
 # ---- DPAPI (encrypt for the current Windows user) -------------------------
@@ -51,7 +60,11 @@ def _dpapi(data: bytes, protect: bool) -> bytes:
 
 def save_invite(directory: Path, invite: Invite) -> None:
     data = json.dumps({"url": invite.url, "token": invite.token, "name": invite.name}).encode("utf-8")
-    (Path(directory) / "invite.bin").write_bytes(_dpapi(data, protect=True))
+    encrypted = _dpapi(data, protect=True)  # encrypt before touching an existing invite
+    path = Path(directory) / "invite.bin"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(encrypted)
+    os.replace(tmp, path)
 
 
 def load_invite(directory: Path) -> Invite | None:

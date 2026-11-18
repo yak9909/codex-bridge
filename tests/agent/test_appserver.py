@@ -53,6 +53,18 @@ async def test_rate_limits(fake):
     assert s.five_hour == Window(12, 1800000000) and s.weekly == Window(30, 1800500000)
 
 
+async def test_stop_closes_rpc_input_when_windows_tree_kill_is_unavailable(fake, monkeypatch):
+    from types import SimpleNamespace
+    from codex_bridge.agent import appserver
+
+    await fake.app.start()
+    monkeypatch.setattr(appserver.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=1))
+    await fake.app.stop()
+    # The real subprocess must have exited before a caller starts copying the data, even if Windows
+    # refuses taskkill. Closing the RPC input lets the server and a venv Python launcher end together.
+    assert fake.app.proc.returncode is not None and not fake.app.running
+
+
 @pytest.mark.parametrize("fake", [{"errors": {"thread/read": {"code": -32600, "message": "no such thread"}}}],
                          indirect=True)
 async def test_error_response_raises(fake):
@@ -113,3 +125,28 @@ def test_code_mode_host_stays_enabled():
     from codex_bridge.agent.appserver import ISOLATED_FEATURES, launch_args
     assert "code_mode_host" not in ISOLATED_FEATURES
     assert "code_mode_host" not in launch_args("http://h:1")
+
+
+async def test_thread_start_asks_for_an_ephemeral_thread_only_when_told_to(fake):
+    await fake.app.start()
+    await fake.app.thread_start("a")
+    assert "ephemeral" not in fake.received("thread/start")
+    await fake.app.thread_start("b", ephemeral=True)
+    assert fake.received("thread/start")["ephemeral"] is True
+
+
+async def test_start_while_running_does_not_start_a_second_codex(fake):
+    await fake.app.start()
+    pid = fake.app.proc.pid
+    await asyncio.gather(fake.app.start(), fake.app.start())
+    assert fake.app.proc.pid == pid and len([l for l in fake._lines() if "argv" in l]) == 1
+
+
+async def test_restart_uses_the_new_features_and_reports_no_crash_but_a_real_exit_is_reported(fake):
+    await fake.app.start()
+    await fake.app.restart(features={"web_search": True})
+    assert fake.app.running and 'web_search="disabled"' not in [l for l in fake._lines() if "argv" in l][-1]["argv"]
+    assert fake.app.events.empty()  # the planned stop of the old server is not an "exited" event
+    fake.app.proc.kill()
+    ev = await asyncio.wait_for(fake.app.events.get(), 5)
+    assert ev["method"] == "_exited"

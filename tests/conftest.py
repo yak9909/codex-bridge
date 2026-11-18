@@ -33,6 +33,14 @@ exec: {mode: allowlist, allow: ["python scripts/**/*.py *"]}
 ORIGINAL_A = "line1\nline2\nthe needle here\nline4\n"
 
 
+@pytest.fixture(autouse=True)
+def isolate_agent_program_data(tmp_path, monkeypatch):
+    from codex_bridge.agent import settings
+
+    base = tmp_path / "ProgramData" / "codex-bridge-agent"
+    monkeypatch.setattr(settings, "program_data_base", lambda: base)
+
+
 def raises_msg(fn) -> str:
     from codex_bridge.host.paths import ToolError
     with pytest.raises(ToolError) as ei:
@@ -60,6 +68,11 @@ class Share:
     def set_policy(self, **changes) -> None:
         self.policy.update(**changes)
 
+    def add_folder(self, path: Path, level: str) -> None:
+        raw = dict(self.policy.as_dict())
+        raw["folders"] = [*raw.get("folders", []), {"path": Path(path).as_posix(), "level": level}]
+        self.policy.save(raw)
+
     def task(self, task_id: str | None) -> None:
         self.task_id = task_id
 
@@ -86,7 +99,7 @@ def build_share(tmp_path: Path) -> Share:
     (root / "docs" / "readme.md").write_text("# readme\n", encoding="utf-8")
     (outside / "outside.txt").write_text("outside\n", encoding="utf-8")
     (data_dir / "policy.yaml").write_text(POLICY, encoding="utf-8")
-    policy = PolicyStore(data_dir / "policy.yaml")
+    policy = PolicyStore(data_dir / "policy.yaml", share_root=root)  # the v1 file is converted to v2
     audit = AuditLog(data_dir / "audit.jsonl")
     paths = SafePaths(root, policy)
     share = Share(root=root, outside=outside, data_dir=data_dir, policy=policy, audit=audit,
@@ -107,3 +120,18 @@ def build_share(tmp_path: Path) -> Share:
 @pytest.fixture
 def share(tmp_path) -> Share:
     return build_share(tmp_path)
+
+
+@pytest.fixture
+def multi(tmp_path) -> Share:
+    """share + a second folder 'tools' (read) with a writable 'tools/build', and an unregistered sibling 'share2'."""
+    s = build_share(tmp_path)
+    tools = tmp_path / "tools"
+    (tools / "build").mkdir(parents=True)
+    (tools / "lib.py").write_text("needle in tools\n", encoding="utf-8", newline="\n")
+    (tmp_path / "share2").mkdir()
+    (tmp_path / "share2" / "x.txt").write_text("needle in sibling\n", encoding="utf-8")
+    s.add_folder(tools, "read")
+    s.add_folder(tools / "build", "write")
+    s.tools = tools
+    return s

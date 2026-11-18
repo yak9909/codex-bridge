@@ -1,6 +1,6 @@
 """Write setup.bat / start.bat / stop.bat (UTF-8, CRLF). Run: python scripts/make_bats.py
 
-Each bat uses codex-bridge-host.exe when it sits next to the bat (released admin zip),
+Each bat uses codex-bridge.exe when it sits next to the bat (released admin zip),
 otherwise runs from source with uv (installing uv first if needed)."""
 
 from pathlib import Path
@@ -8,8 +8,8 @@ from pathlib import Path
 TEMPLATE = r"""@echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-if exist "%~dp0codex-bridge-host.exe" (
-  "%~dp0codex-bridge-host.exe" {cmd} --config host.yaml
+if exist "%~dp0codex-bridge.exe" (
+  "%~dp0codex-bridge.exe" host {cmd} --config host.yaml
   goto done
 )
 where uv >nul 2>nul
@@ -18,7 +18,7 @@ if errorlevel 1 (
   powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
   set "PATH=%USERPROFILE%\.local\bin;%PATH%"
 )
-uv run codex-bridge-host {cmd} --config host.yaml
+uv run codex-bridge host {cmd} --config host.yaml
 :done
 echo.
 echo 何かキーを押すと、このウィンドウを閉じます。

@@ -9,13 +9,13 @@ from pathlib import Path
 import uvicorn
 
 from .app import build_host, create_local_app, create_public_app
-from .config import load_host_config
+from .config import configured_folder, effective_share_root, load_host_config
 from .policy_form import yaml_from_form
 
 SAMPLE_HOST = """\
 # codex-bridge host settings
-# share_root: the folder the friend's Codex may work in
-share_root: "C:/path/to/your/folder"
+# 共有フォルダは起動後に管理画面で選べます。
+share_root: null
 # data_dir: logs, snapshots, tokens (keep it OUTSIDE share_root)
 data_dir: "data"
 # public_bind: this PC's Tailscale IP and a port (see `tailscale ip -4`)
@@ -25,14 +25,17 @@ local_port: 8770
 rg_path: "vendor/rg.exe"
 """
 
-DEFAULT_POLICY_FORM = {
-    "default": "read",
-    "folders": [],
-    "exec": {"mode": "allowlist", "allow": ["python scripts/**/*.py *"], "confirm_modified_scripts": False},
-    "delete_needs_approval": True,
-    "paused": False,
-}
-SAMPLE_POLICY = yaml_from_form(DEFAULT_POLICY_FORM)
+def sample_policy(share_root: Path | None) -> str:
+    """First policy: the chosen folder, read-only, as the main folder."""
+    folder = configured_folder(Path(share_root)) if share_root is not None else None
+    share = folder.as_posix() if folder is not None else None
+    return yaml_from_form({
+        "main": share,
+        "folders": [{"path": share, "level": "read"}] if share else [],
+        "exec": {"mode": "allowlist", "allow": ["python scripts/**/*.py *"], "confirm_modified_scripts": False},
+        "delete_needs_approval": True,
+        "paused": False,
+    })
 
 
 def ensure_config(path: Path) -> bool:
@@ -40,22 +43,21 @@ def ensure_config(path: Path) -> bool:
     path = Path(path)
     created = False
     if not path.exists():
-        path.write_text(SAMPLE_HOST, encoding="utf-8")
+        path.write_text(SAMPLE_HOST, encoding="utf-8", newline="\n")
         created = True
     cfg = load_host_config(path)
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     policy = cfg.data_dir / "policy.yaml"
     if not policy.exists():
-        policy.write_text(SAMPLE_POLICY, encoding="utf-8")
+        policy.write_text(sample_policy(cfg.share_root), encoding="utf-8", newline="\n")
     return created
 
 
 async def serve(config_path: Path) -> None:
     cfg = load_host_config(config_path)
-    if not cfg.share_root.is_dir():
-        raise SystemExit(f"share_root がありません: {cfg.share_root}")
-    if cfg.data_dir.resolve().is_relative_to(cfg.share_root.resolve()):
-        raise SystemExit("data_dir は share_root の外に置いてください")
+    for root in (cfg.share_root, effective_share_root(cfg)):
+        if root is not None and cfg.data_dir.resolve().is_relative_to(root.resolve()):
+            raise SystemExit("data_dir は share_root の外に置いてください")
     host = build_host(cfg, config_path=config_path)
     pub_host, pub_port = cfg.public_bind.rsplit(":", 1)
     public = uvicorn.Server(uvicorn.Config(create_public_app(host), host=pub_host, port=int(pub_port),
@@ -64,7 +66,7 @@ async def serve(config_path: Path) -> None:
                                           log_level="warning"))
     print("codex-bridge を起動しました。")
     print(f"  管理画面:           http://127.0.0.1:{cfg.local_port}/admin/")
-    print(f"  共有フォルダ:       {cfg.share_root}")
+    print(f"  共有フォルダ: {host.paths.root or '未設定（管理画面で選んでください）'}")
     print(f"  知人の agent の接続先: http://{cfg.public_bind}")
     print("  止めるときは stop.bat を実行するか、このウィンドウを閉じてください。")
 
@@ -80,13 +82,15 @@ async def serve(config_path: Path) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(prog="codex-bridge-host")
+    ap = argparse.ArgumentParser(prog="codex-bridge host")
     ap.add_argument("command", nargs="?", default="serve", choices=["serve", "setup", "start", "stop", "install-mcp"])
     ap.add_argument("--config", default="host.yaml", type=Path)
+    ap.add_argument("--then-start", action="store_true",
+                    help="setup のあと、同じ画面でそのまま起動する（exe の「使う側」用）")
     args = ap.parse_args()
     if args.command == "setup":
         from .setup_cli import run_setup
-        run_setup(args.config)
+        run_setup(args.config, then_start=args.then_start)
         return
     if args.command == "start":
         from .setup_cli import run_start
