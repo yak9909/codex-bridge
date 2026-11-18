@@ -8,19 +8,21 @@
    Controls 32px, small 24px. */
 
 :root {
-  --ink: #1f2430; --muted: #596173; --idle: #9aa1ae;
+  /* text weight, Fluent neutral foreground ramp (fluent2-light-color-tokens.ts): ink body, muted caption, subtle low-importance caption (4.9:1) */
+  --ink: #1f2430; --muted: #596173; --subtle: #707070; --idle: #9aa1ae;
   /* edges: --ctl-line control boundary (3:1 on white, WCAG 1.4.11); --edge card/pane edge; --line divider inside one card */
   --ctl-line: #868f9e; --edge: #b3bac6; --line: #d3d8df;
   --ground: #eceef2; --surface: #ffffff;
   --accent: #0d6b62; --accent-soft: #e5f1ef;
   --warn: #7a4507; --warn-soft: #fdf3e2; --warn-line: #efd29b; --warn-mark: #d9930d;
   --bad: #b42318; --bad-soft: #fdecea; --ok: #1b7a4b;
-  --fs-title: 16px; --fs: 14px; --fs-cap: 12px;
+  --fs-title: 16px; --fs: 14px; --fs-cap: 12px; --fs-cap2: 10px; /* cap2: meter helper only */
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px;
   --ctl: 32px; --ctl-sm: 24px; --r: 6px;
   --font: "BIZ UDPGothic", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
   --mono: "BIZ UDGothic", Consolas, monospace;
   --frame-h: 800px;
+  --sbw: 0px; /* width of a classic scrollbar, set by ui.js; stays 0 with overlay scrollbars */
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--ground); color: var(--ink); font-family: var(--font); font-size: var(--fs); line-height: 20px; font-variant-numeric: tabular-nums; }
@@ -31,6 +33,7 @@ code { font-family: var(--mono); font-size: var(--fs-cap); line-height: 16px; ba
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ic { width: 16px; height: 16px; flex: none; }
 .cap { font-size: var(--fs-cap); line-height: 16px; color: var(--muted); }
+.cap.low { color: var(--subtle); }
 .spacer { flex: 1; }
 .row { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
 .ellipsis { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -110,12 +113,18 @@ select.ro, input.ro { pointer-events: none; appearance: none; }
 
 /* ---- usage meter, carbon progress bar "inline": label | bar | value on one line, helper text under the bar
    (carbon-progress-bar-style.md:126-172). The label column is shared by the meters of one card. ---- */
-.meters { display: grid; grid-template-columns: max-content minmax(48px, 1fr) max-content; column-gap: var(--s2); row-gap: var(--s1); align-items: center; }
+.meters { display: grid; grid-template-columns: max-content minmax(48px, 1fr) max-content; column-gap: var(--s2); row-gap: 0; align-items: center; }
 .meters > .m-label { color: var(--muted); }
 .meters > .m-val { font-weight: 700; text-align: right; }
 .meters > .m-val.hot { color: var(--bad); }
-.meters > .m-help { grid-column: 2 / -1; font-size: var(--fs-cap); line-height: 16px; color: var(--muted); display: flex; gap: var(--s2); align-items: center; }
-.meters > .m-help + .m-label { margin-top: var(--s1); }
+/* helper: right under its own bar, 12 away from the next meter (spec 0.4, spacing by relation) */
+.meters > .m-help { grid-column: 2 / -1; font-size: var(--fs-cap2); line-height: 14px; color: var(--subtle); }
+.meters > .m-help:not(:last-child) { padding-bottom: var(--s3); }
+/* the lender's own limits: settings rows (header left, control right) under the meters, never inside the helper line */
+.limits { display: grid; gap: var(--s2); }
+.limits > .lim { display: flex; align-items: center; gap: var(--s2); }
+.limits > .lim > .lbl { flex: 1; min-width: 0; }
+.limits select { width: 160px; }
 .m-bar { position: relative; height: 6px; background: #e3e6eb; border-radius: 3px; }
 .m-fill { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: var(--accent); }
 .m-fill.hot { background: var(--bad); }
@@ -139,14 +148,17 @@ select.ro, input.ro { pointer-events: none; appearance: none; }
 .side { border-right: 1px solid var(--edge); background: var(--ground); }
 .pane-head { display: flex; align-items: center; gap: var(--s2); height: 48px; padding: 0 var(--s4); flex: none; }
 .side .pane-head { border-bottom: 1px solid var(--edge); background: var(--surface); }
-.pane-body { flex: 1; min-height: 0; overflow: auto; padding: var(--s4); display: grid; gap: var(--s3); align-content: start; }
+/* scrolling areas: a thin bar in a stable gutter that sits inside the right inset, so the content keeps the same inset on both
+   sides (ms-scroll-controls.md:52: the bar overlays a 16 inset). Right padding = inset - bar width. */
+.scroll { overflow: auto; scrollbar-width: thin; scrollbar-gutter: stable; }
+.pane-body { flex: 1; min-height: 0; padding: var(--s3) max(0px, calc(var(--s3) - var(--sbw))) var(--s3) var(--s3); display: grid; gap: var(--s2); align-content: start; }
 .block { flex: none; padding: var(--s4); border-bottom: 1px solid var(--edge); background: var(--surface); display: grid; gap: var(--s3); }
 
 /* ---- entity card: lender / client. Two-line list item (name bold + badge / caption), then meters; expands to settings.
    The header sticks to the top of the pane while its own card is on screen and is pushed out at the card's end. ---- */
 .ent { border: 1px solid var(--edge); border-radius: var(--r); background: var(--surface); min-width: 0; }
-/* top: minus the pane padding, so that the stuck header meets the top edge of the pane with nothing showing above it */
-.ent-head { position: sticky; top: calc(-1 * var(--s4)); z-index: 2; display: grid; grid-template-columns: minmax(0, 1fr) auto; row-gap: var(--s1);
+/* top: minus the pane's top padding, so that the stuck header meets the top edge of the pane with nothing showing above it */
+.ent-head { position: sticky; top: calc(-1 * var(--s3)); z-index: 2; display: grid; grid-template-columns: minmax(0, 1fr) auto; row-gap: var(--s1);
   width: 100%; height: auto; padding: var(--s3); border: 0; border-radius: var(--r); background: var(--surface); color: var(--ink); text-align: left; white-space: normal; }
 .ent-line { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
 .ent-name { font-weight: 700; }
@@ -173,10 +185,13 @@ select.ro, input.ro { pointer-events: none; appearance: none; }
 .set-group > .set:first-of-type { border-top: 0; }
 
 /* ---- right area ---- */
-.work { display: grid; grid-template-rows: auto auto minmax(0, 1fr); min-width: 0; min-height: 0; }
-.alerts { background: var(--warn-soft); border-bottom: 1px solid var(--warn-line); }
-.alert { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: var(--s3); padding: var(--s2) var(--s4); border-top: 1px solid var(--warn-line); }
+/* the work area sits on the ground like the side pane's cards, 12 from everything around it (spec 0.4) */
+.work { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: var(--s3); padding: var(--s3); min-width: 0; min-height: 0; background: var(--ground); }
+.surface { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: 0; border: 1px solid var(--edge); border-radius: var(--r); background: var(--surface); overflow: hidden; }
+.alerts { background: var(--warn-soft); border: 1px solid var(--warn-line); border-radius: var(--r); }
+.alert { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: var(--s3); padding: var(--s2) var(--s3); border-top: 1px solid var(--warn-line); }
 .alert:first-child { border-top: 0; }
+.alert > .lz { justify-self: start; }
 .alert code { background: transparent; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .alert .decide { display: flex; gap: var(--s2); }
 .alert.multi { grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; }
@@ -188,7 +203,8 @@ select.ro, input.ro { pointer-events: none; appearance: none; }
 .lv { display: grid; grid-template-columns: 320px minmax(0, 1fr); min-height: 0; }
 .list { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--edge); }
 .list .pane-head { border-bottom: 1px solid var(--line); }
-.items { list-style: none; padding: 0; flex: 1; min-height: 0; overflow: auto; }
+/* rows run edge to edge, so no stable gutter here (it would cut the row lines and the selection short) */
+.items { list-style: none; padding: 0; flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; }
 .items li { display: grid; gap: var(--s1); padding: var(--s3) var(--s4); border-bottom: 1px solid var(--line); cursor: pointer; }
 .items li[aria-selected="true"] { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
 .items .t-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -202,7 +218,7 @@ select.ro, input.ro { pointer-events: none; appearance: none; }
 .d-meta { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; font-size: var(--fs-cap); line-height: 16px; color: var(--muted); }
 .d-meta b { color: var(--ink); }
 .d-body { padding-top: var(--s1); white-space: pre-wrap; }
-.d-log { min-height: 0; overflow: auto; padding: var(--s3) var(--s4); }
+.d-log { min-height: 0; padding: var(--s3) max(0px, calc(var(--s4) - var(--sbw))) var(--s3) var(--s4); }
 .d-log > h3 { font-size: var(--fs-cap); color: var(--muted); margin-bottom: var(--s2); }
 /* activity timeline (primer-timeline.md): vertical line, small badge per item, time on the right */
 .tl { list-style: none; padding: 0; }
@@ -214,16 +230,15 @@ select.ro, input.ro { pointer-events: none; appearance: none; }
 .tl .msg .tl-badge { background: #e3e6eb; color: #444b59; }
 .tl .ev .tl-body { font-size: var(--fs-cap); color: var(--muted); }
 .tl .time { font-size: var(--fs-cap); color: var(--muted); }
-/* composer (aiux-chat-composer.md, assistant-ui-composer.md): text area, toolbar under it, send on the right */
-.composer { margin: 0 var(--s4) var(--s4); border: 1px solid var(--ctl-line); border-radius: var(--r); background: var(--surface); }
-.composer:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
-.composer textarea { border: 0; resize: none; padding: var(--s2) var(--s3) 0; display: block; }
-.composer textarea:focus-visible { outline: 0; }
-.composer-bar { display: flex; align-items: center; gap: var(--s2); padding: var(--s2); }
+/* composer (assistant-ui-composer.md:127): text field, toolbar under it, send on the right. The field keeps its own frame and the
+   toolbar sits 8 below it, so the send button never reads as part of the text (spec 0.4) */
+.composer { display: grid; gap: var(--s2); padding: var(--s3) var(--s4) var(--s4); border-top: 1px solid var(--line); }
+.composer textarea { resize: none; display: block; }
+.composer-bar { display: flex; align-items: center; gap: var(--s2); }
 select.ghost { height: var(--ctl-sm); font-size: var(--fs-cap); border-color: transparent; background: var(--ground); }
 
 /* a plain settings page inside the right area (shared folders, allowlist, this PC) */
-.page { flex: 1; min-height: 0; overflow: auto; padding: var(--s4); display: grid; gap: var(--s3); align-content: start; }
+.page { flex: 1; min-height: 0; padding: var(--s4) max(0px, calc(var(--s4) - var(--sbw))) var(--s4) var(--s4); display: grid; gap: var(--s3); align-content: start; }
 .page > * { max-width: 880px; }
 .page .hint { font-size: var(--fs-cap); line-height: 16px; color: var(--muted); }
 table.grid { width: 100%; border-collapse: collapse; }

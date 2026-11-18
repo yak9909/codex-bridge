@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>codex-bridge（確認用）</title>
 <link rel="stylesheet" href="ui.css">
+<script src="ui.js"></script>
 </head>
 <body>
 
@@ -26,7 +27,7 @@
   <div class="shell">
     <aside class="pane side" aria-label="貸す人">
       <div class="pane-head"><h2>貸す人</h2><span class="count">4</span><span class="spacer"></span><button class="secondary sm"><svg class="ic"><use href="icons.svg#i-key-round"/></svg>招待</button></div>
-      <div class="pane-body">
+      <div class="pane-body scroll">
 
         <div class="ent">
           <button class="ent-head" aria-expanded="true">
@@ -68,7 +69,7 @@
               <div class="set"><span class="lbl">Web 検索</span><div class="ctl"><label class="switch ro"><input type="checkbox" onclick="return false"><span class="track"></span><span>オフ</span></label></div></div>
               <div class="set"><span class="lbl">画像の生成</span><div class="ctl"><label class="switch ro"><input type="checkbox" checked onclick="return false"><span class="track"></span><span>オン</span></label></div></div>
               <div class="set"><span class="lbl">上限を超えたとき</span>
-                <div class="ctl"><span class="seg ro"><label><input type="radio" name="yf" checked disabled>止めて報告させる</label><label><input type="radio" name="yf" disabled>すぐ強制終了</label></span></div></div>
+                <div class="ctl"><select class="ro" aria-readonly="true"><option>止めて報告させる</option></select></div></div>
             </div>
           </div>
         </div>
@@ -76,7 +77,7 @@
         <div class="ent">
           <button class="ent-head" aria-expanded="false">
             <span class="ent-line"><span class="ent-name">suzuki</span><span class="lz idle">待機中</span><span class="badge warn">コマンド: すべて自動</span></span>
-            <span class="cap">依頼はありません</span>
+            <span class="cap low">依頼はありません</span>
             <svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg>
           </button>
           <div class="ent-sec">
@@ -112,6 +113,7 @@
         <div class="alert"><span class="lz warn">コマンド実行</span><code>npm test -- --runInBand src/parser</code><span class="cap">t12・yamada・3 分前</span><span class="decide"><button class="sm">許可</button><button class="danger sm">拒否</button></span></div>
         <div class="alert"><span class="lz warn">削除</span><code>analysis/old-report.md</code><span class="cap">t13・suzuki・1 分前</span><span class="decide"><button class="sm">許可</button><button class="danger sm">拒否</button></span></div>
       </div>
+      <div class="surface">
       <nav class="tablist" role="tablist">
         <button class="tab" role="tab" aria-selected="true">依頼</button>
         <button class="tab" role="tab" aria-selected="false">共有フォルダ</button>
@@ -134,7 +136,7 @@
             <div class="d-meta"><span class="lz ok">作業中</span><b>yamada</b><span>GPT-6.1-Terra・high</span><span class="badge" title="途中で GPT-6.1-Sol から切り替わりました（理由 highRiskCyberActivity）">GPT-6.1-Sol から切り替え</span><span>5 分</span></div>
             <p class="d-body">web のテストが落ちているので直してください。</p>
           </header>
-          <div class="d-log">
+          <div class="d-log scroll">
             <h3>経過</h3>
             <ol class="tl">
               <li class="ev"><span class="tl-badge"><svg class="ic"><use href="icons.svg#i-play"/></svg></span><span class="tl-body">yamada が受け付けました</span><span class="time">14:20</span></li>
@@ -147,9 +149,10 @@
           </div>
           <form class="composer" onsubmit="return false">
             <textarea rows="2" placeholder="追加の指示（t12 の続き）"></textarea>
-            <div class="composer-bar"><span class="cap">yamada に送ります</span><span class="spacer"></span><button class="sm"><svg class="ic"><use href="icons.svg#i-send"/></svg>送る</button></div>
+            <div class="composer-bar"><span class="spacer"></span><button class="sm"><svg class="ic"><use href="icons.svg#i-send"/></svg>送る</button></div>
           </form>
         </section>
+      </div>
       </div>
     </div>
   </div>
@@ -159,7 +162,7 @@
 <div class="figs">
   <div class="fig" style="width:880px;height:360px">
     <nav class="tablist" role="tablist"><button class="tab" role="tab" aria-selected="false">依頼</button><button class="tab" role="tab" aria-selected="true">共有フォルダ</button><button class="tab" role="tab" aria-selected="false">許可リスト</button></nav>
-    <div class="page">
+    <div class="page scroll">
       <p class="hint">Codex から見えるのは、ここに並べたフォルダだけです</p>
       <table class="grid">
         <thead><tr><th>フォルダ</th><th>権限</th><th class="end"></th></tr></thead>
@@ -174,7 +177,7 @@
   </div>
   <div class="fig" style="width:880px;height:360px">
     <nav class="tablist" role="tablist"><button class="tab" role="tab" aria-selected="false">依頼</button><button class="tab" role="tab" aria-selected="false">共有フォルダ</button><button class="tab" role="tab" aria-selected="true">許可リスト</button></nav>
-    <div class="page">
+    <div class="page scroll">
       <p class="hint">「許可リストだけ自動」の人が、確認なしで実行できるコマンド。<code>*</code> は名前の一部か任意の引数、<code>**</code> は下のフォルダすべて。<code>&amp;&amp;</code> や <code>|</code> を含むものは承認待ち。</p>
       <textarea rows="4" spellcheck="false" style="font-family:var(--mono)">python scripts/**/*.py *
 npm test *</textarea>
@@ -185,7 +188,7 @@ npm test *</textarea>
   <div class="fig" style="width:560px;height:300px">
     <section class="detail" style="height:100%">
       <header class="d-head"><div class="d-title"><h2>新しい依頼</h2></div></header>
-      <div class="d-log"></div>
+      <div class="d-log scroll"></div>
       <form class="composer" onsubmit="return false">
         <textarea rows="4" placeholder="例: analysis/report.md を読み、要点を 5 行で analysis/summary.md に書いてください。"></textarea>
         <div class="composer-bar">
@@ -228,14 +231,18 @@ npm test *</textarea>
         <h2>使用量</h2>
         <div class="meters">
           <span class="m-label">5時間</span><div class="m-bar"><div class="m-fill" style="width:45%"></div><div class="m-mark" style="left:80%"></div></div><span class="m-val">45%</span>
-          <span class="m-help">15:40 に戻る<span class="spacer"></span>上限<input class="sm" type="number" value="80">%</span>
+          <span class="m-help">15:40 に戻る・上限 80%</span>
           <span class="m-label">週間</span><div class="m-bar"><div class="m-fill" style="width:62%"></div></div><span class="m-val">62%</span>
-          <span class="m-help">11/22 09:00 に戻る<span class="spacer"></span>上限<input class="sm" type="number" placeholder="なし">%</span>
+          <span class="m-help">11/22 09:00 に戻る</span>
         </div>
-        <div class="row"><span>上限を超えたとき</span><span class="spacer"></span><span class="seg"><label><input type="radio" name="f" checked>止めて報告させる</label><label><input type="radio" name="f">すぐ強制終了</label></span></div>
+        <div class="limits">
+          <label class="lim"><span class="lbl">5時間の上限</span><input class="sm" type="number" value="80"><span>%</span></label>
+          <label class="lim"><span class="lbl">週間の上限</span><input class="sm" type="number" placeholder="なし"><span>%</span></label>
+          <label class="lim"><span class="lbl">上限を超えたとき</span><select class="sm"><option>止めて報告させる</option><option>すぐ強制終了</option></select></label>
+        </div>
       </div>
       <div class="pane-head"><h2>依頼主</h2><span class="count">3</span><span class="cap">作業は同時に 1 つ</span><span class="spacer"></span><button class="secondary sm"><svg class="ic"><use href="icons.svg#i-plug"/></svg>追加</button></div>
-      <div class="pane-body">
+      <div class="pane-body scroll">
         <div class="ent">
           <button class="ent-head" aria-expanded="true">
             <span class="ent-line"><span class="ent-name">hanako</span><span class="lz ok">作業中</span></span>
@@ -263,14 +270,14 @@ npm test *</textarea>
         <div class="ent">
           <button class="ent-head" aria-expanded="false">
             <span class="ent-line"><span class="ent-name">jiro</span><span class="lz warn">つなぎ直し中</span></span>
-            <span class="cap">100.64.0.7</span>
+            <span class="cap low">100.64.0.7</span>
             <svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg>
           </button>
         </div>
         <div class="ent">
           <button class="ent-head" aria-expanded="false">
             <span class="ent-line"><span class="ent-name">mika</span><span class="lz bad">招待コードが無効</span></span>
-            <span class="cap">100.64.0.9</span>
+            <span class="cap low">100.64.0.9</span>
             <svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg>
           </button>
         </div>
@@ -287,6 +294,7 @@ npm test *</textarea>
           <span class="decide"><button class="sm">許可</button><button class="danger sm">拒否</button></span>
         </div>
       </div>
+      <div class="surface">
       <nav class="tablist" role="tablist">
         <button class="tab" role="tab" aria-selected="true">依頼</button>
         <button class="tab" role="tab" aria-selected="false">この PC</button>
@@ -306,7 +314,7 @@ npm test *</textarea>
             <div class="d-meta"><span class="lz ok">作業中</span><b>hanako</b><span>GPT-6.1-Sol・high</span><span>5 分</span></div>
             <p class="d-body">web のテストが落ちているので直してください。</p>
           </header>
-          <div class="d-log">
+          <div class="d-log scroll">
             <h3>経過</h3>
             <ol class="tl">
               <li class="ev"><span class="tl-badge"><svg class="ic"><use href="icons.svg#i-shield-check"/></svg></span><span class="tl-body">あなたが許可しました</span><span class="time">14:20</span></li>
@@ -317,6 +325,7 @@ npm test *</textarea>
           <div></div>
         </section>
       </div>
+      </div>
     </div>
   </div>
 </div>
@@ -325,7 +334,7 @@ npm test *</textarea>
 <div class="figs">
   <div class="fig" style="width:880px;height:340px">
     <nav class="tablist" role="tablist"><button class="tab" role="tab" aria-selected="false">依頼</button><button class="tab" role="tab" aria-selected="true">この PC</button></nav>
-    <div class="page">
+    <div class="page scroll">
       <div class="rowset">
         <div class="set"><span class="lbl">作業フォルダ<span class="cap">C:\ProgramData\codex-bridge-agent\work-7f3a</span></span><div class="ctl"><button class="secondary sm">変える</button></div></div>
         <div class="set"><span class="lbl">記録を残す日数</span><div class="ctl"><input class="sm" type="number" value="30"><span>日</span></div></div>

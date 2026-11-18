@@ -23,7 +23,11 @@
     });
 
     // type and space must come from the scale (spec 0.4)
-    const TYPE = new Set([12, 14, 16]);
+    const TYPE = new Set([10, 12, 14, 16]); // 10: meter helper only (spec 0.4)
+    document.querySelectorAll("body *").forEach((e) => {
+      if (parseFloat(getComputedStyle(e).fontSize) === 10 && !e.closest(".m-help, .mock-tab, svg") && e.offsetParent !== null
+        && [...e.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim())) out.push(`10px outside a meter helper: ${e.className}`);
+    });
     const SPACE = new Set([0, 1, 2, 3, 4, 8, 12, 16, 24]); // 1-3: borders/insets of small marks only
     const badType = new Map(), badSpace = new Map();
     document.querySelectorAll("body *").forEach((e) => {
@@ -34,6 +38,8 @@
       if (hasText && !TYPE.has(fs)) badType.set(fs, (badType.get(fs) || 0) + 1);
       const props = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "marginTop", "marginBottom"];
       if (/flex|grid/.test(cs.display)) props.push("rowGap", "columnGap");
+      // the right inset of a scrolling area is the inset minus the scrollbar width (ui.css .scroll), so it is off the scale on purpose
+      if (e.matches(".scroll, .scroll > li")) props.splice(props.indexOf("paddingRight"), 1);
       props.forEach((p) => {
         const v = parseFloat(cs[p]);
         if (!Number.isNaN(v) && !SPACE.has(Math.abs(v))) badSpace.set(`${p}=${v}`, (badSpace.get(`${p}=${v}`) || 0) + 1);
@@ -45,7 +51,7 @@
 
     if (q.has("gaps")) {
       // vertical gaps between consecutive visible children, per component kind
-      const kinds = [".ent-head", ".ent-sec", ".set", ".d-head", ".items li", ".block", ".pane-body"];
+      const kinds = [".ent-head", ".ent-sec", ".set", ".d-head", ".items li", ".block", ".pane-body", ".composer", ".limits"];
       const rep = kinds.map((k) => {
         const vals = new Set();
         document.querySelectorAll(k).forEach((el) => {
@@ -60,6 +66,24 @@
         });
         return `${k}: ${[...vals].join(",")}`;
       });
+      // meter helper: from its own bar (bar bottom) and to the next meter (next label top)
+      const own = new Set(), next = new Set();
+      document.querySelectorAll(".m-help").forEach((h) => {
+        const bar = h.previousElementSibling?.previousElementSibling, r = h.getBoundingClientRect();
+        if (bar?.classList.contains("m-bar")) own.add(Math.round(r.top - bar.getBoundingClientRect().bottom));
+        const nl = h.nextElementSibling;
+        if (nl?.classList.contains("m-label")) next.add(Math.round(nl.getBoundingClientRect().top - (r.top + 14)));
+      });
+      rep.push(`meter helper: bar-to-text ${[...own].join(",")} / text-to-next ${[...next].join(",")}`);
+      // scrolling areas: left and right space between the area's border box and its content (including the scrollbar)
+      const lr = new Set();
+      document.querySelectorAll(".scroll").forEach((s) => {
+        const kids = [...s.children].filter((c) => c.offsetParent !== null);
+        if (!kids.length || s.clientHeight === 0) return;
+        const r = s.getBoundingClientRect(), L = Math.min(...kids.map((c) => c.getBoundingClientRect().left)), R = Math.max(...kids.map((c) => c.getBoundingClientRect().right));
+        lr.add(`${s.className.split(" ")[0]} ${Math.round(L - r.left)}/${Math.round(r.right - R)}${s.scrollHeight > s.clientHeight ? "(bar)" : ""}`);
+      });
+      rep.push(`scroll L/R: ${[...lr].join(", ")}`);
       document.body.setAttribute("data-gaps", rep.join(" | "));
     }
   });
