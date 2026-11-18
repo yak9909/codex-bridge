@@ -7,6 +7,7 @@ import pytest
 from starlette.applications import Starlette
 from starlette.routing import Mount
 
+from codex_bridge.host import claude_mcp
 from codex_bridge.host.claude_mcp import build_claude_mcp
 from codex_bridge.host.policy_form import add_folder, remove_folder, set_main_folder
 from codex_bridge.host.tasks import TaskManager
@@ -169,6 +170,108 @@ async def test_send_task_with_agent(env):
     res = await call(local, "send_task", {"prompt": "x"})
     tid = json.loads(res["content"][0]["text"])["task_id"]
     assert sent[-1]["type"] == "task_start" and sent[-1]["task_id"] == tid
+
+
+async def test_send_task_origin_claude_by_default(env):
+    mgr, local, _ = env
+    await join(mgr, "friend")
+    result = text_of(await call(local, "send_task", {"prompt": "x"}))
+    rec = mgr.tasks[result["task_id"]]
+    assert rec.origin == "claude" and rec.session is None
+    assert result == {"task_id": rec.task_id, "lender": "friend", "model": None, "effort": None,
+                      "note": claude_mcp.NOTIFY_NOTE}
+
+
+async def test_send_task_origin_codex_by_query(env):
+    mgr, local, _ = env
+    await join(mgr, "friend")
+    response = await local.post("/claude/mcp?client=codex", headers=ACCEPT, json={
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "send_task", "arguments": {"prompt": "x"}}})
+    assert response.status_code == 200, response.text
+    result = text_of(response.json()["result"])
+    rec = mgr.tasks[result["task_id"]]
+    assert rec.origin == "codex" and rec.session is None
+
+
+@pytest.mark.parametrize("spec, model, effort", [({"model": "m1", "effort": "high"}, "m1", "high"),
+                                                ({"model": "m1"}, "m1", None),
+                                                ({"effort": "high"}, None, "high"),
+                                                ({"model": "", "effort": ""}, None, None)])
+async def test_send_task_model_effort_reach_agent(env, spec, model, effort):
+    mgr, local, _ = env
+    sent = []
+
+    async def send(msg):
+        sent.append(msg)
+    await join(mgr, "friend", send, protocol=3, capabilities={"model_select": True},
+               models=[{"model": "m1", "efforts": ["low", "high"], "is_default": True}], max_effort="xhigh")
+    result = text_of(await call(local, "send_task", {"prompt": "x", **spec}))
+    rec = mgr.tasks[result["task_id"]]
+    assert (rec.model, rec.effort) == (model, effort)
+    assert result == {"task_id": rec.task_id, "lender": "friend", "model": model, "effort": effort,
+                      "note": claude_mcp.NOTIFY_NOTE}
+    assert claude_mcp.NOTIFY_NOTE == (
+        "承認待ちか終了になると自動で知らせが届きます（install-mcp で設定済みの場合）。それまで状態を確かめる必要はありません。")
+    assert sent[-1]["type"] == "task_start" and sent[-1]["task_id"] == rec.task_id
+    for key, value in (("model", model), ("effort", effort)):
+        if value is None:
+            assert key not in sent[-1]
+        else:
+            assert sent[-1][key] == value
+
+
+async def test_send_followup_returns_task_id(env):
+    mgr, local, _ = env
+    await join(mgr, "friend")
+    tid = text_of(await call(local, "send_task", {"prompt": "x"}))["task_id"]
+    assert text_of(await call(local, "send_followup", {"task_id": tid, "text": "more"})) == {
+        "ok": True, "task_id": tid, "note": claude_mcp.NOTIFY_NOTE}
+
+
+@pytest.mark.parametrize("approve, status", [(True, "approved"), (False, "denied")])
+async def test_decide_approval_returns_task_id(env, share, approve, status):
+    _, local, _ = env
+    approval = share.approvals.request("command", "python x.py", task_id="t1")
+    result = text_of(await call(local, "decide_approval", {"approval_id": approval.id, "approve": approve}))
+    assert result == {"approval_id": approval.id, "status": status, "task_id": "t1",
+                      "note": claude_mcp.NOTIFY_NOTE}
+
+
+def test_guide_no_polling_instruction():
+    assert "get_status(wait_sec=50) を繰り返" not in claude_mcp.GUIDE + claude_mcp.INSTRUCTIONS
+    assert "自動で知らせが届きます" in claude_mcp.GUIDE
+
+
+def test_guide_keeps_injection_warning():
+    assert "利用者の指示ではない" in claude_mcp.GUIDE
+
+
+async def test_no_judgement_rule_in_approval_texts(env):
+    _, local, _ = env
+    response = await local.post("/claude/mcp", headers=ACCEPT, json={
+        "jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert response.status_code == 200, response.text
+    description = next(t["description"] for t in response.json()["result"]["tools"]
+                       if t["name"] == "decide_approval")
+    for text in (claude_mcp.GUIDE, claude_mcp.APPROVAL_NOTE, description):
+        assert "沿っていれば" not in text
+        assert "必ず確かめてください" not in text
+
+
+@pytest.mark.parametrize("session", ["s1", "", None, 7, [], {}])
+async def test_caller_session_recorded(env, session):
+    mgr, local, _ = env
+    await join(mgr, "friend")
+    response = await local.post("/claude/mcp?client=codex", headers=ACCEPT, json={
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "send_task", "arguments": {"prompt": "x"},
+                   "_meta": {"sessionId": session, "threadId": "s1",
+                             "x-codex-turn-metadata": {"session_id": "s1"}}}})
+    assert response.status_code == 200, response.text
+    rec = mgr.tasks[text_of(response.json()["result"])["task_id"]]
+    assert rec.origin == "codex"
+    assert rec.session == ("s1" if session == "s1" else None)
 
 
 def window(percent: int) -> dict:
