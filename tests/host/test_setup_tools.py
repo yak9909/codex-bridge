@@ -1,8 +1,18 @@
+import json
 import subprocess
+
+import pytest
 
 import yaml
 
+from codex_bridge import hook
 from codex_bridge.host import setup_tools as st
+
+
+@pytest.fixture(autouse=True)
+def isolated_client_configs(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cc"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "cx"))
 
 
 def done(rc=0, out=""):
@@ -104,7 +114,8 @@ def test_register_codex_adds_url_server():
         calls.append(args)
         return done(1) if args[2] == "get" else done(0)
     assert st.register_codex(run, codex="codex", local_port=8770) == "added"
-    assert calls[-1] == ["codex", "mcp", "add", "codex-bridge", "--url", "http://127.0.0.1:8770/claude/mcp"]
+    assert calls[-1] == ["codex", "mcp", "add", "codex-bridge", "--url",
+                         "http://127.0.0.1:8770/claude/mcp?client=codex"]
 
 
 def test_register_codex_skips_when_present_or_missing():
@@ -135,3 +146,211 @@ def test_codex_auto_approve_without_entry(tmp_path):
     cfg.write_text('model = "x"\n', encoding="utf-8")
     assert st.codex_auto_approve(cfg) is False
     assert st.codex_auto_approve(tmp_path / "missing.toml") is False
+
+
+def test_hook_command_frozen_and_source(monkeypatch):
+    executable = r"C:\a b\デスク\codex-bridge.exe"
+    assert st.hook_command("claude", 8770, frozen=True, executable=executable) == (
+        '"C:/a b/デスク/codex-bridge.exe" hook claude --port 8770')
+    assert st.hook_command("codex", 8770, frozen=True, executable=executable) == (
+        '& "C:/a b/デスク/codex-bridge.exe" hook codex --port 8770')
+    python = r"C:\a b\デスク\python.exe"
+    assert st.hook_command("claude", 8770, frozen=False, executable=python) == (
+        '"C:/a b/デスク/python.exe" -m codex_bridge hook claude --port 8770')
+    source = st.hook_command("codex", 8770, frozen=False, executable=python)
+    assert source.startswith('& "') and "-m codex_bridge hook codex" in source
+    monkeypatch.setattr(st.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(st.sys, "executable", executable)
+    assert st.hook_command("codex", 9001) == (
+        '& "C:/a b/デスク/codex-bridge.exe" hook codex --port 9001')
+
+
+def test_install_claude_hook_creates_file(tmp_path):
+    command = '"C:/デスク/codex-bridge.exe" hook claude --port 8770'
+    assert st.claude_settings_path() == tmp_path / "cc" / "settings.json"
+    assert st.install_claude_hook(command) == "added"
+    text = st.claude_settings_path().read_text(encoding="utf-8")
+    assert json.loads(text) == {"hooks": {"PostToolUse": [{
+        "matcher": "mcp__codex-bridge__.*", "hooks": [{
+            "type": "command", "command": command, "asyncRewake": True, "timeout": hook.HOOK_TIMEOUT,
+        }],
+    }]}}
+    assert "デスク" in text and '\n  "hooks": {' in text
+
+
+@pytest.mark.parametrize("kind,event", [("claude", "PostToolUse"), ("codex", "Stop")])
+def test_install_keeps_other_hooks_and_keys(tmp_path, kind, event):
+    path = tmp_path / "custom.json"
+    old = {"type": "command", "command": f'"D:/old/codex-bridge.exe" hook {kind} --port 8770'}
+    other = {"type": "command", "command": f"other-tool hook {kind}", "timeout": 2}
+    unrelated = {"matcher": "other", "hooks": [other], "extra": True}
+    mixed = {"matcher": "old", "hooks": [old, other], "extra": "keep"}
+    empty = {"hooks": []}
+    data = {"theme": "日本語", "hooks": {event: [mixed, {"hooks": [old]}, unrelated, empty],
+                                         "OtherEvent": [{"hooks": [other]}]}}
+    path.write_text(json.dumps(data), encoding="utf-8")
+    command = st.hook_command(kind, 9001, frozen=False, executable="C:/new/python.exe")
+    install = getattr(st, f"install_{kind}_hook")
+    assert install(command, path) == "updated"
+    result = json.loads(path.read_text(encoding="utf-8"))
+    assert result["theme"] == data["theme"]
+    assert result["hooks"]["OtherEvent"] == data["hooks"]["OtherEvent"]
+    assert result["hooks"][event][:-1] == [dict(mixed, hooks=[other]), unrelated, empty]
+    assert result["hooks"][event][-1]["hooks"][0]["command"] == command
+
+
+@pytest.mark.parametrize("kind,event", [("claude", "PostToolUse"), ("codex", "Stop")])
+def test_old_hook_from_other_folder_replaced(tmp_path, kind, event):
+    path = tmp_path / "custom.json"
+    old = f'"D:/old/codex-bridge.exe" hook {kind} --port 8770'
+    path.write_text(json.dumps({"hooks": {event: [{"matcher": "old", "hooks": [
+        {"type": "command", "command": old, "timeout": 10},
+    ]}]}}), encoding="utf-8")
+    command = st.hook_command(kind, 8770, frozen=True, executable="C:/new/codex-bridge.exe")
+    assert getattr(st, f"install_{kind}_hook")(command, path) == "updated"
+    groups = json.loads(path.read_text(encoding="utf-8"))["hooks"][event]
+    handlers = [handler for group in groups for handler in group["hooks"]]
+    assert len(handlers) == 1
+    assert handlers[0]["command"] == command and handlers[0]["timeout"] == hook.HOOK_TIMEOUT
+
+
+@pytest.mark.parametrize("kind", ["claude", "codex"])
+def test_install_same_twice_is_already_and_untouched(tmp_path, kind):
+    path = tmp_path / "custom.json"
+    command = st.hook_command(kind, 8770, frozen=True, executable="C:/new/codex-bridge.exe")
+    install = getattr(st, f"install_{kind}_hook")
+    assert install(command, path) == "added"
+    before, mtime = path.read_bytes(), path.stat().st_mtime_ns
+    assert install(command, path) == "already"
+    assert path.read_bytes() == before and path.stat().st_mtime_ns == mtime
+    assert not path.with_name(path.name + ".bak").exists()
+
+
+@pytest.mark.parametrize("kind", ["claude", "codex"])
+@pytest.mark.parametrize("content", ['{"broken":', '[]', 'null', '{"hooks": []}',
+                                     '{"hooks": {"PostToolUse": {}, "Stop": {}}}'])
+def test_invalid_json_failed_untouched(tmp_path, kind, content):
+    path = tmp_path / "custom.json"
+    path.write_text(content, encoding="utf-8")
+    before, mtime = path.read_bytes(), path.stat().st_mtime_ns
+    command = f'"C:/codex-bridge.exe" hook {kind} --port 8770'
+    assert getattr(st, f"install_{kind}_hook")(command, path) == "failed"
+    assert path.read_bytes() == before and path.stat().st_mtime_ns == mtime
+    assert not path.with_name(path.name + ".bak").exists()
+
+
+@pytest.mark.parametrize("kind", ["claude", "codex"])
+def test_bak_written_before_change(tmp_path, monkeypatch, kind):
+    path = tmp_path / "custom.json"
+    before = b'{"keep": "original"}\n'
+    path.write_bytes(before)
+    backup = path.with_name(path.name + ".bak")
+    backup.write_text("older backup", encoding="utf-8")
+    write_text = type(path).write_text
+
+    def write_after_backup(self, *args, **kwargs):
+        if self == path:
+            assert backup.read_bytes() == before
+        return write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(path), "write_text", write_after_backup)
+    command = f'"C:/codex-bridge.exe" hook {kind} --port 8770'
+    assert getattr(st, f"install_{kind}_hook")(command, path) == "added"
+    assert backup.read_bytes() == before
+    assert json.loads(path.read_text(encoding="utf-8"))["keep"] == "original"
+
+
+def test_codex_hook_in_codex_home(tmp_path):
+    command = '& "C:/codex-bridge.exe" hook codex --port 8770'
+    assert st.codex_hooks_path() == tmp_path / "cx" / "hooks.json"
+    assert st.install_codex_hook(command) == "added"
+    assert json.loads(st.codex_hooks_path().read_text(encoding="utf-8")) == {"hooks": {"Stop": [{
+        "hooks": [{"type": "command", "command": command, "timeout": hook.HOOK_TIMEOUT}],
+    }]}}
+
+
+def test_codex_url_rewritten_on_rerun(tmp_path):
+    config = tmp_path / "cx" / "config.toml"
+    config.parent.mkdir()
+    config.write_text('[mcp_servers.codex-bridge]\nurl = "http://127.0.0.1:8770/claude/mcp"\n'
+                      '[other]\nurl = "x"', encoding="utf-8")
+    url = st.codex_mcp_url(8770)
+    assert url == "http://127.0.0.1:8770/claude/mcp?client=codex"
+    assert st.codex_set_url(url) is True
+    assert config.read_text(encoding="utf-8") == (
+        f'[mcp_servers.codex-bridge]\nurl = "{url}"\n[other]\nurl = "x"')
+    before, mtime = config.read_bytes(), config.stat().st_mtime_ns
+    assert st.codex_set_url(url) is False
+    assert config.read_bytes() == before and config.stat().st_mtime_ns == mtime
+    config.write_text('[mcp_servers.codex-bridge]\nenabled = true\n[other]\nurl = "x"', encoding="utf-8")
+    assert st.codex_set_url(url, config) is True
+    import tomllib
+    data = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert data["mcp_servers"]["codex-bridge"] == {"url": url, "enabled": True}
+    assert data["other"] == {"url": "x"}
+    assert st.codex_set_url(url, tmp_path / "missing.toml") is False
+    config.write_text('[other]\nurl = "x"', encoding="utf-8")
+    assert st.codex_set_url(url, config) is False
+    assert config.read_text(encoding="utf-8") == '[other]\nurl = "x"'
+
+
+@pytest.mark.parametrize("result", ["added", "already"])
+def test_install_mcp_output(tmp_path, monkeypatch, capsys, result):
+    from codex_bridge.host import setup_cli
+    monkeypatch.setattr(st, "register_claude", lambda **kwargs: result)
+    monkeypatch.setattr(st, "register_codex", lambda **kwargs: result)
+    config = tmp_path / "cx" / "config.toml"
+    config.parent.mkdir()
+    config.write_text('[mcp_servers.codex-bridge]\nurl = "http://127.0.0.1:8770/claude/mcp"\n',
+                      encoding="utf-8")
+    setup_cli.run_install_mcp(tmp_path / "missing.yaml")
+    output = capsys.readouterr().out
+    assert "  Claude Code の知らせ: 入れました。" in output
+    assert "  Codex の知らせ      : 入れました。" in output
+    assert ("  ※ Codex を開いて /hooks で codex-bridge のフックを信頼してください"
+            "（最初の 1 回と、install-mcp を実行し直してフックが変わったとき）。") in output
+    assert "  依頼したタスクが承認待ちか終了になると、依頼したエージェントに自動で知らせが届きます。" in output
+    assert "  （Codex では、知らせを待つ間は会話が続いている扱いです。話しかけるときは Esc で止めてください。）" in output
+    import tomllib
+    table = tomllib.loads(config.read_text(encoding="utf-8"))["mcp_servers"]["codex-bridge"]
+    assert table["url"] == "http://127.0.0.1:8770/claude/mcp?client=codex"
+    assert table["default_tools_approval_mode"] == "approve"
+    claude_path, codex_path = st.claude_settings_path(), st.codex_hooks_path()
+    claude_handler = json.loads(claude_path.read_text(encoding="utf-8"))["hooks"]["PostToolUse"][0]["hooks"][0]
+    codex_handler = json.loads(codex_path.read_text(encoding="utf-8"))["hooks"]["Stop"][0]["hooks"][0]
+    assert claude_handler["command"] == st.hook_command("claude", 8770)
+    assert codex_handler["command"] == st.hook_command("codex", 8770)
+    setup_cli.run_install_mcp(tmp_path / "missing.yaml")
+    output = capsys.readouterr().out
+    assert "  Claude Code の知らせ: 入れてあります。" in output
+    assert "  Codex の知らせ      : 入れてあります。" in output
+    assert "/hooks" not in output
+
+    for kind, event, path in [("claude", "PostToolUse", claude_path), ("codex", "Stop", codex_path)]:
+        old = f'"D:/old/codex-bridge.exe" hook {kind} --port 8770'
+        path.write_text(json.dumps({"hooks": {event: [{"hooks": [{"command": old}]}]}}), encoding="utf-8")
+    setup_cli.run_install_mcp(tmp_path / "missing.yaml")
+    output = capsys.readouterr().out
+    assert "  Claude Code の知らせ: 入れ直しました（古い場所のものは外しました）。" in output
+    assert "  Codex の知らせ      : 入れ直しました（古い場所のものは外しました）。" in output
+    assert "/hooks" in output
+
+    claude_path.write_text("invalid JSON", encoding="utf-8")
+    codex_path.write_text("invalid JSON", encoding="utf-8")
+    setup_cli.run_install_mcp(tmp_path / "missing.yaml")
+    output = capsys.readouterr().out
+    assert f"  Claude Code の知らせ: 入れられませんでした（設定ファイルを読めません: {claude_path}）。" in output
+    assert f"  Codex の知らせ      : 入れられませんでした（設定ファイルを読めません: {codex_path}）。" in output
+    assert "/hooks" not in output
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Hook/config installation requires successful MCP registration")
+
+    for name in ("install_claude_hook", "install_codex_hook", "codex_set_url", "codex_auto_approve"):
+        monkeypatch.setattr(st, name, unexpected)
+    for skipped in ("missing", "failed"):
+        monkeypatch.setattr(st, "register_claude", lambda **kwargs: skipped)
+        monkeypatch.setattr(st, "register_codex", lambda **kwargs: skipped)
+        setup_cli.run_install_mcp(tmp_path / "missing.yaml")
+        output = capsys.readouterr().out
+        assert "の知らせ" not in output and "/hooks" not in output

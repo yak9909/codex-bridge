@@ -123,15 +123,29 @@ def run_install_mcp(config_path: Path) -> None:
     _say("Claude Code と Codex から codex-bridge を使えるように登録します。")
     msgs = {"added": "登録しました。", "already": "登録済みです。", "failed": "登録に失敗しました。",
             "missing": "見つかりませんでした（入れていなければ問題ありません。入れたあとでもう一度実行してください）。"}
-    _say(f"  Claude Code: {msgs[st.register_claude(local_port=port)]}")
+    hook_msgs = {"added": "入れました。", "updated": "入れ直しました（古い場所のものは外しました）。",
+                 "already": "入れてあります。", "failed": "入れられませんでした（設定ファイルを読めません: {path}）。"}
+    claude_result = st.register_claude(local_port=port)
+    _say(f"  Claude Code: {msgs[claude_result]}")
+    if claude_result in ("added", "already"):
+        result = st.install_claude_hook(st.hook_command("claude", port))
+        _say(f"  Claude Code の知らせ: {hook_msgs[result].format(path=st.claude_settings_path())}")
     codex_result = st.register_codex(local_port=port)
     _say(f"  Codex      : {msgs[codex_result]}")
-    if codex_result in ("added", "already") and st.codex_auto_approve():
-        _say("               （codex-bridge の道具を毎回確認なしで呼べるように設定しました）")
+    if codex_result in ("added", "already"):
+        st.codex_set_url(st.codex_mcp_url(port))
+        if st.codex_auto_approve():
+            _say("               （codex-bridge の道具を毎回確認なしで呼べるように設定しました）")
+        result = st.install_codex_hook(st.hook_command("codex", port))
+        _say(f"  Codex の知らせ      : {hook_msgs[result].format(path=st.codex_hooks_path())}")
+        if result in ("added", "updated"):
+            _say("  ※ Codex を開いて /hooks で codex-bridge のフックを信頼してください"
+                 "（最初の 1 回と、install-mcp を実行し直してフックが変わったとき）。")
     _say("")
     _say("使い方: start.bat で codex-bridge を起動してから、Claude Code か Codex で新しい会話を始め、")
     _say("  「codex-bridge で、○○の開発を依頼して」のように頼んでください。")
-    _say("  エージェントが共有フォルダを確かめ、知人の Codex に依頼し、結果を確認して報告します。")
+    _say("  依頼したタスクが承認待ちか終了になると、依頼したエージェントに自動で知らせが届きます。")
+    _say("  （Codex では、知らせを待つ間は会話が続いている扱いです。話しかけるときは Esc で止めてください。）")
 
 
 # ---- start.bat ---------------------------------------------------------------
