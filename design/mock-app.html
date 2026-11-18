@@ -58,7 +58,6 @@
       <div class="section-head"><h2><svg class="ic"><use href="icons.svg#i-key-round"/></svg>貸す人を招待</h2></div>
       <div class="stack">
         <label class="field"><span>名前</span><input placeholder="例: kimura"></label>
-        <label class="field"><span>コマンド実行</span><select><option>実行しない</option><option selected>許可リストだけ自動</option><option>毎回承認</option><option>すべて自動</option></select></label>
         <div><button>招待コードを発行</button></div>
         <div class="row"><code>cb1.eyJ1cmwiOiJodHRw…</code><button class="secondary sm"><svg class="ic"><use href="icons.svg#i-copy"/></svg>コピー</button></div>
       </div>
@@ -80,19 +79,16 @@ npm test *</textarea>
   <section class="section fit">
     <div class="section-head"><h2><svg class="ic"><use href="icons.svg#i-users"/></svg>貸す人<span class="count">4</span></h2></div>
     <div class="settings scroll-area">
-      <details class="sx entity" open>
-        <summary>
-          <div class="sc-text"><span class="card-head"><span class="dot ok"></span><b>yamada</b></span><span class="d">作業中 t12「テストを直す」</span></div>
-          <svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg>
-          <div class="sx-extra meters">
-            <div class="meter"><div class="m-head"><span class="m-label">5時間</span><span class="m-val">45%</span></div>
-              <div class="m-bar"><div class="m-fill" style="width:45%"></div><div class="m-mark" style="left:80%"></div></div>
-              <div class="m-foot"><span>15:40 に戻る</span><span>上限 80%</span></div></div>
-            <div class="meter hot"><div class="m-head"><span class="m-label">週間</span><span class="m-val">92%</span></div>
-              <div class="m-bar"><div class="m-fill" style="width:92%"></div></div>
-              <div class="m-foot"><span>11/19 03:00 に戻る</span></div></div>
-          </div>
-        </summary>
+      <div class="ent">
+        <button class="ent-head" aria-expanded="true"><b class="ent-name">yamada</b><span class="lz ok">作業中</span><span class="ent-now">t12 テストを直す</span><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></button>
+        <div class="ent-meters">
+          <div class="meter"><div class="m-head"><span class="m-label">5時間</span><span class="m-val">45%</span></div>
+            <div class="m-bar"><div class="m-fill" style="width:45%"></div><div class="m-mark" style="left:80%"></div></div>
+            <div class="m-foot"><span>15:40 に戻る</span><span>上限 80%</span></div></div>
+          <div class="meter hot"><div class="m-head"><span class="m-label">週間</span><span class="m-val">92%</span></div>
+            <div class="m-bar"><div class="m-fill" style="width:92%"></div></div>
+            <div class="m-foot"><span>11/19 03:00 に戻る</span></div></div>
+        </div>
         <div class="sx-items">
           <div class="sc"><div class="sc-text"><span>コマンド実行</span></div>
             <div class="sc-ctl"><select><option>実行しない</option><option selected>許可リストだけ自動</option><option>毎回承認</option><option>すべて自動</option></select></div></div>
@@ -129,26 +125,22 @@ npm test *</textarea>
           <div class="sc"><div class="sc-text"><span>上限を超えたとき</span></div>
             <div class="sc-ctl"><span class="seg ro"><label><input type="radio" name="yf" checked disabled>止めて報告させる</label><label><input type="radio" name="yf" disabled>すぐ強制終了</label></span></div></div>
         </div>
-      </details>
-
-      <details class="sx entity">
-        <summary>
-          <div class="sc-text"><span class="card-head"><span class="dot ok"></span><b>suzuki</b><span class="tag warn">コマンド: すべて自動</span></span><span class="d">待機中</span></div>
-          <svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg>
-          <div class="sx-extra meters">
-            <div class="meter"><div class="m-head"><span class="m-label">5時間</span><span class="m-val">8%</span></div>
-              <div class="m-bar"><div class="m-fill" style="width:8%"></div></div><div class="m-foot"><span>16:20 に戻る</span></div></div>
-            <div class="meter"><div class="m-head"><span class="m-label">週間</span><span class="m-val">31%</span></div>
-              <div class="m-bar"><div class="m-fill" style="width:31%"></div><div class="m-mark" style="left:60%"></div></div><div class="m-foot"><span>11/21 10:00 に戻る</span><span>上限 60%</span></div></div>
-          </div>
-        </summary>
-      </details>
-      <details class="sx entity">
-        <summary><div class="sc-text"><span class="card-head"><span class="dot warn"></span><b>tanaka</b><span class="tag warn">古い版: モデルを選べません</span></span><span class="d">準備中</span></div><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></summary>
-      </details>
-      <details class="sx entity">
-        <summary><div class="sc-text"><span class="card-head"><span class="dot"></span><b>sato</b></span><span class="d">未接続・最後 11/17 22:10</span></div><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></summary>
-      </details>
+      </div>
+      <div class="ent">
+        <button class="ent-head" aria-expanded="false"><b class="ent-name">suzuki</b><span class="lz idle">待機中</span><span class="tag warn">コマンド: すべて自動</span><span class="ent-now"></span><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></button>
+        <div class="ent-meters">
+          <div class="meter"><div class="m-head"><span class="m-label">5時間</span><span class="m-val">8%</span></div>
+            <div class="m-bar"><div class="m-fill" style="width:8%"></div></div><div class="m-foot"><span>16:20 に戻る</span></div></div>
+          <div class="meter"><div class="m-head"><span class="m-label">週間</span><span class="m-val">31%</span></div>
+            <div class="m-bar"><div class="m-fill" style="width:31%"></div><div class="m-mark" style="left:60%"></div></div><div class="m-foot"><span>11/21 10:00 に戻る</span><span>上限 60%</span></div></div>
+        </div>
+      </div>
+      <div class="ent">
+        <button class="ent-head" aria-expanded="false"><b class="ent-name">tanaka</b><span class="lz warn">準備中</span><span class="tag warn">古い版: モデルを選べません</span><span class="ent-now"></span><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></button>
+      </div>
+      <div class="ent">
+        <button class="ent-head" aria-expanded="false"><b class="ent-name">sato</b><span class="lz idle">未接続</span><span class="ent-now">最後 11/17 22:10</span><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></button>
+      </div>
     </div>
   </section>
 </div>
@@ -181,14 +173,14 @@ npm test *</textarea>
       <div class="td-head"><h3>t12 テストを直す</h3><button class="danger sm">中止</button></div>
       <div class="td-line"><span class="state-label ok">作業中</span><span><b>yamada</b> が担当・5 分</span></div>
       <p class="td-meta">GPT-6.1-Terra・high<span class="tag" title="途中で GPT-6.1-Sol から切り替わりました（理由 highRiskCyberActivity）">GPT-6.1-Sol から切り替え</span></p>
-      <ol class="thread">
-        <li class="msg"><div class="msg-head"><b>あなた</b><span class="time">14:20</span></div><p>web のテストが落ちているので直してください。</p></li>
-        <li class="ev"><span class="time">14:20</span>yamada が受け付けました</li>
-        <li class="msg"><div class="msg-head"><b>yamada</b><span class="time">14:21</span></div><p>テストを走らせて、落ちている 3 件を確かめます。</p></li>
-        <li class="ev"><span class="time">14:22</span>コマンド実行: npm test</li>
-        <li class="msg"><div class="msg-head"><b>yamada</b><span class="time">14:22</span></div><p>parser の 2 件は、空行の扱いが変わったためです。</p></li>
-        <li class="ev"><span class="time">14:23</span>あなたがコマンド実行を許可: npm test -- --runInBand src/parser</li>
-        <li class="ev"><span class="time">14:25</span>ファイルを変更: src/parser/lines.ts</li>
+      <p class="quote">web のテストが落ちているので直してください。</p>
+      <ol class="tl">
+        <li class="ev"><span class="tl-badge"><svg class="ic"><use href="icons.svg#i-play"/></svg></span><span class="tl-body">yamada が受け付けました</span><span class="time">14:20</span></li>
+        <li class="msg"><span class="tl-badge"><svg class="ic"><use href="icons.svg#i-message-square-text"/></svg></span><span class="tl-body">テストを走らせて、落ちている 3 件を確かめます。</span><span class="time">14:21</span></li>
+        <li class="ev"><span class="tl-badge"><svg class="ic"><use href="icons.svg#i-terminal"/></svg></span><span class="tl-body">コマンド実行 <code>npm test</code></span><span class="time">14:22</span></li>
+        <li class="msg"><span class="tl-badge"><svg class="ic"><use href="icons.svg#i-message-square-text"/></svg></span><span class="tl-body">parser の 2 件は、空行の扱いが変わったためです。</span><span class="time">14:22</span></li>
+        <li class="ev"><span class="tl-badge"><svg class="ic"><use href="icons.svg#i-shield-check"/></svg></span><span class="tl-body">コマンド実行を許可 <code>npm test -- --runInBand src/parser</code></span><span class="time">14:23</span></li>
+        <li class="ev"><span class="tl-badge"><svg class="ic"><use href="icons.svg#i-folder"/></svg></span><span class="tl-body">ファイルを変更 <code>src/parser/lines.ts</code></span><span class="time">14:25</span></li>
       </ol>
       <div class="row"><input style="flex:1" placeholder="追加の指示"><button class="secondary">送る</button></div>
     </div>
@@ -305,10 +297,10 @@ npm test *</textarea>
       <div class="td-head"><h3>t12 テストを直す</h3><button class="danger sm">中止</button></div>
       <div class="td-line"><span class="state-label ok">作業中</span><span>5 分</span></div>
       <p class="td-meta">GPT-6.1-Sol・high</p>
-      <ol class="thread">
-        <li class="msg"><div class="msg-head"><b>hanako</b><span class="time">14:20</span></div><p>web のテストが落ちているので直してください。</p></li>
-        <li class="ev"><span class="time">14:20</span>あなたが許可しました</li>
-        <li class="msg"><div class="msg-head"><b>Codex</b><span class="time">14:21</span></div><p>テストを走らせて、落ちている 3 件を確かめます。</p></li>
+      <p class="quote">web のテストが落ちているので直してください。</p>
+      <ol class="tl">
+        <li class="ev"><span class="tl-badge"><svg class="ic"><use href="icons.svg#i-shield-check"/></svg></span><span class="tl-body">許可しました</span><span class="time">14:20</span></li>
+        <li class="msg"><span class="tl-badge"><svg class="ic"><use href="icons.svg#i-message-square-text"/></svg></span><span class="tl-body">テストを走らせて、落ちている 3 件を確かめます。</span><span class="time">14:21</span></li>
       </ol>
     </div>
   </div>

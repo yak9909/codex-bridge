@@ -2,6 +2,9 @@
 // Reports: page wider than the window; side-by-side blocks whose heights differ a lot
 // (a low column leaves an empty area beside it). Result goes to <body data-check="...">.
 (function () {
+  // ?scroll=N scrolls every inner scrolling list by N px, to see sticky headers in a screenshot
+  const sc = new URLSearchParams(location.search).get("scroll");
+  if (sc) addEventListener("load", () => document.querySelectorAll(".scroll-area").forEach((e) => (e.scrollTop = +sc)));
   if (!location.search.includes("check")) return;
   addEventListener("load", () => {
     const out = [];

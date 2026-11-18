@@ -212,6 +212,30 @@ label.chip:has(input:checked) { background: var(--accent-soft); border-color: va
 .sx-items .sub-head { color: var(--ink); font-weight: 700; padding-bottom: var(--s1); }
 .sx.add > summary { color: var(--accent); border-style: dashed; }
 
+/* ---- entity card with a sticky header (accordion, WAI-ARIA button + aria-expanded).
+   The header sticks to the top of the scrolling list while its own card is on screen; position: sticky never leaves its
+   parent, so once the card's end comes up, the header is pushed up with it (smashing 2024 sticky headers; section-specific
+   sticky headers). The header is one short row so that it costs little room (nngroup sticky-headers: keep them small). ---- */
+.ent { border: 1px solid var(--edge); border-radius: var(--r-ctl); background: var(--surface); }
+.ent-head { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: var(--s3); width: 100%; height: auto; min-height: 56px;
+  padding: var(--s3) var(--s5); border: 0; border-radius: var(--r-ctl); background: var(--surface); color: var(--ink); text-align: left; white-space: nowrap; }
+.ent-head[aria-expanded="true"], .ent:has(.ent-meters) .ent-head { border-bottom: 1px solid var(--line); border-radius: var(--r-ctl) var(--r-ctl) 0 0; }
+.ent-name { font-size: var(--fs); }
+.ent-now { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-sub); color: var(--muted); }
+.ent-head .chev { color: var(--muted); transition: transform .15s; }
+.ent-head[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.ent-meters { display: grid; gap: var(--s4); padding: var(--s4) var(--s5); }
+.ent .sx-items { border: 0; border-top: 1px solid var(--line); border-radius: 0; }
+.ent .sx-items .sc { padding-left: var(--s5); padding-right: var(--s5); }
+.ent .sx-items .sub-head { padding-left: var(--s5); }
+.settings:has(> .ent) { gap: var(--s3); }
+
+/* status lozenge: a filled label next to the name, so status does not read as one more line of text (atlassian lozenge) */
+.lz { display: inline-flex; align-items: center; height: 24px; padding: 0 var(--s2); border-radius: 4px; font-size: var(--fs-sub);
+  font-weight: 700; letter-spacing: 0; flex: none; }
+.lz.ok { background: #d6ede0; color: #125a35; } .lz.warn { background: #fbe7c4; color: #7a4507; }
+.lz.bad { background: var(--bad-soft); color: var(--bad); } .lz.idle { background: #e3e6eb; color: #444b59; }
+
 /* toggle switch */
 .switch { display: inline-flex; align-items: center; gap: var(--s2); cursor: pointer; }
 .switch input { position: absolute; opacity: 0; pointer-events: none; }
@@ -281,13 +305,18 @@ table.list .end { text-align: right; padding-right: 0; }
 .state-label { display: inline-flex; align-items: center; height: 28px; padding: 0 var(--s3); border-radius: 14px; font-size: var(--fs-sub);
   font-weight: 700; letter-spacing: 0; color: #fff; background: var(--idle); }
 .state-label.ok { background: var(--ok); } .state-label.warn { background: var(--warn); } .state-label.bad { background: var(--bad); }
-.thread { list-style: none; padding: 0 var(--s1) 0 0; display: flex; flex-direction: column; gap: var(--s3); max-height: 320px; overflow: auto; }
-.thread > li { flex: none; }
-.msg { border: 1px solid var(--edge); border-radius: var(--r-ctl); overflow: hidden; }
-.msg-head { display: flex; align-items: baseline; gap: var(--s2); padding: var(--s1) var(--s3); background: var(--ground); border-bottom: 1px solid var(--line); font-size: var(--fs-sub); letter-spacing: 0; }
-.msg-head .time, .ev .time { color: var(--muted); }
-.msg > p { padding: var(--s2) var(--s3); }
-.ev { display: flex; gap: var(--s2); padding-left: var(--s3); font-size: var(--fs-sub); letter-spacing: 0; color: var(--muted); }
+/* activity timeline (primer-timeline.md: items on a vertical line, each with a small badge; condensed items for events).
+   No speaker names: the request is the body above, everything below is the worker's activity. */
+.tl { list-style: none; padding: 0 var(--s2) 0 0; margin: 0; max-height: 320px; overflow: auto; position: relative; }
+.tl > li { position: relative; display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; gap: var(--s3); align-items: start; padding: var(--s2) 0; }
+.tl > li::before { content: ""; position: absolute; left: 11px; top: 0; bottom: 0; border-left: 2px solid var(--line); }
+.tl > li:first-child::before { top: 16px; } .tl > li:last-child::before { bottom: calc(100% - 16px); }
+.tl-badge { position: relative; z-index: 1; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: #e3e6eb; color: #444b59; }
+.tl-badge .ic { width: 14px; height: 14px; }
+.tl .time { font-size: var(--fs-sub); letter-spacing: 0; color: var(--muted); line-height: 24px; }
+.tl .msg .tl-body { line-height: 1.6; padding-top: 0; }
+.tl .ev .tl-body { font-size: var(--fs-sub); letter-spacing: 0; color: var(--muted); line-height: 24px; }
+.tl .ev .tl-badge { background: var(--surface); }
 .quote { margin: 0; padding: var(--s3) var(--s4); background: var(--ground); border-radius: var(--r-ctl); white-space: pre-wrap; }
 .log.scroll { max-height: 240px; overflow: auto; }
 
