@@ -23,71 +23,21 @@
   <button class="secondary sm"><svg class="ic"><use href="icons.svg#i-pause"/></svg>一時停止</button>
 </div></header>
 
-<main>
-<p class="mock-tab">タスクトレイ（左クリックで画面を開く。右クリックでこのメニュー）</p>
-<div class="tray" role="menu" aria-label="トレイのメニュー">
-  <div class="ti state">貸す人 2/3・依頼主 1/2・承認待ち 2</div>
-  <hr>
-  <div class="ti main">画面を開く</div>
-  <div class="ti">一時停止</div>
-  <hr>
-  <div class="ti">終了</div>
-</div>
-
 <!-- ================================================== 使う -->
-<p class="mock-tab">タブ「使う」</p>
-
-<div class="banner bad"><svg class="ic"><use href="icons.svg#i-pause"/></svg><b>一時停止中</b><span class="grow">依頼も貸し出しも止めています。</span><button class="sm">再開</button></div>
-<div class="banner warn"><svg class="ic"><use href="icons.svg#i-folder"/></svg><b>共有フォルダがありません</b><span class="grow">Codex に触らせるフォルダを選んでください。</span><button class="sm">フォルダを選ぶ</button></div>
-
-<section class="approvals" aria-label="承認待ち">
-  <div class="section-head"><h2><svg class="ic"><use href="icons.svg#i-shield-check"/></svg>承認待ち<span class="count">2</span></h2></div>
-  <div class="approval">
-    <div><div class="what">コマンド実行</div><pre>npm test -- --runInBand src/parser</pre><p class="sub">場所 web・依頼 t12（yamada）・3 分前</p></div>
-    <div class="decide"><button>許可</button><button class="danger">拒否</button></div>
-  </div>
-  <div class="approval">
-    <div><div class="what">削除</div><pre>analysis/old-report.md</pre><p class="sub">依頼 t13（suzuki）・1 分前</p></div>
-    <div class="decide"><button>許可</button><button class="danger">拒否</button></div>
-  </div>
-</section>
-
-<div class="side-main">
-  <div class="side">
-    <section class="section">
-      <div class="section-head"><h2><svg class="ic"><use href="icons.svg#i-key-round"/></svg>貸す人を招待</h2></div>
-      <div class="stack">
-        <label class="field"><span>名前</span><input placeholder="例: kimura"></label>
-        <div><button>招待コードを発行</button></div>
-        <div class="row"><code>cb1.eyJ1cmwiOiJodHRw…</code><button class="secondary sm"><svg class="ic"><use href="icons.svg#i-copy"/></svg>コピー</button></div>
-      </div>
-    </section>
-    <section class="section">
-      <div class="section-head"><h2><svg class="ic"><use href="icons.svg#i-terminal"/></svg>許可リスト</h2></div>
-      <div class="stack">
-        <p class="hint">「許可リストだけ自動」の人が、確認なしで実行できるコマンド</p>
-        <textarea rows="4" spellcheck="false" style="font-family:var(--mono)">python scripts/**/*.py *
-npm test *</textarea>
-        <p class="hint"><code>*</code> は名前の一部か任意の引数、<code>**</code> は下のフォルダすべて。<code>&amp;&amp;</code> や <code>|</code> を含むものは承認待ち。</p>
-        <label class="switch"><input type="checkbox" checked><span class="track"></span><span>書き換えたスクリプトは承認待ち</span></label>
-        <p class="note-warn"><svg class="ic"><use href="icons.svg#i-triangle-alert"/></svg>実行したプログラムは、共有フォルダの外も読めます</p>
-        <button class="link" style="justify-self:start">policy.yaml を直接編集する</button>
-      </div>
-    </section>
-  </div>
-
-  <section class="section fit">
-    <div class="section-head"><h2><svg class="ic"><use href="icons.svg#i-users"/></svg>貸す人<span class="count">4</span></h2></div>
-    <div class="settings scroll-area">
+<div class="shell">
+  <aside class="pane side-pane" aria-label="貸す人と設定">
+    <section class="view grow">
+      <div class="view-head"><h2>貸す人<span class="count">4</span></h2><span class="spacer"></span><button class="secondary sm"><svg class="ic"><use href="icons.svg#i-key-round"/></svg>招待</button></div>
+      <div class="view-body settings">
       <div class="ent">
         <button class="ent-head" aria-expanded="true"><b class="ent-name">yamada</b><span class="lz ok">作業中</span><span class="ent-now">t12 テストを直す</span><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></button>
         <div class="ent-meters">
           <div class="meter"><div class="m-head"><span class="m-label">5時間</span><span class="m-val">45%</span></div>
             <div class="m-bar"><div class="m-fill" style="width:45%"></div><div class="m-mark" style="left:80%"></div></div>
-            <div class="m-foot"><span>15:40 に戻る</span><span>上限 80%</span></div></div>
+            <div class="m-help">15:40 に戻る・上限 80%</div></div>
           <div class="meter hot"><div class="m-head"><span class="m-label">週間</span><span class="m-val">92%</span></div>
             <div class="m-bar"><div class="m-fill" style="width:92%"></div></div>
-            <div class="m-foot"><span>11/19 03:00 に戻る</span></div></div>
+            <div class="m-help">11/19 03:00 に戻る</div></div>
         </div>
         <div class="sx-items">
           <div class="sc"><div class="sc-text"><span>コマンド実行</span></div>
@@ -127,54 +77,61 @@ npm test *</textarea>
         </div>
       </div>
       <div class="ent">
-        <button class="ent-head" aria-expanded="false"><b class="ent-name">suzuki</b><span class="lz idle">待機中</span><span class="tag warn">コマンド: すべて自動</span><span class="ent-now"></span><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></button>
+        <button class="ent-head" aria-expanded="false"><b class="ent-name">suzuki</b><span class="lz idle">待機中</span><span class="ent-now"></span><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></button>
+        <p class="ent-note"><span class="tag warn">コマンド: すべて自動</span></p>
         <div class="ent-meters">
           <div class="meter"><div class="m-head"><span class="m-label">5時間</span><span class="m-val">8%</span></div>
-            <div class="m-bar"><div class="m-fill" style="width:8%"></div></div><div class="m-foot"><span>16:20 に戻る</span></div></div>
+            <div class="m-bar"><div class="m-fill" style="width:8%"></div></div><div class="m-help">16:20 に戻る</div></div>
           <div class="meter"><div class="m-head"><span class="m-label">週間</span><span class="m-val">31%</span></div>
-            <div class="m-bar"><div class="m-fill" style="width:31%"></div><div class="m-mark" style="left:60%"></div></div><div class="m-foot"><span>11/21 10:00 に戻る</span><span>上限 60%</span></div></div>
+            <div class="m-bar"><div class="m-fill" style="width:31%"></div><div class="m-mark" style="left:60%"></div></div><div class="m-help">11/21 10:00 に戻る・上限 60%</div></div>
         </div>
       </div>
       <div class="ent">
-        <button class="ent-head" aria-expanded="false"><b class="ent-name">tanaka</b><span class="lz warn">準備中</span><span class="tag warn">古い版: モデルを選べません</span><span class="ent-now"></span><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></button>
+        <button class="ent-head" aria-expanded="false"><b class="ent-name">tanaka</b><span class="lz warn">準備中</span><span class="ent-now"></span><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></button>
+        <p class="ent-note"><span class="tag warn">古い版: モデルを選べません</span></p>
       </div>
       <div class="ent">
         <button class="ent-head" aria-expanded="false"><b class="ent-name">sato</b><span class="lz idle">未接続</span><span class="ent-now">最後 11/17 22:10</span><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></button>
       </div>
-    </div>
-  </section>
-</div>
+      </div>
+    </section>
+    <section class="view">
+      <button class="view-head toggle" aria-expanded="false"><svg class="ic"><use href="icons.svg#i-chevron-right"/></svg><h2>許可リスト</h2><span class="view-sum">2 件</span></button>
+    </section>
+    <section class="view">
+      <button class="view-head toggle" aria-expanded="false"><svg class="ic"><use href="icons.svg#i-chevron-right"/></svg><h2>共有フォルダ</h2><span class="view-sum">2 個</span></button>
+    </section>
+  </aside>
 
-<section class="section">
-  <div class="section-head"><h2><svg class="ic"><use href="icons.svg#i-send"/></svg>依頼する</h2></div>
-  <div class="stack">
-    <textarea rows="4" placeholder="例: analysis/report.md を読み、要点を 5 行で analysis/summary.md に書いてください。"></textarea>
-    <div class="row">
-      <label class="field"><span>会話</span><select style="width:18em"><option>新しく始める</option><option>t12 テストを直す（yamada）</option><option>t11 summary.md を書く（suzuki）</option><option>t09 パーサを書き直す（sato）</option></select></label>
-      <label class="field"><span>頼む相手</span><select><option>自動（余裕のある人）</option><option>yamada</option></select></label>
-      <label class="field"><span>モデル</span><select><option>既定</option><option>GPT-6.2-Sol</option></select></label>
-      <label class="field"><span>推論の強さ</span><select><option>既定</option><option>high</option></select></label>
+  <div class="work">
+    <div class="work-top">
+      <section class="approvals compact" aria-label="承認待ち">
+        <div class="approval"><span class="lz warn">コマンド実行</span><code>npm test -- --runInBand src/parser</code><span class="sub">t12・yamada・3 分前</span><span class="decide"><button class="sm">許可</button><button class="danger sm">拒否</button></span></div>
+        <div class="approval"><span class="lz warn">削除</span><code>analysis/old-report.md</code><span class="sub">t13・suzuki・1 分前</span><span class="decide"><button class="sm">許可</button><button class="danger sm">拒否</button></span></div>
+      </section>
     </div>
-    <div class="row"><button><svg class="ic"><use href="icons.svg#i-send"/></svg>依頼する</button><span class="sub">t14 を yamada に送りました（GPT-6.1-Sol・既定）</span></div>
-  </div>
-</section>
 
-<section class="section">
-  <div class="section-head"><h2><svg class="ic"><use href="icons.svg#i-list-checks"/></svg>依頼</h2></div>
-  <div class="tasks">
-    <ul class="task-list">
-      <li aria-selected="true"><span class="t-title">t12 テストを直す</span><span class="t-meta"><span class="status"><span class="dot ok"></span>作業中</span><span>yamada</span><span>5 分</span></span></li>
-      <li><span class="t-title">t13 古いレポートを整理する</span><span class="t-meta"><span class="status"><span class="dot warn"></span>承認待ち</span><span>suzuki</span></span></li>
-      <li><span class="t-title">t11 summary.md を書く</span><span class="t-meta"><span class="status"><span class="dot"></span>完了</span><span>suzuki</span><span>11/18 14:02</span></span></li>
-      <li><span class="t-title">t10 依存を更新する</span><span class="t-meta"><span class="status"><span class="dot bad"></span>失敗</span><span>yamada</span></span></li>
-      <li><span class="t-title">t09 パーサを書き直す</span><span class="t-meta"><span class="status"><span class="dot"></span>中断（枠切れ）</span><span>sato</span></span></li>
-    </ul>
-    <div class="task-detail">
-      <div class="td-head"><h3>t12 テストを直す</h3><button class="danger sm">中止</button></div>
-      <div class="td-line"><span class="state-label ok">作業中</span><span><b>yamada</b> が担当・5 分</span></div>
-      <p class="td-meta">GPT-6.1-Terra・high<span class="tag" title="途中で GPT-6.1-Sol から切り替わりました（理由 highRiskCyberActivity）">GPT-6.1-Sol から切り替え</span></p>
-      <p class="quote">web のテストが落ちているので直してください。</p>
-      <ol class="tl">
+    <div class="lv">
+      <section class="pane list-pane" aria-label="依頼の一覧">
+        <div class="pane-head"><h2>依頼</h2><span class="spacer"></span><button class="sm"><svg class="ic"><use href="icons.svg#i-send"/></svg>新しい依頼</button></div>
+        <ul class="task-list">
+          <li aria-selected="true"><span class="t-title">t12 テストを直す</span><span class="t-meta"><span class="lz ok">作業中</span><span>yamada</span><span>5 分</span></span></li>
+          <li><span class="t-title">t13 古いレポートを整理する</span><span class="t-meta"><span class="lz warn">承認待ち</span><span>suzuki</span></span></li>
+          <li><span class="t-title">t11 summary.md を書く</span><span class="t-meta"><span class="lz idle">完了</span><span>suzuki</span><span>11/18 14:02</span></span></li>
+          <li><span class="t-title">t10 依存を更新する</span><span class="t-meta"><span class="lz bad">失敗</span><span>yamada</span></span></li>
+          <li><span class="t-title">t09 パーサを書き直す</span><span class="t-meta"><span class="lz idle">中断（枠切れ）</span><span>sato</span></span></li>
+        </ul>
+      </section>
+
+      <section class="pane detail-pane" aria-label="依頼の詳細">
+        <header class="dp-head">
+          <div class="dp-title"><h2>t12 テストを直す</h2><button class="danger sm">中止</button></div>
+          <div class="dp-meta"><span class="lz ok">作業中</span><b>yamada</b><span>GPT-6.1-Terra・high</span><span class="tag" title="途中で GPT-6.1-Sol から切り替わりました（理由 highRiskCyberActivity）">GPT-6.1-Sol から切り替え</span><span>5 分</span></div>
+          <p class="dp-body">web のテストが落ちているので直してください。</p>
+        </header>
+        <div class="dp-scroll">
+          <h3 class="dp-label">経過</h3>
+      <ol class="tl" aria-label="経過">
         <li class="ev"><span class="tl-badge"><svg class="ic"><use href="icons.svg#i-play"/></svg></span><span class="tl-body">yamada が受け付けました</span><span class="time">14:20</span></li>
         <li class="msg"><span class="tl-badge"><svg class="ic"><use href="icons.svg#i-message-square-text"/></svg></span><span class="tl-body">テストを走らせて、落ちている 3 件を確かめます。</span><span class="time">14:21</span></li>
         <li class="ev"><span class="tl-badge"><svg class="ic"><use href="icons.svg#i-terminal"/></svg></span><span class="tl-body">コマンド実行 <code>npm test</code></span><span class="time">14:22</span></li>
@@ -182,28 +139,75 @@ npm test *</textarea>
         <li class="ev"><span class="tl-badge"><svg class="ic"><use href="icons.svg#i-shield-check"/></svg></span><span class="tl-body">コマンド実行を許可 <code>npm test -- --runInBand src/parser</code></span><span class="time">14:23</span></li>
         <li class="ev"><span class="tl-badge"><svg class="ic"><use href="icons.svg#i-folder"/></svg></span><span class="tl-body">ファイルを変更 <code>src/parser/lines.ts</code></span><span class="time">14:25</span></li>
       </ol>
-      <div class="row"><input style="flex:1" placeholder="追加の指示"><button class="secondary">送る</button></div>
+        </div>
+        <form class="composer" onsubmit="return false">
+          <textarea rows="2" placeholder="追加の指示（t12 の続き）"></textarea>
+          <div class="composer-bar"><span class="sub">yamada に送ります</span><span class="spacer"></span><button class="sm"><svg class="ic"><use href="icons.svg#i-send"/></svg>送る</button></div>
+        </form>
+      </section>
     </div>
   </div>
+</div>
+
+<main>
+<p class="mock-tab">「新しい依頼」を押したとき（右の欄がこうなる）</p>
+<section class="pane detail-pane demo" aria-label="新しい依頼">
+  <header class="dp-head"><div class="dp-title"><h2>新しい依頼</h2></div></header>
+  <div class="dp-scroll"></div>
+  <form class="composer" onsubmit="return false">
+    <textarea rows="4" placeholder="例: analysis/report.md を読み、要点を 5 行で analysis/summary.md に書いてください。"></textarea>
+    <div class="composer-bar">
+      <select class="ghost" aria-label="頼む相手"><option>相手: 自動</option><option>yamada</option></select>
+      <select class="ghost" aria-label="モデル"><option>モデル: 既定</option><option>GPT-6.2-Sol</option></select>
+      <select class="ghost" aria-label="推論の強さ"><option>推論: 既定</option><option>high</option></select>
+      <span class="spacer"></span><button class="sm"><svg class="ic"><use href="icons.svg#i-send"/></svg>依頼する</button>
+    </div>
+  </form>
 </section>
 
-<section class="section">
-  <div class="section-head"><h2><svg class="ic"><use href="icons.svg#i-folder"/></svg>共有フォルダ</h2><span class="sub">Codex から見えるのは、ここに並べたフォルダだけです</span></div>
-  <div class="stack">
-    <table class="list">
-      <thead><tr><th>フォルダ</th><th>権限</th><th></th></tr></thead>
-      <tbody>
-        <tr><td><code>D:/work/project</code> <span class="tag accent">メイン</span></td><td><select><option>書ける</option><option>読むだけ</option><option>見せない</option></select></td><td class="end"><button class="danger sm"><svg class="ic"><use href="icons.svg#i-trash-2"/></svg>外す</button></td></tr>
-        <tr><td>　<code>secrets</code></td><td><select><option>見せない</option></select></td><td></td></tr>
-        <tr><td><code>D:/data/shared</code> <button class="link">メインにする</button></td><td><select><option>読むだけ</option></select></td><td class="end"><button class="danger sm"><svg class="ic"><use href="icons.svg#i-trash-2"/></svg>外す</button></td></tr>
-      </tbody>
-    </table>
-    <div class="row">
-      <input style="flex:1" placeholder="フォルダのフルパス（例 D:/work/project）"><button class="secondary">参照…</button>
-      <select><option>読むだけ</option><option>書ける</option></select><button><svg class="ic"><use href="icons.svg#i-folder-plus"/></svg>追加</button>
+<p class="mock-tab">左の欄で「招待」を押したとき・「許可リスト」「共有フォルダ」を開いたとき</p>
+<div class="demo-col pane">
+  <section class="view">
+    <div class="view-head"><h2>貸す人を招待</h2></div>
+    <div class="view-body stack">
+      <label class="field"><span>名前</span><input placeholder="例: kimura"></label>
+      <div class="row"><button class="sm">招待コードを発行</button><button class="secondary sm">やめる</button></div>
+      <div class="row"><code class="grow-code">cb1.eyJ1cmwiOiJodHRw…</code><button class="secondary sm"><svg class="ic"><use href="icons.svg#i-copy"/></svg>コピー</button></div>
     </div>
-  </div>
-</section>
+  </section>
+  <section class="view">
+    <button class="view-head toggle" aria-expanded="true"><svg class="ic"><use href="icons.svg#i-chevron-right"/></svg><h2>許可リスト</h2></button>
+    <div class="view-body stack">
+      <p class="hint">「許可リストだけ自動」の人が、確認なしで実行できるコマンド</p>
+      <textarea rows="3" spellcheck="false" style="font-family:var(--mono)">python scripts/**/*.py *
+npm test *</textarea>
+      <p class="hint"><code>*</code> は名前の一部か任意の引数、<code>**</code> は下のフォルダすべて。<code>&amp;&amp;</code> や <code>|</code> を含むものは承認待ち。</p>
+      <label class="switch"><input type="checkbox" checked><span class="track"></span><span>書き換えたスクリプトは承認待ち</span></label>
+      <p class="note-warn"><svg class="ic"><use href="icons.svg#i-triangle-alert"/></svg>実行したプログラムは、共有フォルダの外も読めます</p>
+    </div>
+  </section>
+  <section class="view">
+    <button class="view-head toggle" aria-expanded="true"><svg class="ic"><use href="icons.svg#i-chevron-right"/></svg><h2>共有フォルダ</h2></button>
+    <div class="view-body">
+      <ul class="folders">
+        <li><span class="f-path"><code>D:/work/project</code><span class="tag accent">メイン</span></span><select><option>書ける</option><option>読むだけ</option><option>見せない</option></select><button class="link">外す</button></li>
+        <li class="sub-folder"><span class="f-path"><code>secrets</code></span><select><option>見せない</option></select><span></span></li>
+        <li><span class="f-path"><code>D:/data/shared</code></span><select><option>読むだけ</option></select><button class="link">外す</button></li>
+      </ul>
+      <div class="row" style="margin-top:var(--s3)"><button class="secondary sm"><svg class="ic"><use href="icons.svg#i-folder-plus"/></svg>フォルダを追加</button></div>
+    </div>
+  </section>
+</div>
+
+<p class="mock-tab">タスクトレイ（左クリックで画面を開く。右クリックでこのメニュー）</p>
+<div class="tray" role="menu" aria-label="トレイのメニュー">
+  <div class="ti state">貸す人 2/3・依頼主 1/2・承認待ち 2</div>
+  <hr>
+  <div class="ti main">画面を開く</div>
+  <div class="ti">一時停止</div>
+  <hr>
+  <div class="ti">終了</div>
+</div>
 
 <!-- ================================================== 貸す -->
 <p class="mock-tab">タブ「貸す」</p>

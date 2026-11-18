@@ -4,12 +4,25 @@
 (function () {
   // ?scroll=N scrolls every inner scrolling list by N px, to see sticky headers in a screenshot
   const sc = new URLSearchParams(location.search).get("scroll");
-  if (sc) addEventListener("load", () => document.querySelectorAll(".scroll-area").forEach((e) => (e.scrollTop = +sc)));
+  if (sc) addEventListener("load", () => document.querySelectorAll(".scroll-area, .view.grow > .view-body").forEach((e) => (e.scrollTop = +sc)));
+  // ?shell=N fixes the app shell height to N px, so a tall screenshot also shows the figures below it
+  const sh = new URLSearchParams(location.search).get("shell");
+  if (sh) document.documentElement.style.setProperty("--shell-h", sh + "px");
   if (!location.search.includes("check")) return;
   addEventListener("load", () => {
     const out = [];
     const W = document.documentElement.clientWidth;
     if (document.documentElement.scrollWidth > W + 1) out.push(`page wider than window (${document.documentElement.scrollWidth} > ${W})`);
+    // a scrolling pane must scroll only vertically: report what is wider than it
+    document.querySelectorAll("main *, .shell *").forEach((el) => {
+      const cs = getComputedStyle(el);
+      if (!/(auto|scroll)/.test(cs.overflowX + cs.overflowY) || el.scrollWidth <= el.clientWidth + 1) return;
+      if (el.matches("textarea, .log-view, .tl, .listbox, pre, code")) return;
+      const r = el.getBoundingClientRect();
+      const wide = [...el.querySelectorAll("*")].filter((c) => c.getBoundingClientRect().right > r.right + 1 && c.offsetParent !== null);
+      const leaf = wide.filter((c) => !wide.some((d) => d !== c && c.contains(d)))[0];
+      out.push(`wider than its pane: ${el.className || el.tagName} by ${el.scrollWidth - el.clientWidth}px (${leaf ? leaf.tagName + " in " + (leaf.closest(".sc, .ent-head, .meter, li, .row")?.textContent.trim().slice(0, 20) || "?") : "?"})`);
+    });
     // .side-main: a sticky side column stays in view while the main column scrolls, so its empty area below is expected;
     // it is still reported (marked "sidebar") so the gap is a decision, not an accident.
     document.querySelectorAll(".split, .tasks, .side-main").forEach((el) => {
@@ -38,7 +51,7 @@
       el.style.alignItems = saved;
     });
     // type and space must come from the scale (spec 0.6)
-    const TYPE = new Set([14, 16, 20]);
+    const TYPE = new Set([12, 14, 16, 20]);
     const SPACE = new Set([0, 4, 8, 12, 16, 24, 32, 48]);
     const badType = new Map(), badSpace = new Map();
     document.querySelectorAll("main *, header *").forEach((e) => {
