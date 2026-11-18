@@ -164,6 +164,18 @@ async def test_model_list_follows_cursor(fake):
     assert calls == [{}, {"cursor": "c2"}]
 
 
+@pytest.mark.parametrize("fake", [{"responses": {"model/list": [
+    {"data": [{"model": "m1"}], "nextCursor": "c2"},
+    {"data": [{"model": "m2"}], "nextCursor": None},
+]}}], indirect=True)
+async def test_fake_repeats_last_scripted_response_after_list_is_used_up(fake):
+    await fake.app.start()
+    assert await fake.app.model_list() == [{"model": "m1"}, {"model": "m2"}]
+    for _ in range(2):
+        assert await fake.app.model_list() == [{"model": "m2"}]
+    assert fake.app.running
+
+
 async def test_thread_start_passes_model_and_returns_effort(fake):
     await fake.app.start()
     result = await fake.app.thread_start("前置き", ephemeral=True, model="gpt-fake")

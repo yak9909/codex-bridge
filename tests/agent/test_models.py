@@ -27,6 +27,19 @@ def test_parse_skips_hidden_and_reads_efforts():
         {"model": "m2", "name": "m2", "efforts": [], "default_effort": None, "is_default": False}]
 
 
+@pytest.mark.parametrize("raw", [{}, {"model": ""}, {"model": None, "id": ""},
+                               {"model": 3, "id": False}, {"id": []}])
+def test_parse_skips_entries_without_a_nonempty_model_or_id(raw):
+    assert parse_model_list([raw, {"model": "m1"}]) == [
+        {"model": "m1", "name": "m1", "efforts": [], "default_effort": None, "is_default": False}]
+
+
+@pytest.mark.parametrize("model", [None, "", 3, False])
+def test_parse_falls_back_to_a_nonempty_string_id(model):
+    assert parse_model_list([{"model": model, "id": "m1"}]) == [
+        {"model": "m1", "name": "m1", "efforts": [], "default_effort": None, "is_default": False}]
+
+
 def test_effort_order_and_unknown_names():
     order = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
     for i, effort in enumerate(order):
@@ -56,6 +69,24 @@ def test_offer_default_falls_back_to_first_allowed():
     assert offered_models(catalog, ["m3", "m2"], "xhigh") == offered
     assert [m["model"] for m in offered_models(catalog, None, "xhigh") if m["is_default"]] == ["m1"]
     assert choose(catalog, ["m2", "m3"], "xhigh", None, None) == ("m2", "medium")
+
+
+@pytest.mark.parametrize("efforts", [[], ["high", "xhigh"], ["weird"]])
+def test_offer_drops_models_without_efforts_under_limit(efforts):
+    catalog = [entry(), entry("m2", efforts=efforts, is_default=False)]
+    original = copy.deepcopy(catalog)
+    assert offered_models(catalog, None, "low") == [{**catalog[0], "efforts": ["low"]}]
+    assert catalog == original
+
+
+def test_offer_default_moves_to_first_remaining_after_effort_cut():
+    catalog = [entry(efforts=["high"]), entry("m2", is_default=False), entry("m3", is_default=False)]
+    original = copy.deepcopy(catalog)
+    offered = offered_models(catalog, ["m3", "m1", "m2"], "low")
+    assert offered == [{**catalog[1], "efforts": ["low"], "is_default": True},
+                       {**catalog[2], "efforts": ["low"]}]
+    assert choose(catalog, None, "low", None, None) == ("m2", "low")
+    assert catalog == original
 
 
 def test_choose_default_model_and_effort():
@@ -100,6 +131,7 @@ def test_choose_no_catalog_limited_refuses(allowed):
 def test_choose_no_catalog_plain_request_gets_medium():
     assert choose(None, None, "xhigh", None, None) == (None, "medium")
     assert choose(None, None, "low", None, None) == (None, "low")
+    assert choose(None, None, "minimal", None, None) == (None, "minimal")
     assert choose(None, None, "high", None, "low") == (None, "low")
 
 
@@ -117,10 +149,11 @@ def test_choose_no_catalog_refuses_disallowed_effort(effort):
     assert str(exc.value) == f"推論の強さ「{effort}」は使えません。上限は xhigh です。"
 
 
-@pytest.mark.parametrize("catalog,allowed", [([], None), ([entry()], [])])
-def test_choose_refuses_empty_offer(catalog, allowed):
+@pytest.mark.parametrize("catalog,allowed", [([], None), ([entry()], []), ([entry()], ["unknown"])])
+@pytest.mark.parametrize("max_effort", ["xhigh", "minimal"])
+def test_choose_refuses_empty_offer(catalog, allowed, max_effort):
     with pytest.raises(ModelRefused) as exc:
-        choose(catalog, allowed, "xhigh", None, None)
+        choose(catalog, allowed, max_effort, None, None)
     assert str(exc.value) == "貸している人が使わせているモデルがありません。"
 
 
@@ -130,9 +163,28 @@ def test_choose_refuses_effort_unsupported_by_model():
     assert str(exc.value) == "推論の強さ「medium」は使えません。m1 で使える推論の強さ: low・high"
 
 
-def test_choose_empty_efforts_uses_limit_only_for_an_omitted_effort():
-    catalog = [entry(efforts=[])]
-    assert choose(catalog, None, "xhigh", None, None) == ("m1", "xhigh")
+@pytest.mark.parametrize("efforts,max_effort", [([], "xhigh"), (["low", "medium", "high"], "minimal")])
+@pytest.mark.parametrize("allowed", [None, ["m1"]])
+@pytest.mark.parametrize("model,effort", [(None, None), ("m1", "low"), ("unknown", None)])
+def test_choose_refuses_when_effort_cut_removes_all_models(efforts, max_effort, allowed, model, effort):
     with pytest.raises(ModelRefused) as exc:
-        choose(catalog, None, "xhigh", None, "low")
-    assert str(exc.value) == "推論の強さ「low」は使えません。m1 で使える推論の強さ: なし"
+        choose([entry(efforts=efforts)], allowed, max_effort, model, effort)
+    assert str(exc.value) == (f"推論の強さの上限（{max_effort}）以下で使えるモデルがありません。"
+                              "貸している人に上限を見直してもらってください。")
+
+
+@pytest.mark.parametrize("allowed", [None, ["m3", "m2", "m1"]])
+def test_choose_refuses_named_model_removed_by_effort_cut(allowed):
+    catalog = [entry(efforts=["high"]), entry("m2", is_default=False), entry("m3", is_default=False)]
+    with pytest.raises(ModelRefused) as exc:
+        choose(catalog, allowed, "low", "m1", None)
+    assert str(exc.value) == ("指定のモデル（m1）には、推論の強さの上限（low）以下で使える段階がありません。"
+                              "使えるモデル: m2、m3")
+
+
+@pytest.mark.parametrize("model,allowed", [("unknown", None), ("m1", ["m2", "m3"])])
+def test_choose_refuses_unknown_or_not_allowed_model_after_effort_cut(model, allowed):
+    catalog = [entry(efforts=["high"]), entry("m2", is_default=False), entry("m3", is_default=False)]
+    with pytest.raises(ModelRefused) as exc:
+        choose(catalog, allowed, "low", model, None)
+    assert str(exc.value) == f"指定のモデル（{model}）は、貸している人が使わせていません。使えるモデル: m2、m3"

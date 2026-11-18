@@ -67,7 +67,7 @@ def main() -> None:
             else:
                 result = responses.get(method, {})
                 if isinstance(result, list):
-                    result = result.pop(0)
+                    result = result.pop(0) if len(result) > 1 else result[0]
                 emit({"jsonrpc": "2.0", "id": msg["id"], "result": result})
         for out in script.get("after", {}).get(method, []):
             emit({"jsonrpc": "2.0", **out})

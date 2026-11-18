@@ -14,7 +14,11 @@ def parse_model_list(entries: list[dict]) -> list[dict]:
     for e in entries:
         if e.get("hidden") is True:
             continue
-        model = e.get("model") or e["id"]
+        model = e.get("model")
+        if not isinstance(model, str) or not model:
+            model = e.get("id")
+        if not isinstance(model, str) or not model:
+            continue
         catalog.append({"model": model, "name": e.get("displayName") or model,
                         "efforts": [o["reasoningEffort"] for o in e.get("supportedReasoningEfforts", [])],
                         "default_effort": e.get("defaultReasoningEffort"),
@@ -32,6 +36,7 @@ def offered_models(catalog: list[dict] | None, allowed: list[str] | None, max_ef
         return None
     offered = [{**m, "efforts": [e for e in m["efforts"] if effort_allowed(e, max_effort)]}
                for m in catalog if allowed is None or m["model"] in allowed]
+    offered = [m for m in offered if m["efforts"]]
     default = next((i for i, m in enumerate(offered) if m["is_default"]), 0)
     for i, m in enumerate(offered):
         m["is_default"] = i == default
@@ -53,14 +58,21 @@ def choose(catalog: list[dict] | None, allowed: list[str] | None, max_effort: st
             effort = "medium" if effort_allowed("medium", max_effort) else max_effort
         return None, effort
 
-    offered = offered_models(catalog, allowed, max_effort)
-    if not offered:
+    permitted = [m for m in catalog if allowed is None or m["model"] in allowed]
+    if not permitted:
         raise ModelRefused("貸している人が使わせているモデルがありません。")
+    offered = offered_models(permitted, None, max_effort)
+    if not offered:
+        raise ModelRefused(f"推論の強さの上限（{max_effort}）以下で使えるモデルがありません。"
+                           "貸している人に上限を見直してもらってください。")
     if model is None:
         target = next(m for m in offered if m["is_default"])
     else:
         target = next((m for m in offered if m["model"] == model), None)
         if target is None:
+            if any(m["model"] == model for m in permitted):
+                raise ModelRefused(f"指定のモデル（{model}）には、推論の強さの上限（{max_effort}）以下で使える段階がありません。"
+                                   "使えるモデル: " + "、".join(m["model"] for m in offered))
             raise ModelRefused(f"指定のモデル（{model}）は、貸している人が使わせていません。使えるモデル: "
                                + "、".join(m["model"] for m in offered))
     if effort is not None:
@@ -70,5 +82,5 @@ def choose(catalog: list[dict] | None, allowed: list[str] | None, max_effort: st
     else:
         effort = target["default_effort"] if target["default_effort"] is not None else "medium"
         if effort not in target["efforts"]:
-            effort = target["efforts"][-1] if target["efforts"] else max_effort
+            effort = target["efforts"][-1]
     return target["model"], effort
