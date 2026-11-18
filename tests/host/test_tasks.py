@@ -378,6 +378,16 @@ async def test_old_default_log_visibility_applies_to_lenders_without_their_own(t
     assert mgr.log_visibility_for("yamada") == "all" and mgr.log_visibility_for("suzuki") == "files"
 
 
+async def test_lender_without_own_limit_counts_as_100_when_routing(mgr):
+    a, b = FakeAgent(mgr, "alice"), FakeAgent(mgr, "bob")
+    await a.push("hello", agent_version="0.2.0", codex_version="x", auth_mode="chatgpt")
+    await b.push("hello", agent_version="0.2.0", codex_version="x", auth_mode="chatgpt",
+                 limits={"five_hour": 50})
+    await a.push("usage", **usage(five_hour=10))  # 90 left of the implicit 100
+    await b.push("usage", **usage(five_hour=45))  # 5 left of 50
+    assert mgr.tasks[await mgr.start("one")].lender == "alice"
+
+
 async def test_old_saved_thresholds_load(tmp_path):
     from codex_bridge.host.lenders import Lender
     (tmp_path / "data").mkdir()

@@ -363,6 +363,8 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
     async def issue_invite(name: str = "friend") -> CallToolResult:
         async def f():
             token = tokens.issue(name.strip() or "friend")
+            if (name.strip() or "friend") not in policy.current().lender_exec_modes:
+                policy.set_lender_exec_mode(name.strip() or "friend", "ask")  # a new lender starts at "ask"
             return {"name": name, "code": make_invite(f"http://{public_bind}", token, name)}
         return await run(f)
 

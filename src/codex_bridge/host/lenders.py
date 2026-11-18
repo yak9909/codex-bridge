@@ -144,7 +144,8 @@ def normalize_window(raw) -> dict | None:
 
 
 def effective_limits(lender: Lender, thresholds: dict) -> dict:
-    """The limit that applies to this lender: the lower of the host's threshold and the lender's own."""
+    """The limit that applies to this lender: the lender's own (the host sets none now; `thresholds` is
+    normally empty), None for a window without one. headroom() counts a missing limit as 100."""
     out = {}
     for k in WINDOWS:
         vals = [v for v in (thresholds.get(k), (lender.limits or {}).get(k)) if v is not None]
@@ -165,10 +166,11 @@ def blocked_until(lender: Lender, thresholds: dict, now: float | None = None) ->
 
 
 def headroom(lender: Lender, thresholds: dict) -> float | None:
-    """Smaller of (limit - used) over the two windows; None while no usage has arrived."""
+    """Smaller of (limit - used) over the two windows, a window without a limit counting as 100;
+    None while no usage has arrived."""
     limits = effective_limits(lender, thresholds)
-    rooms = [limits[k] - w.get("used_percent", 0) for k in WINDOWS
-             if (w := lender.usage.get(k)) and limits[k] is not None]
+    rooms = [(100 if limits[k] is None else limits[k]) - w.get("used_percent", 0) for k in WINDOWS
+             if (w := lender.usage.get(k))]
     return min(rooms) if rooms else None
 
 

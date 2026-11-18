@@ -146,6 +146,15 @@ async def test_mcp_has_no_set_thresholds(env):
     assert (await call(local, "set_thresholds", {"five_hour": 50}))["isError"]
 
 
+async def test_mcp_issue_invite_sets_ask_only_without_a_mode(env, share):
+    _, local, _ = env
+    text_of(await call(local, "issue_invite", {"name": "alice"}))
+    assert share.policy.current().lender_exec_modes == {"alice": "ask"}
+    share.policy.set_lender_exec_mode("alice", "all")
+    text_of(await call(local, "issue_invite", {"name": "alice"}))
+    assert share.policy.current().lender_exec_modes == {"alice": "all"}
+
+
 async def test_claude_can_manage_invites(env, share):
     _, local, _ = env
     code = text_of(await call(local, "issue_invite", {"name": "friend"}))["code"]
