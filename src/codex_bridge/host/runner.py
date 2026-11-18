@@ -101,11 +101,11 @@ class CommandRunner:
         self._ids = itertools.count(1)
         self._tasks: set[asyncio.Task] = set()
 
-    def _needs_approval(self, command: str, task_id: str | None) -> bool:
+    def _needs_approval(self, command: str, task_id: str | None, mode: str) -> bool:
         p = self.policy.current()
-        if p.exec_mode == "ask":
+        if mode == "ask":
             return True
-        if p.exec_mode == "allowlist" and not match_allow(command, p.allow_patterns):
+        if mode == "allowlist" and not match_allow(command, p.allow_patterns):
             return True
         if p.confirm_modified_scripts:
             touched = {t.lower() for t in self.snapshots.touched(task_id)}
@@ -117,6 +117,7 @@ class CommandRunner:
     async def run_command(self, command: str, cwd: str = ".", timeout_sec: int | None = None) -> dict:
         self.paths.check_running()
         p = self.policy.current()
+        mode = p.exec_mode_for(self.lender_fn())
         real_cwd = self.paths.resolve(cwd, "read")
         if not real_cwd.is_dir():
             raise not_found(cwd)
@@ -124,13 +125,13 @@ class CommandRunner:
         job = Job(id=f"j{next(self._ids)}", command=command, cwd=normalize_rel(cwd), task_id=task_id,
                   lender=self.lender_fn())
         self.jobs[job.id] = job
-        if p.exec_mode == "off":
+        if mode == "off":
             job.status, job.message = "denied", "実行は許可されていません（実行モードが off です）"
             job.done.set()
             self.audit.write("command", job_id=job.id, command=command, status="denied", task_id=task_id)
             return job.snapshot()
         timeout = min(int(timeout_sec or p.limits.exec_timeout_sec), p.limits.exec_timeout_sec)
-        if self._needs_approval(command, task_id):
+        if self._needs_approval(command, task_id, mode):
             a = self.approvals.request("command", command, task_id)
             job.approval_id = a.id
             job.status = "waiting_approval"

@@ -5,7 +5,7 @@ import yaml
 
 from codex_bridge.host.policy import PolicyStore, parse_policy
 from codex_bridge.host.policy_form import (add_folder, form_from_raw, remove_folder, set_folder_level,
-                                           set_main_folder, yaml_from_form)
+                                           save_form, set_main_folder, yaml_from_form)
 
 
 def make_form(tmp_path: Path) -> dict:
@@ -97,3 +97,55 @@ def test_add_rejects_missing_and_relative(tmp_path):
         add_folder(store, "rel/dir", "read")
     with pytest.raises(ValueError):
         set_main_folder(store, (tmp_path / "work" / "private").as_posix())  # hidden can't be main
+
+
+def test_form_round_trip_keeps_lender_exec_modes(tmp_path):
+    raw = make_form(tmp_path)
+    raw["lender_exec_modes"] = {"a": False, '友人 "b"': "all"}
+    form = form_from_raw(raw)
+    modes = {"a": "off", '友人 "b"': "all"}
+    assert form["lender_exec_modes"] == modes
+    text = yaml_from_form(form)
+    assert '# Codex を貸している人ごとのコマンド実行のモード（書いていない人は、上の exec.mode と同じ）' in text
+    assert '  "a": "off"' in text
+    assert text.index("lender_exec_modes:") < text.index("# 削除するときは承認待ちにする")
+    assert parse_policy(yaml.safe_load(text)).lender_exec_modes == modes
+    assert form_from_raw(yaml.safe_load(text))["lender_exec_modes"] == modes
+    assert form_from_raw({"lender_exec_modes": None})["lender_exec_modes"] == {}
+
+
+def test_save_form_without_key_keeps_modes(tmp_path):
+    store = store_with(tmp_path)
+    store.update(lender_exec_modes={"a": "off", "b": "ask"})
+    form = form_from_raw(store.as_dict())
+    form.pop("lender_exec_modes", None)
+    form["exec"]["mode"] = "all"
+    save_form(store, form)
+    assert store.current().lender_exec_modes == {"a": "off", "b": "ask"}
+    assert store.current().exec_mode == "all"
+    assert store.current().confirm_modified_scripts is True
+    assert "lender_exec_modes" not in form
+    save_form(store, {**form, "lender_exec_modes": {}})
+    assert store.current().lender_exec_modes == {}
+
+
+@pytest.mark.parametrize("operation", ["level", "inherit", "add", "remove", "main"])
+def test_set_folder_level_keeps_lender_modes(tmp_path, operation):
+    store = store_with(tmp_path)
+    store.update(lender_exec_modes={"a": "off", "b": "all"})
+    tools = (tmp_path / "tools").as_posix()
+    if operation in ("level", "inherit"):
+        set_folder_level(store, tools, "hidden" if operation == "level" else "inherit")
+    elif operation == "add":
+        add_folder(store, (tmp_path / "work" / "locked").as_posix(), "read")
+    elif operation == "remove":
+        remove_folder(store, tools)
+    else:
+        set_main_folder(store, tools)
+    assert PolicyStore(store.path).current().lender_exec_modes == {"a": "off", "b": "all"}
+
+
+@pytest.mark.parametrize("modes", [{"a": "bad"}, {"a": "inherit"}, {1: "all"}, [], False])
+def test_yaml_from_form_rejects_bad_lender_modes(modes):
+    with pytest.raises(ValueError, match="lender_exec_modes"):
+        yaml_from_form({"lender_exec_modes": modes})

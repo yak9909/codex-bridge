@@ -415,3 +415,39 @@ async def test_claude_adds_removes_and_switches_folders(env, share, tmp_path):
     assert share.paths.root == extra.resolve()
     text_of(await call(local, "remove_shared_folder", {"path": str(extra)}))
     assert share.policy.current().level_for_abs(extra / "note.txt") is None
+
+
+async def test_set_exec_mode_for_lender_and_inherit(env, share):
+    from codex_bridge.host.policy import EXEC_MODES
+    _, local, _ = env
+    share.tokens.issue("alice")
+    share.tokens.issue("bob")
+    global_mode = share.policy.current().exec_mode
+    for mode in (*EXEC_MODES, "inherit"):
+        result = text_of(await call(local, "set_exec_mode", {"mode": mode, "lender": "alice"}))
+        expected = None if mode == "inherit" else mode
+        assert result == {"lender": "alice", "exec_mode": expected}
+        assert share.policy.current().exec_mode == global_mode
+        rows = text_of(await call(local, "list_lenders", {}))
+        assert {r["name"]: r["exec_mode"] for r in rows} == {"alice": expected, "bob": None}
+    for args, message in (({"mode": "off", "lender": "missing"}, "その名前の招待コードがありません: missing"),
+                          ({"mode": "bad", "lender": "alice"}, "mode"),
+                          ({"mode": "inherit"}, "mode")):
+        result = await call(local, "set_exec_mode", args)
+        assert result["isError"] and message in result["content"][0]["text"]
+    assert share.policy.current().lender_exec_modes == {}
+    text_of(await call(local, "set_exec_mode", {"mode": "off", "lender": "alice"}))
+    assert text_of(await call(local, "set_exec_mode", {"mode": "all"})) == {"exec_mode": "all"}
+    assert share.policy.current().lender_exec_modes == {"alice": "off"}
+
+
+async def test_get_policy_lists_lender_modes(env, share):
+    _, local, _ = env
+    modes = {"alice": "off", "bob": "all"}
+    share.policy.update(lender_exec_modes=modes)
+    result = text_of(await call(local, "get_policy", {}))
+    assert result["lender_exec_modes"] == modes
+    assert result["form"]["lender_exec_modes"] == modes
+    assert text_of(await call(local, "get_overview", {}))["lender_exec_modes"] == modes
+    text_of(await call(local, "set_folder_level", {"path": "docs", "level": "write"}))
+    assert text_of(await call(local, "get_policy", {}))["lender_exec_modes"] == modes

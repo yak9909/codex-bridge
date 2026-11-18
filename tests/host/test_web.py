@@ -774,3 +774,63 @@ async def test_send_task_errors_are_readable(admin, host):
     r = await admin.post("/admin/api/tasks", json={"prompt": "x"}, headers=H)
     assert r.status_code == 409 and "接続されていません" in r.json()["detail"]
     assert (await admin.post("/admin/api/tasks", json={"prompt": "  "}, headers=H)).status_code == 400
+
+
+async def test_put_lender_exec_mode(admin, host, monkeypatch):
+    from codex_bridge.host.policy import EXEC_MODES
+    host.tokens.issue("alice")
+    host.tokens.issue("bob")
+    notices = []
+    monkeypatch.setattr(host.events, "notify", lambda: notices.append(True))
+    for mode in (*EXEC_MODES, "inherit"):
+        r = await admin.put("/admin/api/lenders/alice/exec-mode", json={"mode": mode}, headers=H)
+        assert r.status_code == 200 and r.json() == {"ok": True}
+        expected = {} if mode == "inherit" else {"alice": mode}
+        assert host.policy.current().lender_exec_modes == expected
+        assert (await admin.get("/admin/api/overview")).json()["lender_exec_modes"] == expected
+        rows = (await admin.get("/admin/api/lenders")).json()
+        assert {r["name"]: r["exec_mode"] for r in rows} == {"alice": expected.get("alice"), "bob": None}
+    assert len(notices) == 5
+    for body in ({"mode": "bad"}, {"mode": False}, {"mode": []}, {}):
+        r = await admin.put("/admin/api/lenders/alice/exec-mode", json=body, headers=H)
+        assert r.status_code == 400 and "mode" in r.json()["detail"]
+    assert len(notices) == 5
+    assert host.policy.current().lender_exec_modes == {}
+    assert (await admin.put("/admin/api/lenders/alice/exec-mode", json={"mode": "all"})).status_code == 403
+
+
+async def test_put_lender_exec_mode_unknown_name_404(admin, host):
+    r = await admin.put("/admin/api/lenders/missing/exec-mode", json={"mode": "off"}, headers=H)
+    assert r.status_code == 404
+    assert r.json()["detail"] == "その名前の招待コードがありません: missing"
+    assert host.policy.current().lender_exec_modes == {}
+
+
+@pytest.mark.parametrize("via", ["web", "mcp", "tokens"])
+async def test_revoke_clears_lender_mode(admin, host, via):
+    host.tokens.issue("alice")
+    host.tokens.issue("bob")
+    host.policy.update(lender_exec_modes={"alice": "off", "bob": "all"})
+    host.tokens.issue("alice")  # rotating an invite keeps the override
+    assert host.policy.current().lender_exec_modes == {"alice": "off", "bob": "all"}
+    if via == "web":
+        assert (await admin.delete("/admin/api/invites/alice", headers=H)).status_code == 200
+    elif via == "mcp":
+        async with running(host.claude_ep):
+            assert await claude_call(admin, "revoke_invite", {"name": "alice"}) == {"ok": True}
+    else:
+        host.tokens.revoke("alice")
+    assert host.policy.current().lender_exec_modes == {"bob": "all"}
+    host.tokens.issue("alice")
+    assert host.policy.current().exec_mode_for("alice") == host.policy.current().exec_mode
+
+
+async def test_policy_form_save_keeps_lender_exec_modes(admin, host):
+    host.policy.update(lender_exec_modes={"alice": "off", "bob": "all"})
+    form = (await admin.get("/admin/api/policy-form")).json()
+    assert form["lender_exec_modes"] == {"alice": "off", "bob": "all"}
+    form.pop("lender_exec_modes")
+    form["exec"]["mode"] = "ask"
+    r = await admin.put("/admin/api/policy-form", json=form, headers=H)
+    assert r.status_code == 200, r.text
+    assert host.policy.current().lender_exec_modes == {"alice": "off", "bob": "all"}

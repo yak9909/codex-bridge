@@ -147,7 +147,9 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
           "pre_approval が true なら、依頼のたびにその人の承認が要ります）、current_task_id（作業中のタスク）。")
     async def list_lenders() -> CallToolResult:
         async def f():
-            return mgr.lenders(i["name"] for i in tokens.list())
+            modes = policy.current().lender_exec_modes
+            return [{**row, "exec_mode": modes.get(row["name"])}
+                    for row in mgr.lenders(i["name"] for i in tokens.list())]
         return await run(f)
 
     @tool("作業中のタスクに追加の指示を送ります。")
@@ -260,7 +262,8 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
     async def get_policy() -> CallToolResult:
         async def f():
             text = policy.path.read_text(encoding="utf-8") if policy.path.exists() else ""
-            return {"form": form_from_raw(policy.as_dict()), "text": text, "error": policy.last_error}
+            return {"form": form_from_raw(policy.as_dict()), "text": text, "error": policy.last_error,
+                    "lender_exec_modes": policy.current().lender_exec_modes}
         return await run(f)
 
     @tool("フォルダ 1 つの権限を変えます。path はフルパス、またはメインのフォルダからの相対パス。level は "
@@ -288,9 +291,19 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
             return {"ok": True}
         return await run(f)
 
-    @tool("コマンド実行のモードを変えます: off（実行しない）/ allowlist（許可リスト外は承認待ち）/ ask（毎回承認待ち）/ all（すべて自動）。")
-    async def set_exec_mode(mode: str) -> CallToolResult:
+    @tool("コマンド実行のモードを変えます: off（実行しない）/ allowlist（許可リスト外は承認待ち）/ ask（毎回承認待ち）/ all（すべて自動）。"
+          "lender に Codex を貸している人の名前を渡すと、その人だけのモードになります（inherit で全体と同じに戻す）。"
+          "利用者に頼まれたときだけ使ってください。")
+    async def set_exec_mode(mode: str, lender: str | None = None) -> CallToolResult:
         async def f():
+            if lender is not None:
+                if lender not in {i["name"] for i in tokens.list()}:
+                    raise ToolError(f"その名前の招待コードがありません: {lender}")
+                try:
+                    policy.set_lender_exec_mode(lender, mode)
+                except ValueError as e:
+                    raise ToolError(str(e)) from e
+                return {"lender": lender, "exec_mode": policy.current().lender_exec_modes.get(lender)}
             if mode not in EXEC_MODES:
                 raise ToolError(f"mode は {', '.join(EXEC_MODES)} のどれかです")
             policy.update(exec_mode=mode)
@@ -387,6 +400,7 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
             return {**share_status(), "folders": roots(), "public_bind": public_bind,
                     "agent": mgr.agent_info(),
                     "paused": p.paused, "exec_mode": p.exec_mode, "policy_error": policy.last_error,
+                    "lender_exec_modes": p.lender_exec_modes,
                     "policy_problem": policy.problems(),
                     "current_task": mgr.current_task_id(), "pending_approvals": len(approvals.pending()),
                     "usage": mgr.usage(), "log_visibility": mgr.settings["log_visibility"]}

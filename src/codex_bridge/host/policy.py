@@ -106,6 +106,7 @@ class Policy:
     default: Level = "read"
     rules: tuple[Rule, ...] = ()  # v1: relative rules; v2: advanced (wildcard) rules relative to main
     exec_mode: ExecMode = "allowlist"
+    lender_exec_modes: dict[str, str] = field(default_factory=dict)
     allow_patterns: list[str] = field(default_factory=list)
     paused: bool = False
     confirm_modified_scripts: bool = False
@@ -114,6 +115,9 @@ class Policy:
     folders: tuple[Folder, ...] = ()  # v2: absolute folders
     main: Path | None = None          # v2: relative paths are resolved from here
     v2: bool = False
+
+    def exec_mode_for(self, lender: str | None) -> str:
+        return self.lender_exec_modes.get(lender, self.exec_mode) if lender is not None else self.exec_mode
 
     def level_for_abs(self, p: Path) -> Level | None:
         """v2: the level of an absolute path, or None if no registered folder contains it."""
@@ -200,6 +204,17 @@ def parse_policy(data: dict | None) -> Policy:
         mode = "off"
     if mode not in EXEC_MODES:
         raise ValueError(f"exec.mode must be one of {EXEC_MODES}")
+    lender_modes = data.get("lender_exec_modes")
+    if lender_modes is None:
+        lender_modes = {}
+    if not isinstance(lender_modes, dict):
+        raise ValueError("lender_exec_modes は 名前: モード の形で書いてください")
+    lender_exec_modes = {}
+    for name, value in lender_modes.items():
+        value = "off" if value is False else value
+        if not isinstance(name, str) or value not in EXEC_MODES:
+            raise ValueError(f"lender_exec_modes の値は {EXEC_MODES} のどれかです: {name}")
+        lender_exec_modes[name] = value
     allow = ex.get("allow") or []
     if not isinstance(allow, list) or not all(isinstance(a, str) for a in allow):
         raise ValueError("exec.allow must be a list of strings")
@@ -212,6 +227,7 @@ def parse_policy(data: dict | None) -> Policy:
         default=default,
         rules=tuple(rules),
         exec_mode=mode,
+        lender_exec_modes=lender_exec_modes,
         allow_patterns=list(allow),
         paused=bool(data.get("paused", False)),
         confirm_modified_scripts=bool(ex.get("confirm_modified_scripts", False)),
@@ -324,3 +340,17 @@ class PolicyStore:
             else:
                 raw[k] = v
         self.save(raw)
+
+    def set_lender_exec_mode(self, name: str, mode: str) -> None:
+        if mode not in (*EXEC_MODES, "inherit"):
+            raise ValueError(f"mode は {', '.join((*EXEC_MODES, 'inherit'))} のどれかです")
+        if mode == "inherit":
+            self.drop_lender(name)
+            return
+        self.update(lender_exec_modes={**self.current().lender_exec_modes, name: mode})
+
+    def drop_lender(self, name: str) -> None:
+        modes = dict(self.current().lender_exec_modes)
+        if name in modes:
+            del modes[name]
+            self.update(lender_exec_modes=modes)

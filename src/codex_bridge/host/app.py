@@ -76,6 +76,8 @@ def build_host(config: HostConfig, config_path: Path | None = None) -> Host:
     approvals = Approvals(policy)
     mgr = TaskManager(data, touched_fn=snapshots.touched, check_start=paths.check_configured)
     tokens = TokenStore(data)
+    tokens.on_change.append(lambda name: None if name in {i["name"] for i in tokens.list()}
+                            else policy.drop_lender(name))
     mgr.invited_names = lambda: {i["name"] for i in tokens.list()}
 
     def task_id_fn() -> str | None:

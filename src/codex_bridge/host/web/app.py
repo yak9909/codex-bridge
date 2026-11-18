@@ -54,6 +54,7 @@ def admin_router(host) -> APIRouter:
             "share_root": str(root) if root else None, "share_root_message": None if root else UNSET_SHARE_MSG,
             "folders": host.paths.roots(), "public_bind": host.config.public_bind,
             "paused": p.paused, "exec_mode": p.exec_mode, "policy_error": host.policy.last_error,
+            "lender_exec_modes": p.lender_exec_modes,
             "policy_problem": host.policy.problems(),
             "agent": host.mgr.agent_info(), "current_task": host.mgr.current_task_id(),
             "pending_approvals": len(host.approvals.pending()), "usage": host.mgr.usage(),
@@ -210,7 +211,20 @@ def admin_router(host) -> APIRouter:
     async def lenders():
         """One row per lender: connection, versions, usage, own limits, capabilities (disposable sessions,
         pre-approval) and the task in progress. Invited names that have not connected are listed too."""
-        return host.mgr.lenders(i["name"] for i in host.tokens.list())
+        modes = host.policy.current().lender_exec_modes
+        return [{**row, "exec_mode": modes.get(row["name"])}
+                for row in host.mgr.lenders(i["name"] for i in host.tokens.list())]
+
+    @r.put("/api/lenders/{name}/exec-mode")
+    async def lender_exec_mode(name: str, body: dict):
+        if name not in {i["name"] for i in host.tokens.list()}:
+            raise HTTPException(404, f"その名前の招待コードがありません: {name}")
+        try:
+            host.policy.set_lender_exec_mode(name, body.get("mode"))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        host.events.notify()
+        return {"ok": True}
 
     @r.get("/api/tasks")
     async def tasks():

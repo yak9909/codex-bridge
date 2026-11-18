@@ -194,3 +194,49 @@ async def test_paused_refuses(share):
     share.set_policy(paused=True)
     with pytest.raises(ToolError, match="停止中"):
         await share.runner.run_command(f"{PY} -c 1")
+
+
+async def test_lender_off_denies_while_global_all(share):
+    share.set_policy(exec_mode="all", lender_exec_modes={"alice": "off"})
+    share.runner.lender_fn = lambda: "alice"
+    r = await share.runner.run_command(f'{PY} -c "print(1)"')
+    assert r["status"] == "denied" and "実行モードが off" in r["message"]
+    assert share.approvals.pending() == []
+
+
+@pytest.mark.parametrize("global_mode", ["ask", "off"])
+async def test_lender_all_runs_without_approval_while_global_ask(share, global_mode):
+    share.set_policy(exec_mode=global_mode, lender_exec_modes={"alice": "all"}, limits={"sync_wait_sec": 1})
+    share.runner.lender_fn = lambda: "alice"
+    r = await share.runner.run_command(f'{PY} -c "print(1)"')
+    assert r["status"] == "done" and r["exit_code"] == 0 and r["stdout"].strip() == "1"
+    assert share.approvals.pending() == []
+
+
+@pytest.mark.parametrize("global_mode, status", [("off", "denied"), ("ask", "waiting_approval"),
+                                                 ("all", "done")])
+async def test_lender_without_entry_uses_global(share, global_mode, status):
+    share.set_policy(exec_mode=global_mode, lender_exec_modes={"bob": "all"}, limits={"sync_wait_sec": 1})
+    share.runner.lender_fn = lambda: "alice"
+    r = await share.runner.run_command(f'{PY} -c "print(1)"')
+    assert r["status"] == status
+    if status == "waiting_approval":
+        share.approvals.decide(share.approvals.pending()[0].id, False)
+        assert (await share.runner.get_command_result(r["job_id"], 5))["status"] == "denied"
+
+
+@pytest.mark.parametrize("mode, modified, status", [("allowlist", False, "done"),
+                                                   ("ask", False, "waiting_approval"),
+                                                   ("all", True, "waiting_approval")])
+async def test_lender_modes_keep_shared_exec_checks(share, mode, modified, status):
+    share.set_policy(exec_mode="off", lender_exec_modes={"alice": mode},
+                     exec_allow=[f"{PY} scripts/*.py *"], exec_confirm_modified_scripts=modified,
+                     limits={"sync_wait_sec": 1})
+    share.runner.lender_fn = lambda: "alice"
+    share.task("t1")
+    share.write.write_file("scripts/new.py", "print(1)\n")
+    r = await share.runner.run_command(f"{PY} scripts/new.py")
+    assert r["status"] == status
+    if status == "waiting_approval":
+        share.approvals.decide(share.approvals.pending()[0].id, False)
+        assert (await share.runner.get_command_result(r["job_id"], 5))["status"] == "denied"

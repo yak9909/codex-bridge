@@ -7,6 +7,7 @@ form = {
               {"path": "D:/work/project/secret", "level": "hidden"}],
   "advanced_rules": [{"path": "**/*.lock", "level": "hidden"}],  # wildcard rules, relative to main
   "exec": {"mode": "allowlist", "allow": [...], "confirm_modified_scripts": False},
+  "lender_exec_modes": {"friend": "ask"},                      # only the mode varies per lender
   "delete_needs_approval": True,
   "paused": False,
 }
@@ -18,7 +19,7 @@ import json
 import os
 from pathlib import Path, PureWindowsPath
 
-from .policy import EXEC_MODES, LEVELS, PolicyStore, normalize_rel
+from .policy import EXEC_MODES, LEVELS, PolicyStore, normalize_rel, parse_policy
 
 INHERIT = "inherit"
 
@@ -47,6 +48,8 @@ def form_from_raw(raw: dict | None) -> dict:
         "advanced_rules": list(raw.get("advanced_rules") or []),
         "exec": {"mode": "off" if mode is False else mode, "allow": list(ex.get("allow") or []),
                  "confirm_modified_scripts": bool(ex.get("confirm_modified_scripts", False))},
+        "lender_exec_modes": {name: ("off" if v is False else v)
+                              for name, v in (raw.get("lender_exec_modes") or {}).items()},
         "delete_needs_approval": bool(raw.get("delete_needs_approval", True)),
         "paused": bool(raw.get("paused", False)),
     }
@@ -78,6 +81,7 @@ def yaml_from_form(form: dict) -> str:
     mode = ex.get("mode", "allowlist")
     if mode not in EXEC_MODES:
         raise ValueError(f"exec.mode は {EXEC_MODES} のどれかです")
+    lender_modes = parse_policy({"lender_exec_modes": form.get("lender_exec_modes")}).lender_exec_modes
     allow = [a.strip() for a in ex.get("allow") or [] if a and a.strip()]
 
     lines = [
@@ -117,6 +121,12 @@ def yaml_from_form(form: dict) -> str:
     lines += [
         "  # true にすると、作業中に書き換えたスクリプトの実行は承認待ちになる",
         f"  confirm_modified_scripts: {str(bool(ex.get('confirm_modified_scripts'))).lower()}",
+    ]
+    if lender_modes:
+        lines += ["", "# Codex を貸している人ごとのコマンド実行のモード（書いていない人は、上の exec.mode と同じ）",
+                  "lender_exec_modes:"]
+        lines += [f"  {_q(name)}: {_q(mode)}" for name, mode in lender_modes.items()]
+    lines += [
         "",
         "# 削除するときは承認待ちにする",
         f"delete_needs_approval: {str(bool(form.get('delete_needs_approval', True))).lower()}",
@@ -129,6 +139,8 @@ def yaml_from_form(form: dict) -> str:
 
 
 def save_form(store: PolicyStore, form: dict) -> None:
+    if "lender_exec_modes" not in form:
+        form = {**form, "lender_exec_modes": form_from_raw(store.as_dict())["lender_exec_modes"]}
     store.save_text(yaml_from_form(form))
 
 
