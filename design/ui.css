@@ -2,7 +2,9 @@
    Only these values: type 20/16/14px; space 4/8/12/16/24/32/48px; control height 36px (small 32px). */
 
 :root {
-  --ink: #1f2430; --muted: #596173; --line: #dde1e8; --ground: #f5f6f8; --surface: #ffffff;
+  /* edges: --ctl-line is a control boundary (WCAG 1.4.11 non-text contrast 3:1 on white);
+     --edge is a container (card, section) edge; --line is a divider inside one container */
+  --ink: #1f2430; --muted: #596173; --line: #d3d8df; --edge: #b3bac6; --ctl-line: #868f9e; --ground: #eceef2; --surface: #ffffff;
   --accent: #0d6b62; --accent-soft: #e5f1ef; --warn: #93540a; --warn-soft: #fdf3e2; --warn-line: #efd29b;
   --bad: #b42318; --bad-soft: #fdecea; --bad-line: #f3c0ba; --ok: #1b7a4b; --idle: #9aa1ae;
   --fs-h: 20px; --fs: 16px; --fs-sub: 14px;
@@ -41,7 +43,7 @@ button .ic, .banner .ic { width: 18px; height: 18px; }
 
 /* ---- page + sections ---- */
 main { max-width: 1120px; margin: 0 auto; padding: var(--s5); display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s5); }
-.section { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-box); padding: var(--s5); min-width: 0; }
+.section { background: var(--surface); border: 1px solid var(--edge); border-radius: var(--r-box); padding: var(--s5); min-width: 0; }
 .section-head { display: flex; align-items: baseline; gap: var(--s3); flex-wrap: wrap; margin-bottom: var(--s4); }
 .section-head .actions { margin-left: auto; display: flex; gap: var(--s2); align-items: center; }
 .stack { display: grid; gap: var(--s4); align-content: start; }
@@ -56,9 +58,9 @@ button.secondary { background: var(--surface); color: var(--accent); }
 button.danger { background: var(--surface); color: var(--bad); border-color: var(--bad); }
 button.sm { height: var(--ctl-sm); padding: 0 var(--s3); font-size: var(--fs-sub); }
 button.link { height: auto; padding: 0; border: 0; background: none; color: var(--accent); text-decoration: underline; }
-input, select { font: inherit; letter-spacing: 0; color: var(--ink); background: var(--surface); border: 1px solid #c4cad5;
+input, select { font: inherit; letter-spacing: 0; color: var(--ink); background: var(--surface); border: 1px solid var(--ctl-line);
   border-radius: var(--r-ctl); height: var(--ctl); padding: 0 var(--s3); }
-textarea { font: inherit; letter-spacing: 0; line-height: 1.6; color: var(--ink); border: 1px solid #c4cad5; border-radius: var(--r-ctl);
+textarea { font: inherit; letter-spacing: 0; line-height: 1.6; color: var(--ink); border: 1px solid var(--ctl-line); border-radius: var(--r-ctl);
   padding: var(--s2) var(--s3); width: 100%; resize: vertical; }
 input[type="number"] { width: 5em; text-align: right; }
 input[type="checkbox"], input[type="radio"] { height: auto; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
@@ -68,8 +70,8 @@ label.field > span { font-size: var(--fs-sub); color: var(--muted); letter-spaci
 .hint { font-size: var(--fs-sub); line-height: 1.6; letter-spacing: 0; color: var(--muted); }
 
 /* segmented choice */
-.seg { display: inline-flex; height: var(--ctl); border: 1px solid #c4cad5; border-radius: var(--r-ctl); overflow: hidden; }
-.seg label { display: flex; align-items: center; padding: 0 var(--s3); border-left: 1px solid #c4cad5; cursor: pointer; white-space: nowrap; }
+.seg { display: inline-flex; height: var(--ctl); border: 1px solid var(--ctl-line); border-radius: var(--r-ctl); overflow: hidden; }
+.seg label { display: flex; align-items: center; padding: 0 var(--s3); border-left: 1px solid var(--ctl-line); cursor: pointer; white-space: nowrap; }
 .seg label:first-child { border-left: 0; }
 .seg input { position: absolute; opacity: 0; pointer-events: none; }
 .seg label:has(input:checked) { background: var(--accent); color: #fff; }
@@ -90,15 +92,15 @@ details.combo { position: relative; }
 details.combo > summary { list-style: none; }
 details.combo > summary::-webkit-details-marker { display: none; }
 details.combo > .listbox { position: absolute; z-index: 10; top: calc(var(--ctl) + var(--s1)); left: 0; width: 100%; background: var(--surface);
-  border-color: #c4cad5; box-shadow: 0 6px 20px rgba(0, 0, 0, .12); max-width: none; }
+  border-color: var(--ctl-line); box-shadow: 0 6px 20px rgba(0, 0, 0, .12); max-width: none; }
 
 /* multi-select combobox: closed = summary; open = search + check list */
 .combo { position: relative; max-width: 24em; }
-.combo-box { display: flex; align-items: center; gap: var(--s2); height: var(--ctl); padding: 0 var(--s3); border: 1px solid #c4cad5;
+.combo-box { display: flex; align-items: center; gap: var(--s2); height: var(--ctl); padding: 0 var(--s3); border: 1px solid var(--ctl-line);
   border-radius: var(--r-ctl); background: var(--surface); cursor: pointer; }
 .combo-box .summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .combo-box .ic { color: var(--muted); transform: rotate(90deg); }
-.combo-pop { position: absolute; z-index: 10; left: 0; right: 0; top: calc(var(--ctl) + var(--s1)); border: 1px solid #c4cad5; border-radius: var(--r-ctl); background: var(--surface);
+.combo-pop { position: absolute; z-index: 10; left: 0; right: 0; top: calc(var(--ctl) + var(--s1)); border: 1px solid var(--ctl-line); border-radius: var(--r-ctl); background: var(--surface);
   box-shadow: 0 6px 20px rgba(0, 0, 0, .12); }
 .combo-pop input[type="search"] { width: 100%; border: 0; border-bottom: 1px solid var(--line); border-radius: var(--r-ctl) var(--r-ctl) 0 0; }
 .combo-pop ul { list-style: none; padding: var(--s1) 0; margin: 0; max-height: calc(6 * 36px); overflow: auto; }
@@ -176,10 +178,20 @@ label.chip:has(input:checked) { background: var(--accent-soft); border-color: va
 .card.add > summary { color: var(--accent); display: flex; align-items: center; gap: var(--s2); }
 
 /* ---- Windows settings pattern: SettingsExpander (header row + item rows) and SettingsCard (header left, control right) ---- */
-.settings { display: grid; gap: var(--s1); }
+.settings { display: grid; gap: var(--s2); }
 .sc, .sx > summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--s3) var(--s4);
-  min-height: 64px; padding: var(--s3) var(--s4); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-ctl); }
+  min-height: 64px; padding: var(--s3) var(--s4); background: var(--surface); border: 1px solid var(--edge); border-radius: var(--r-ctl); }
+/* an entity card (a lender, a client) carries more inside its header than a setting row: give it room */
+.sx.entity > summary { padding: var(--s4) var(--s5); gap: var(--s4); }
+.sx.entity > summary .sx-extra.meters { grid-template-columns: minmax(0, 1fr); gap: var(--s3); }
+.settings:has(> .sx.entity) { gap: var(--s3); }
 .sc-text { display: grid; gap: 0; min-width: 0; }
+/* narrow: the control moves under the header, as SettingsCard does when its width is small */
+.settings, .sx-items { container-type: inline-size; }
+@container (max-width: 520px) {
+  .sc { grid-template-columns: minmax(0, 1fr); }
+  .settings .sc-ctl, .sx-items .sc-ctl { justify-content: flex-start; }
+}
 .sc-text .d { font-size: var(--fs-sub); line-height: 1.6; letter-spacing: 0; color: var(--muted); }
 .sc-ctl { display: flex; align-items: center; gap: var(--s2); justify-content: flex-end; flex-wrap: wrap; }
 .sc-val { text-align: right; }
@@ -190,10 +202,14 @@ label.chip:has(input:checked) { background: var(--accent-soft); border-color: va
 .sx[open] > summary .chev { transform: rotate(90deg); }
 @media (prefers-reduced-motion: reduce) { .sx > summary .chev { transition: none; } }
 .sx > summary .sx-extra { grid-column: 1 / -1; }
-.sx-items { border: 1px solid var(--line); border-top: 0; border-radius: 0 0 var(--r-ctl) var(--r-ctl); background: var(--surface); }
+.sx-items { border: 1px solid var(--edge); border-top: 0; border-radius: 0 0 var(--r-ctl) var(--r-ctl); background: var(--surface); }
 .sx-items .sc { border: 0; border-top: 1px solid var(--line); border-radius: 0; padding-left: var(--s6); }
 .sx-items .sc:first-child { border-top: 0; }
 .sx-items .sub-head { padding: var(--s3) var(--s4) 0 var(--s6); font-size: var(--fs-sub); letter-spacing: 0; color: var(--muted); border-top: 1px solid var(--line); }
+/* settings the other person owns: read-only fields are transparent and blend into the layer (carbon-read-only-states.md:118),
+   so the group sits on the ground layer; that boundary, not each field, tells the two groups apart */
+.sx-items .sub-head, .sx-items .sub-head ~ .sc { background: var(--ground); }
+.sx-items .sub-head { color: var(--ink); font-weight: 700; padding-bottom: var(--s1); }
 .sx.add > summary { color: var(--accent); border-style: dashed; }
 
 /* toggle switch */
@@ -206,9 +222,20 @@ label.chip:has(input:checked) { background: var(--accent-soft); border-color: va
 .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* read-only state of a selection control (carbon read-only states: transparent field, weaker border, muted signifier) */
+/* same control, same content as the owner sees (carbon-read-only-states.md:98, :160); text color unchanged (:88) */
 .combo-box.ro { background: transparent; border-color: var(--line); cursor: default; }
 details.combo > summary.combo-box.ro { cursor: pointer; }
 .combo-box.ro .ic { color: var(--idle); }
+select.ro, input.ro { background: transparent; border-color: var(--line); pointer-events: none; appearance: none; }
+input.ro { width: 3.5em; padding: 0 var(--s2); }
+.seg.ro { border-color: var(--line); }
+.seg.ro label { cursor: default; border-left-color: var(--line); color: var(--muted); }
+.seg.ro label:has(input:checked) { background: transparent; color: var(--ink); font-weight: 700; box-shadow: inset 0 0 0 2px var(--ctl-line); }
+.switch.ro { cursor: default; }
+.switch.ro .track { border-color: var(--ctl-line); }
+.switch.ro input:checked + .track { background: transparent; border-color: var(--ctl-line); }
+.switch.ro input:checked + .track::after { background: var(--ink); }
+.switch.ro .track::after { background: var(--idle); }
 
 /* ---- label | value rows (aligned on the text baseline; every control has the same height) ---- */
 .rows { display: grid; grid-template-columns: 10em minmax(0, 1fr); gap: var(--s3) var(--s4); align-items: baseline; }
@@ -225,11 +252,20 @@ table.list .end { text-align: right; padding-right: 0; }
 
 /* ---- side panel + main list (invite and allowlist on the left, lenders on the right) ---- */
 .side-main { display: grid; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); gap: var(--s5); align-items: start; }
-.side { display: grid; gap: var(--s5); position: sticky; top: var(--s4); }
+.side-main { align-items: stretch; }
+.side { display: grid; gap: var(--s5); align-content: start; }
+/* the main column takes the side column's height and does not grow with its list; the list scrolls inside.
+   contain: size keeps it from adding to the row height, so the row is as tall as the side column. */
+.side-main > .fit { contain: size; display: flex; flex-direction: column; }
+/* list/details (ms-list-details.md:40, :87): the list pane is as tall as the details pane and scrolls on its own */
+.tasks > .task-list { contain: size; overflow: auto; min-height: 240px; align-self: stretch; }
+.side-main > .fit > .scroll-area { flex: 1; min-height: 0; overflow: auto; padding-right: var(--s1); }
 .side .section { padding: var(--s4); }
 .side .section-head { margin-bottom: var(--s3); }
 .side h2 { font-size: var(--fs); }
 .side h2 .ic { width: 18px; height: 18px; }
+.side input:not([type="checkbox"]), .side select, .side textarea { width: 100%; min-width: 0; }
+.side .row code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---- task detail: status first and largest, then who, then quieter facts ---- */
 .td-head { display: flex; align-items: flex-start; gap: var(--s3); }
@@ -239,6 +275,19 @@ table.list .end { text-align: right; padding-right: 0; }
 .td-status .dot { width: 12px; height: 12px; }
 .td-who { display: flex; align-items: baseline; gap: var(--s2); flex-wrap: wrap; }
 .td-meta { font-size: var(--fs-sub); letter-spacing: 0; color: var(--muted); display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+/* issue-style detail (GitHub issue: state label + "who" line under the title, then a conversation whose first entry is the request
+   with its sender; events between messages are small lines - primer-timeline.md) */
+.td-line { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
+.state-label { display: inline-flex; align-items: center; height: 28px; padding: 0 var(--s3); border-radius: 14px; font-size: var(--fs-sub);
+  font-weight: 700; letter-spacing: 0; color: #fff; background: var(--idle); }
+.state-label.ok { background: var(--ok); } .state-label.warn { background: var(--warn); } .state-label.bad { background: var(--bad); }
+.thread { list-style: none; padding: 0 var(--s1) 0 0; display: flex; flex-direction: column; gap: var(--s3); max-height: 320px; overflow: auto; }
+.thread > li { flex: none; }
+.msg { border: 1px solid var(--edge); border-radius: var(--r-ctl); overflow: hidden; }
+.msg-head { display: flex; align-items: baseline; gap: var(--s2); padding: var(--s1) var(--s3); background: var(--ground); border-bottom: 1px solid var(--line); font-size: var(--fs-sub); letter-spacing: 0; }
+.msg-head .time, .ev .time { color: var(--muted); }
+.msg > p { padding: var(--s2) var(--s3); }
+.ev { display: flex; gap: var(--s2); padding-left: var(--s3); font-size: var(--fs-sub); letter-spacing: 0; color: var(--muted); }
 .quote { margin: 0; padding: var(--s3) var(--s4); background: var(--ground); border-radius: var(--r-ctl); white-space: pre-wrap; }
 .log.scroll { max-height: 240px; overflow: auto; }
 
@@ -282,7 +331,9 @@ table.list .end { text-align: right; padding-right: 0; }
   main { padding: var(--s4); gap: var(--s4); }
   .section, .approvals { padding: var(--s4); }
   .meters, .tasks, .side-main { grid-template-columns: minmax(0, 1fr); }
-  .side-main > .side { order: 2; position: static; }
+  .side-main > .side { order: 2; }
+  .side-main > .fit { contain: none; max-height: 70vh; }
+  .tasks > .task-list { contain: none; max-height: 40vh; }
   .rows { grid-template-columns: minmax(0, 1fr); gap: var(--s1) 0; }
   .rows > dd { margin-bottom: var(--s3); }
   .approval { grid-template-columns: minmax(0, 1fr); }

@@ -10,6 +10,8 @@
     // .side-main: a sticky side column stays in view while the main column scrolls, so its empty area below is expected;
     // it is still reported (marked "sidebar") so the gap is a decision, not an accident.
     document.querySelectorAll(".split, .tasks, .side-main").forEach((el) => {
+      // a column with contain: size takes its neighbour's height by design and scrolls, so there is nothing to compare
+      if ([...el.children].some((c) => getComputedStyle(c).contain.includes("size"))) return;
       const kids = [...el.children].filter((c) => c.offsetParent !== null);
       if (kids.length < 2) return;
       // grid items stretch to the row height by default; measure their content instead

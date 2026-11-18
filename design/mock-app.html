@@ -77,10 +77,10 @@ npm test *</textarea>
     </section>
   </div>
 
-  <section class="section">
-    <div class="section-head"><h2><svg class="ic"><use href="icons.svg#i-users"/></svg>貸す人</h2></div>
-    <div class="settings">
-      <details class="sx" open>
+  <section class="section fit">
+    <div class="section-head"><h2><svg class="ic"><use href="icons.svg#i-users"/></svg>貸す人<span class="count">4</span></h2></div>
+    <div class="settings scroll-area">
+      <details class="sx entity" open>
         <summary>
           <div class="sc-text"><span class="card-head"><span class="dot ok"></span><b>yamada</b></span><span class="d">作業中 t12「テストを直す」</span></div>
           <svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg>
@@ -102,7 +102,7 @@ npm test *</textarea>
             <div class="sc-ctl"><div class="combo-box" style="width:14em"><span class="summary">道具の名前と対象</span><svg class="ic"><use href="icons.svg#i-chevron-right"/></svg></div></div></div>
           <div class="sc"><div class="sc-text"><span>招待コード</span><span class="d">11/10 発行</span></div>
             <div class="sc-ctl"><button class="secondary sm">発行し直す</button><button class="danger sm">取り消す</button></div></div>
-          <p class="sub-head">yamada さんの設定</p>
+          <p class="sub-head">yamada さんが決めた設定</p>
           <div class="sc"><div class="sc-text"><span>使えるモデル</span></div>
             <div class="sc-ctl"><details class="combo" style="width:14em"><summary class="combo-box ro"><span class="summary">既定 GPT-6.1-Sol</span><svg class="ic"><use href="icons.svg#i-chevron-right"/></svg></summary>
               <ul class="listbox">
@@ -115,14 +115,23 @@ npm test *</textarea>
                 <li><svg class="ic"><use href="icons.svg#i-check"/></svg>GPT-6-Luna</li>
                 <li class="off"><svg class="ic"><use href="icons.svg#i-check"/></svg>GPT-5.6-Sol</li>
               </ul></details></div></div>
-          <div class="sc"><div class="sc-text"><span>推論の強さ</span></div><div class="sc-val">xhigh まで</div></div>
-          <div class="sc"><div class="sc-text"><span>上限を超えたとき</span></div><div class="sc-val">止めて報告が届く</div></div>
-          <div class="sc"><div class="sc-text"><span>始める前の許可</span></div><div class="sc-val">新しい依頼で要る（30 分で取り消し）</div></div>
-          <div class="sc"><div class="sc-text"><span>続きの依頼</span></div><div class="sc-val">できる</div></div>
+          <div class="sc"><div class="sc-text"><span>推論の強さの上限</span></div>
+            <div class="sc-ctl"><select class="ro" tabindex="0" aria-readonly="true"><option>xhigh</option></select></div></div>
+          <div class="sc"><div class="sc-text"><span>始める前の許可</span></div>
+            <div class="sc-ctl"><div class="combo-box ro" style="width:10em"><span class="summary">新しい依頼</span><svg class="ic"><use href="icons.svg#i-chevron-right"/></svg></div>
+              <label class="row"><input class="ro" type="number" value="30" readonly> 分で取り消し</label></div></div>
+          <div class="sc"><div class="sc-text"><span>続きの依頼</span></div>
+            <div class="sc-ctl"><label class="switch ro"><span>オン</span><input type="checkbox" checked aria-readonly="true" onclick="return false"><span class="track"></span></label></div></div>
+          <div class="sc"><div class="sc-text"><span>Web 検索</span></div>
+            <div class="sc-ctl"><label class="switch ro"><span>オフ</span><input type="checkbox" aria-readonly="true" onclick="return false"><span class="track"></span></label></div></div>
+          <div class="sc"><div class="sc-text"><span>画像の生成</span></div>
+            <div class="sc-ctl"><label class="switch ro"><span>オン</span><input type="checkbox" checked aria-readonly="true" onclick="return false"><span class="track"></span></label></div></div>
+          <div class="sc"><div class="sc-text"><span>上限を超えたとき</span></div>
+            <div class="sc-ctl"><span class="seg ro"><label><input type="radio" name="yf" checked disabled>止めて報告させる</label><label><input type="radio" name="yf" disabled>すぐ強制終了</label></span></div></div>
         </div>
       </details>
 
-      <details class="sx">
+      <details class="sx entity">
         <summary>
           <div class="sc-text"><span class="card-head"><span class="dot ok"></span><b>suzuki</b><span class="tag warn">コマンド: すべて自動</span></span><span class="d">待機中</span></div>
           <svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg>
@@ -134,10 +143,10 @@ npm test *</textarea>
           </div>
         </summary>
       </details>
-      <details class="sx">
+      <details class="sx entity">
         <summary><div class="sc-text"><span class="card-head"><span class="dot warn"></span><b>tanaka</b><span class="tag warn">古い版: モデルを選べません</span></span><span class="d">準備中</span></div><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></summary>
       </details>
-      <details class="sx">
+      <details class="sx entity">
         <summary><div class="sc-text"><span class="card-head"><span class="dot"></span><b>sato</b></span><span class="d">未接続・最後 11/17 22:10</span></div><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></summary>
       </details>
     </div>
@@ -170,17 +179,16 @@ npm test *</textarea>
     </ul>
     <div class="task-detail">
       <div class="td-head"><h3>t12 テストを直す</h3><button class="danger sm">中止</button></div>
-      <div class="td-status"><span class="status"><span class="dot ok"></span>作業中</span><span class="sub">5 分</span></div>
-      <div class="td-who"><span>yamada</span><span class="td-meta">GPT-6.1-Terra・high<span class="tag" title="途中で GPT-6.1-Sol から切り替わりました（理由 highRiskCyberActivity）">GPT-6.1-Sol から切り替え</span></span></div>
-      <p class="quote">web のテストが落ちているので直してください。</p>
-      <ol class="log scroll">
-        <li class="state"><span class="time">14:20</span><span>受け付けました</span></li>
-        <li><span class="time">14:21</span><span>テストを走らせて、落ちている 3 件を確かめます。</span></li>
-        <li class="state"><span class="time">14:22</span><span>コマンド実行: npm test</span></li>
-        <li><span class="time">14:22</span><span>parser の 2 件は、空行の扱いが変わったためです。</span></li>
-        <li class="state"><span class="time">14:23</span><span>コマンド実行の承認待ち: npm test -- --runInBand src/parser</span></li>
-        <li><span class="time">14:24</span><span>承認されました。もう一度走らせます。</span></li>
-        <li class="state"><span class="time">14:25</span><span>ファイルを変更: src/parser/lines.ts</span></li>
+      <div class="td-line"><span class="state-label ok">作業中</span><span><b>yamada</b> が担当・5 分</span></div>
+      <p class="td-meta">GPT-6.1-Terra・high<span class="tag" title="途中で GPT-6.1-Sol から切り替わりました（理由 highRiskCyberActivity）">GPT-6.1-Sol から切り替え</span></p>
+      <ol class="thread">
+        <li class="msg"><div class="msg-head"><b>あなた</b><span class="time">14:20</span></div><p>web のテストが落ちているので直してください。</p></li>
+        <li class="ev"><span class="time">14:20</span>yamada が受け付けました</li>
+        <li class="msg"><div class="msg-head"><b>yamada</b><span class="time">14:21</span></div><p>テストを走らせて、落ちている 3 件を確かめます。</p></li>
+        <li class="ev"><span class="time">14:22</span>コマンド実行: npm test</li>
+        <li class="msg"><div class="msg-head"><b>yamada</b><span class="time">14:22</span></div><p>parser の 2 件は、空行の扱いが変わったためです。</p></li>
+        <li class="ev"><span class="time">14:23</span>あなたがコマンド実行を許可: npm test -- --runInBand src/parser</li>
+        <li class="ev"><span class="time">14:25</span>ファイルを変更: src/parser/lines.ts</li>
       </ol>
       <div class="row"><input style="flex:1" placeholder="追加の指示"><button class="secondary">送る</button></div>
     </div>
@@ -240,13 +248,13 @@ npm test *</textarea>
 <section class="section">
   <div class="section-head"><h2><svg class="ic"><use href="icons.svg#i-users"/></svg>依頼主</h2><span class="sub">作業は全員合わせて同時に 1 つです</span></div>
   <div class="settings">
-    <details class="sx" open>
+    <details class="sx entity" open>
       <summary>
         <div class="sc-text"><span class="card-head"><span class="dot ok"></span><b>hanako</b></span><span class="d">100.64.0.1・作業中 t12「テストを直す」</span></div>
         <svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg>
       </summary>
       <div class="sx-items">
-        <div class="sc"><div class="sc-text"><span>使わせるモデル</span></div>
+        <div class="sc"><div class="sc-text"><span>使えるモデル</span></div>
           <div class="sc-ctl"><div class="combo-box" style="width:16em"><span class="summary">GPT-6.1-Sol ほか 6 個</span><svg class="ic"><use href="icons.svg#i-chevron-right"/></svg></div></div></div>
         <div class="sc"><div class="sc-text"><span>推論の強さの上限</span></div>
           <div class="sc-ctl"><select><option>xhigh（おすすめ）</option><option>high</option><option>max</option></select></div></div>
@@ -258,11 +266,11 @@ npm test *</textarea>
                 <li><label><input type="checkbox">追加の指示</label></li>
               </ul></div></div>
             <label class="row"><input type="number" value="30"> 分で取り消し</label></div></div>
-        <div class="sc"><div class="sc-text"><span>続きの依頼を受ける</span></div>
+        <div class="sc"><div class="sc-text"><span>続きの依頼</span></div>
           <div class="sc-ctl"><label class="switch"><span>オン</span><input type="checkbox" checked><span class="track"></span></label></div></div>
-        <div class="sc"><div class="sc-text"><span>Web 検索を使わせる</span></div>
+        <div class="sc"><div class="sc-text"><span>Web 検索</span></div>
           <div class="sc-ctl"><label class="switch"><span>オフ</span><input type="checkbox"><span class="track"></span></label></div></div>
-        <div class="sc"><div class="sc-text"><span>画像の生成を使わせる</span></div>
+        <div class="sc"><div class="sc-text"><span>画像の生成</span></div>
           <div class="sc-ctl"><label class="switch"><span>オン</span><input type="checkbox" checked><span class="track"></span></label></div></div>
         <div class="sc"><div class="sc-text"><span>この画面に出す記録</span></div>
           <div class="sc-ctl"><div class="combo">
@@ -273,10 +281,10 @@ npm test *</textarea>
           <div class="sc-ctl"><button class="secondary sm">招待コードを入れ直す</button><button class="danger sm">外す</button></div></div>
       </div>
     </details>
-    <details class="sx">
+    <details class="sx entity">
       <summary><div class="sc-text"><span class="card-head"><span class="dot warn"></span><b>jiro</b></span><span class="d">100.64.0.7・つなぎ直し中</span></div><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></summary>
     </details>
-    <details class="sx">
+    <details class="sx entity">
       <summary><div class="sc-text"><span class="card-head"><span class="dot bad"></span><b>mika</b></span><span class="d">100.64.0.9・招待コードが無効です</span></div><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></summary>
     </details>
     <details class="sx add">
@@ -294,11 +302,14 @@ npm test *</textarea>
       <li><span class="t-title">t08 グラフを作る</span><span class="t-meta"><span class="status"><span class="dot bad"></span>拒否</span><span>jiro</span></span></li>
     </ul>
     <div class="task-detail">
-      <div class="td-head"><h3>t12 テストを直す</h3></div>
-      <div class="td-status"><span class="status"><span class="dot ok"></span>作業中</span><span class="sub">5 分</span></div>
-      <div class="td-who"><span>hanako</span><span class="td-meta">GPT-6.1-Sol・high</span></div>
-      <p class="quote">web のテストが落ちているので直してください。</p>
-      <ol class="log scroll"><li class="state"><span class="time">14:20</span><span>受け付けました</span></li><li><span class="time">14:21</span><span>テストを走らせて、落ちている 3 件を確かめます。</span></li></ol>
+      <div class="td-head"><h3>t12 テストを直す</h3><button class="danger sm">中止</button></div>
+      <div class="td-line"><span class="state-label ok">作業中</span><span>5 分</span></div>
+      <p class="td-meta">GPT-6.1-Sol・high</p>
+      <ol class="thread">
+        <li class="msg"><div class="msg-head"><b>hanako</b><span class="time">14:20</span></div><p>web のテストが落ちているので直してください。</p></li>
+        <li class="ev"><span class="time">14:20</span>あなたが許可しました</li>
+        <li class="msg"><div class="msg-head"><b>Codex</b><span class="time">14:21</span></div><p>テストを走らせて、落ちている 3 件を確かめます。</p></li>
+      </ol>
     </div>
   </div>
 </section>
