@@ -164,6 +164,74 @@ table.list tr:has(+ tr.detail-row) td { border-bottom: 0; }
 .choices label:has(input:checked) { background: var(--accent-soft); }
 .note-warn { font-size: 12.5px; color: var(--warn); }
 
+/* ---- entity cards (one lender / one host per card; summary always visible, all its settings inside) ---- */
+.cards { display: grid; gap: 12px; }
+.card { border: 1px solid var(--line); border-radius: var(--r-sec); background: var(--surface); }
+.card > summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 16px; padding: 14px 16px; color: var(--ink); }
+.card > summary::before { display: none; }
+.card-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.card-title b { font-size: 15px; }
+.card-title .addr { font-size: 12.5px; color: var(--muted); }
+.card-task { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-toggle { display: flex; align-items: center; gap: 6px; color: var(--accent); font-size: 13px; }
+.card-toggle .ic { transition: transform .15s; }
+.card[open] .card-toggle .ic { transform: rotate(90deg); }
+.card-bars { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 32px; }
+.card-bars .meter + .meter { margin-top: 0; }
+.card-body { border-top: 1px solid var(--line); padding: 16px; display: grid; gap: 20px; }
+.card-body .group-title { font-size: 12.5px; color: var(--muted); margin-bottom: 4px; }
+.card-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.card.add > summary { color: var(--accent); grid-template-columns: auto; }
+.card.add { border-style: dashed; }
+
+/* label | value rows: one column of pairs, so nothing sits beside an empty area */
+.rows { display: grid; grid-template-columns: 9em minmax(0, 1fr); gap: 10px 16px; align-items: start; margin: 0; }
+/* the label lines up with the first line of the value: text values and controls have different heights */
+.rows > dt { color: var(--muted); font-size: 13px; line-height: 22px; padding-top: 5px; }
+.rows > dd { margin: 0; padding-top: 5px; }
+.rows > dd:has(> :is(input, select, textarea, .seg, .row, button):first-child),
+.rows > dd.row, .rows > dd.card-actions { padding-top: 0; }
+.rows > dd:has(> .chips:first-child) { padding-top: 2px; }
+
+/* segmented choice (2-4 short options in one line) */
+.seg { display: inline-flex; border: 1px solid #c9ced8; border-radius: var(--r-ctl); overflow: hidden; flex-wrap: wrap; }
+.seg label { padding: 4px 12px; border-left: 1px solid #c9ced8; cursor: pointer; font-size: 13px; display: flex; align-items: center; }
+.seg label:first-child { border-left: 0; }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg label:has(input:checked) { background: var(--accent); color: #fff; }
+.seg label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+.hint { font-size: 12.5px; color: var(--muted); margin-top: 4px; }
+
+/* chips (read-only list, or checkbox list) */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 14px; padding: 1px 10px; font-size: 13px; background: var(--surface); }
+.chip.default { border-color: var(--accent); }
+label.chip { cursor: pointer; }
+label.chip:has(input:checked) { background: var(--accent-soft); border-color: var(--accent); }
+label.chip input { margin: 0; }
+
+/* usage with the limit on the same line */
+.usage { display: grid; grid-template-columns: 2.5em minmax(120px, 1fr) 4.5em auto; align-items: center; gap: 10px 12px; }
+.usage .m-note { grid-column: 2 / 3; margin-top: -6px; }
+.usage .limit { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+
+/* log view */
+.log-tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+.log-tools .grow { flex: 1; min-width: 160px; }
+.log-view { font-family: var(--mono); font-size: 12.5px; background: #1c2029; color: #d8dde6; border-radius: var(--r-ctl);
+  padding: 8px 0; max-height: 420px; overflow: auto; }
+.log-view .ln { display: grid; grid-template-columns: 9em 3.5em 3.5em minmax(0, 1fr); gap: 12px; padding: 1px 12px; white-space: pre-wrap; word-break: break-all; }
+.log-view .ln .t { color: #8b93a3; }
+.log-view .ln.warn .lv { color: #f0b44c; } .log-view .ln.err .lv { color: #ff7b72; }
+.log-view .ln.err { background: rgba(255, 123, 114, .08); }
+
+/* tray menu (mock figure only) */
+.tray { justify-self: start; display: inline-grid; background: #2b2b2b; color: #f3f3f3; border-radius: 8px; padding: 6px 0; min-width: 260px; font-size: 13px; box-shadow: 0 6px 20px rgba(0,0,0,.25); }
+.tray .ti { padding: 6px 16px; }
+.tray .ti.state { color: #b9b9b9; font-size: 12px; }
+.tray .ti.main { font-weight: 700; }
+.tray hr { border: 0; border-top: 1px solid #444; margin: 4px 0; }
+
 /* ---- narrow screens ---- */
 @media (max-width: 720px) {
   .topbar-in, main { padding-left: 12px; padding-right: 12px; }
@@ -171,4 +239,10 @@ table.list tr:has(+ tr.detail-row) td { border-bottom: 0; }
   .section { padding: 16px; }
   .split, .tasks { grid-template-columns: minmax(0, 1fr); }
   .approval { grid-template-columns: minmax(0, 1fr); }
+  .card-bars { grid-template-columns: minmax(0, 1fr); }
+  .rows { grid-template-columns: minmax(0, 1fr); gap: 2px 0; }
+  .rows > dd { margin-bottom: 10px; }
+  .usage { grid-template-columns: 2.5em minmax(80px, 1fr) 4.5em; }
+  .usage .limit { grid-column: 2 / -1; }
+  .log-view .ln { grid-template-columns: minmax(0, 1fr); gap: 0; }
 }
