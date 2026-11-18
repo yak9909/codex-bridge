@@ -459,6 +459,21 @@ def test_build_makes_one_zip(tmp_path, monkeypatch):
     assert "\x0c" not in text
 
 
+def test_build_reports_a_locked_same_version_zip(tmp_path, monkeypatch):
+    build, _ = _fake_build_tree(tmp_path, monkeypatch, extra=["release/codex-bridge-v0.2.0.zip"])
+    locked = tmp_path / "release" / "codex-bridge-v0.2.0.zip"
+    real_unlink = Path.unlink
+
+    def unlink(self, *args, **kwargs):
+        if self == locked:
+            raise PermissionError(13, "Access is denied", str(self))
+        return real_unlink(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with pytest.raises(SystemExit) as raised:
+        build()
+    assert raised.value.code == "release\\codex-bridge-v0.2.0.zip が開かれています。7-Zip などを閉じてからもう一度実行してください。"
+
+
 def test_build_removes_same_version_split_zips_only(tmp_path, monkeypatch):
     keep = ["release/codex-bridge-admin-v0.1.0.zip", "release/old-build/keep.txt"]
     remove = ["release/codex-bridge-admin-v0.2.0.zip", "release/codex-bridge-friend-v0.2.0.zip"]
