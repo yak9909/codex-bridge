@@ -98,7 +98,7 @@ details.combo > .listbox { position: absolute; z-index: 10; top: calc(var(--ctl)
   border-radius: var(--r-ctl); background: var(--surface); cursor: pointer; }
 .combo-box .summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .combo-box .ic { color: var(--muted); transform: rotate(90deg); }
-.combo-pop { margin-top: var(--s1); border: 1px solid #c4cad5; border-radius: var(--r-ctl); background: var(--surface);
+.combo-pop { position: absolute; z-index: 10; left: 0; right: 0; top: calc(var(--ctl) + var(--s1)); border: 1px solid #c4cad5; border-radius: var(--r-ctl); background: var(--surface);
   box-shadow: 0 6px 20px rgba(0, 0, 0, .12); }
 .combo-pop input[type="search"] { width: 100%; border: 0; border-bottom: 1px solid var(--line); border-radius: var(--r-ctl) var(--r-ctl) 0 0; }
 .combo-pop ul { list-style: none; padding: var(--s1) 0; margin: 0; max-height: calc(6 * 36px); overflow: auto; }
@@ -223,6 +223,25 @@ table.list td { padding: var(--s3) var(--s4) var(--s3) 0; border-bottom: 1px sol
 table.list tr:last-child td { border-bottom: 0; }
 table.list .end { text-align: right; padding-right: 0; }
 
+/* ---- side panel + main list (invite and allowlist on the left, lenders on the right) ---- */
+.side-main { display: grid; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); gap: var(--s5); align-items: start; }
+.side { display: grid; gap: var(--s5); position: sticky; top: var(--s4); }
+.side .section { padding: var(--s4); }
+.side .section-head { margin-bottom: var(--s3); }
+.side h2 { font-size: var(--fs); }
+.side h2 .ic { width: 18px; height: 18px; }
+
+/* ---- task detail: status first and largest, then who, then quieter facts ---- */
+.td-head { display: flex; align-items: flex-start; gap: var(--s3); }
+.td-head h3 { flex: 1; font-size: var(--fs-h); line-height: 1.4; }
+.td-status { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
+.td-status .status { font-size: var(--fs); font-weight: 700; }
+.td-status .dot { width: 12px; height: 12px; }
+.td-who { display: flex; align-items: baseline; gap: var(--s2); flex-wrap: wrap; }
+.td-meta { font-size: var(--fs-sub); letter-spacing: 0; color: var(--muted); display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.quote { margin: 0; padding: var(--s3) var(--s4); background: var(--ground); border-radius: var(--r-ctl); white-space: pre-wrap; }
+.log.scroll { max-height: 240px; overflow: auto; }
+
 /* ---- tasks: list + detail ---- */
 .tasks { display: grid; grid-template-columns: minmax(260px, 320px) minmax(0, 1fr); gap: var(--s5); align-items: start; }
 .task-list { list-style: none; padding: 0; border: 1px solid var(--line); border-radius: var(--r-ctl); overflow: hidden; }
@@ -262,7 +281,8 @@ table.list .end { text-align: right; padding-right: 0; }
   .topbar-in { flex-wrap: wrap; gap: var(--s2) var(--s4); padding: var(--s2) var(--s4); }
   main { padding: var(--s4); gap: var(--s4); }
   .section, .approvals { padding: var(--s4); }
-  .meters, .tasks { grid-template-columns: minmax(0, 1fr); }
+  .meters, .tasks, .side-main { grid-template-columns: minmax(0, 1fr); }
+  .side-main > .side { order: 2; position: static; }
   .rows { grid-template-columns: minmax(0, 1fr); gap: var(--s1) 0; }
   .rows > dd { margin-bottom: var(--s3); }
   .approval { grid-template-columns: minmax(0, 1fr); }

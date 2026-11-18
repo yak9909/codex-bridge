@@ -7,7 +7,9 @@
     const out = [];
     const W = document.documentElement.clientWidth;
     if (document.documentElement.scrollWidth > W + 1) out.push(`page wider than window (${document.documentElement.scrollWidth} > ${W})`);
-    document.querySelectorAll(".split, .tasks, .lender-body").forEach((el) => {
+    // .side-main: a sticky side column stays in view while the main column scrolls, so its empty area below is expected;
+    // it is still reported (marked "sidebar") so the gap is a decision, not an accident.
+    document.querySelectorAll(".split, .tasks, .side-main").forEach((el) => {
       const kids = [...el.children].filter((c) => c.offsetParent !== null);
       if (kids.length < 2) return;
       // grid items stretch to the row height by default; measure their content instead
@@ -24,7 +26,8 @@
         const ratio = Math.min(...h) / Math.max(...h);
         if (ratio < 0.8) {
           const name = el.closest("section")?.querySelector("h2")?.textContent.trim() || el.className;
-          out.push(`${name}: columns ${h.map(Math.round).join("/")}px (ratio ${ratio.toFixed(2)})`);
+          const tag = el.classList.contains("side-main") ? " [sidebar]" : "";
+          out.push(`${name}${tag}: columns ${h.map(Math.round).join("/")}px (ratio ${ratio.toFixed(2)})`);
         }
       });
       el.style.alignItems = saved;
