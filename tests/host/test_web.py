@@ -661,7 +661,7 @@ async def test_lenders_api_lists_each_lender(admin, host):
     assert a["usage"]["five_hour"]["used_percent"] == 60 and a["usage"]["weekly"] is None
     assert a["usage"]["thresholds"] == {"five_hour": 90, "weekly": 95} and a["usage"]["blocked_until"] is None
     assert a["limits"] == {"five_hour": 70, "weekly": None, "force": True}
-    assert a["capabilities"] == {"resumable": True, "pre_approval": False}
+    assert a["capabilities"] == {"resumable": True, "pre_approval": False, "model_select": False}
     assert (a["agent_version"], a["codex_version"], a["auth_mode"]) == ("0.2.0", "x", "chatgpt")
     assert b["current_task_id"] is None and b["capabilities"]["resumable"] is False
     assert (await admin.get("/admin/api/lenders", headers={"Host": "evil.example:8770"})).status_code == 403

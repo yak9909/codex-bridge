@@ -8,10 +8,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Iterable
 
+from codex_bridge.common.protocol import EFFORT_ORDER
+
 SendFn = Callable[[dict], Awaitable[None]]
 WINDOWS = ("five_hour", "weekly")
 # A v0.1 agent sends no "protocol"/"capabilities" in hello: sessions can be continued, no pre-approval.
-V1_CAPABILITIES = {"resumable": True, "pre_approval": False}
+V1_CAPABILITIES = {"resumable": True, "pre_approval": False, "model_select": False}
 
 
 def _no_usage() -> dict:
@@ -30,6 +32,8 @@ class Lender:
     auth_mode: str | None = None
     protocol: int = 1
     capabilities: dict = field(default_factory=lambda: dict(V1_CAPABILITIES))
+    models: list[dict] | None = None  # unknown until an agent sends its model offer
+    max_effort: str | None = None
     limits: dict | None = None  # the lender's own limits: {five_hour, weekly, force}, via normalize_limits
     usage: dict = field(default_factory=_no_usage)
     current_task_id: str | None = None
@@ -72,6 +76,53 @@ def normalize_capabilities(raw) -> dict:
     Anything else (a v0.1 agent sends none at all) counts as v0.1."""
     raw = raw if isinstance(raw, dict) else {}
     return {k: raw[k] if isinstance(raw.get(k), bool) else default for k, default in V1_CAPABILITIES.items()}
+
+
+def normalize_models(raw) -> list[dict] | None:
+    """A lender's model offer, keeping valid entries from at most 200 items; None when not a list."""
+    if not isinstance(raw, list):
+        return None
+    out: list[dict] = []
+    for entry in raw[:200]:
+        if not isinstance(entry, dict) or not (model := as_text(entry.get("model"))):
+            continue
+        efforts = entry.get("efforts")
+        efforts = efforts if isinstance(efforts, list) else []
+        out.append({"model": model, "name": as_text(entry.get("name")) or model,
+                    "efforts": list(dict.fromkeys(v for v in efforts if isinstance(v, str))),
+                    "default_effort": as_text(entry.get("default_effort")),
+                    "is_default": entry.get("is_default") is True})
+    return out
+
+
+def normalize_effort(v) -> str | None:
+    """A known reasoning effort, or None for anything else."""
+    return v if isinstance(v, str) and v in EFFORT_ORDER else None
+
+
+def describe_models(models: list[dict] | None) -> str:
+    """The models and efforts a lender offers, for a refusal reason."""
+    return "、".join(f"{m['model']}（{'・'.join(m['efforts'])}）" for m in models) if models else "なし"
+
+
+def lender_accepts(lender: Lender, model: str | None, effort: str | None) -> str | None:
+    """None when the requested choice is offered; otherwise the reason it cannot be used."""
+    if model is None and effort is None:
+        return None
+    if not lender.capabilities.get("model_select"):
+        return f"「{lender.name}」の exe は v0.2 以前のため、モデルと推論の強さを指定できません。"
+    models = lender.models
+    if models is None:
+        return (f"「{lender.name}」のモデルの一覧がまだ届いていません（その人の Codex が起動すると届きます）。"
+                "少し待つか、モデルと推論の強さを指定せずに依頼してください。")
+    if model is not None:
+        target = next((m for m in models if m["model"] == model), None)
+    else:
+        target = next((m for m in models if m.get("is_default") is True), models[0] if models else None)
+    if target is None or (effort is not None and effort not in target["efforts"]):
+        return (f"「{lender.name}」は、指定のモデルと推論の強さを使わせていません。"
+                f"この人が使えるモデルと推論の強さ: {describe_models(models)}")
+    return None
 
 
 def moment(v) -> float | None:

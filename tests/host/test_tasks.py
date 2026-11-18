@@ -500,7 +500,7 @@ async def test_hello_without_current_task_id_leaves_a_queued_task_alone(mgr, age
                      protocol=2, capabilities={"resumable": False, "pre_approval": True})
     assert mgr.status(tid)["state"] == "queued" and mgr.current_task_id() == tid
     assert mgr.lenders()[0]["current_task_id"] == tid
-    assert mgr.agent_info()["capabilities"] == {"resumable": False, "pre_approval": True}  # it did take effect
+    assert mgr.agent_info()["capabilities"] == {"resumable": False, "pre_approval": True, "model_select": False}  # it did take effect
     with pytest.raises(ToolError, match="作業中"):
         await mgr.start("b")
     await agent.push("task_state", task_id=tid, state="running", thread_id="th1")

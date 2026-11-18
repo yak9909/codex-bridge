@@ -202,7 +202,7 @@ async def test_list_lenders(env):
     assert list(rows) == ["alice", "bob"]
     a, b = rows["alice"], rows["bob"]
     assert a["connected"] is True and a["ready"] is True and a["current_task_id"] == tid
-    assert a["capabilities"] == {"resumable": True, "pre_approval": True}
+    assert a["capabilities"] == {"resumable": True, "pre_approval": True, "model_select": False}
     assert a["limits"] == {"five_hour": 70, "weekly": None, "force": False}
     assert a["usage"]["five_hour"]["used_percent"] == 60 and a["usage"]["blocked_until"] is None
     assert (a["agent_version"], a["codex_version"], a["auth_mode"]) == ("0.2.0", "x", "chatgpt")

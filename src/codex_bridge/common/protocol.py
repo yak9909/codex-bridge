@@ -1,22 +1,26 @@
 """Messages between host and agent (JSON objects with a "type").
 
 host -> agent:
-  task_start{task_id, prompt, continue_thread_id}   task_followup{task_id, text}   task_cancel{task_id}
+  task_start{task_id, prompt, continue_thread_id, model?, effort?}
+  task_followup{task_id, text}   task_cancel{task_id}
   session_list{req_id}   session_read{req_id, thread_id}   session_delete{req_id, thread_id}
   settings{thresholds:{five_hour, weekly}, log_visibility}   ack{seq}
 agent -> host:
   hello{agent_version, codex_version, auth_mode, current_task_id}
     v0.2 adds: protocol: 2, capabilities{resumable, pre_approval}, limits{five_hour, weekly, force}
     (without them the host treats the agent as v0.1: sessions can be continued, no pre-approval)
+    v0.3 adds: protocol: 3, capabilities.model_select, models, max_effort
   event{seq, task_id, kind, data}            kind: started|agent_message|turn_completed|status|final_report|error
     v0.2 adds (design 4.10): plan{steps:[{step,status}]}  reasoning_summary{text}
     tool_started{tool,arguments}  tool_finished{tool,arguments,duration_ms,success,result_summary}
     token_usage{input,output} (one per turn)  progress{text} (the half-written message: no seq, at most every
     2 seconds, kept by the host in memory only). tool_finished replaces v0.1's tool_call, which the host still shows.
+    v0.3 adds: model{model, effort, rerouted_from?, reason?}
   usage{five_hour:{used_percent, resets_at}|null, weekly:{...}|null, ts}
   task_state{seq, task_id, state, thread_id, report, resume_at}
   reply{req_id, ok, data|error}
   lender_status{busy_elsewhere: bool} (v0.2; omitted by v0.1 agents)
+  lender_models{models, max_effort} (v0.3; sent without seq)
 Messages with "seq" are re-sent by the agent after a reconnect until acked; the host drops duplicates.
 """
 
@@ -27,13 +31,14 @@ import math
 
 HOST_TO_AGENT = {"task_start", "task_followup", "task_cancel", "session_list", "session_read",
                  "session_delete", "settings", "ack"}
-AGENT_TO_HOST = {"hello", "event", "usage", "task_state", "reply", "lender_status"}
+AGENT_TO_HOST = {"hello", "event", "usage", "task_state", "reply", "lender_status", "lender_models"}
 TYPES = HOST_TO_AGENT | AGENT_TO_HOST
 
 TASK_STATES = ("queued", "running", "completed", "suspended_quota", "failed", "cancelled", "agent_offline",
                "awaiting_lender", "rejected_by_lender")
 FINAL_STATES = ("completed", "suspended_quota", "failed", "cancelled", "rejected_by_lender")
 LOG_VISIBILITY = ("summary", "files", "all")
+EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 
 def msg(type_: str, **fields) -> dict:

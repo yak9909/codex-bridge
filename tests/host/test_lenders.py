@@ -4,6 +4,7 @@ import time
 
 import pytest
 
+from codex_bridge.host import lenders
 from codex_bridge.host.lenders import (Lender, normalize_capabilities, normalize_limits, normalize_window,
                                        pick_lender)
 from codex_bridge.host.paths import ToolError
@@ -150,15 +151,127 @@ def test_normalize_window(raw, expected):
 
 
 @pytest.mark.parametrize("raw, expected", [
-    ({"resumable": False, "pre_approval": True}, {"resumable": False, "pre_approval": True}),
-    ({"resumable": False}, {"resumable": False, "pre_approval": False}),
-    ({"resumable": "no", "pre_approval": 1, "extra": float("nan")}, {"resumable": True, "pre_approval": False}),
-    ({}, {"resumable": True, "pre_approval": False}),
-    (None, {"resumable": True, "pre_approval": False}),   # a v0.1 agent sends none
-    ("all", {"resumable": True, "pre_approval": False}),
+    ({"resumable": False, "pre_approval": True}, {"resumable": False, "pre_approval": True, "model_select": False}),
+    ({"resumable": False}, {"resumable": False, "pre_approval": False, "model_select": False}),
+    ({"resumable": "no", "pre_approval": 1, "extra": float("nan")},
+     {"resumable": True, "pre_approval": False, "model_select": False}),
+    ({}, {"resumable": True, "pre_approval": False, "model_select": False}),
+    (None, {"resumable": True, "pre_approval": False, "model_select": False}),   # a v0.1 agent sends none
+    ("all", {"resumable": True, "pre_approval": False, "model_select": False}),
 ])
-def test_normalize_capabilities_keeps_the_two_known_flags(raw, expected):
+def test_normalize_capabilities_keeps_the_known_flags(raw, expected):
     assert normalize_capabilities(raw) == expected
+
+
+def test_capabilities_keep_model_select():
+    assert normalize_capabilities({"model_select": True})["model_select"] is True
+    assert normalize_capabilities(None)["model_select"] is False
+    for value in (False, 1, "true", None):
+        assert normalize_capabilities({"model_select": value})["model_select"] is False
+
+
+def test_lender_model_data_starts_unknown():
+    lender = Lender(name="a")
+    assert lender.models is None and lender.max_effort is None
+    assert lender.capabilities["model_select"] is False
+
+
+def test_normalize_models_keeps_valid_entries():
+    raw = [{"model": "m1", "name": "M1", "efforts": ["low", "low", 3, "high"],
+            "default_effort": "low", "is_default": True}, {"model": ""}, "x"]
+    assert lenders.normalize_models(raw) == [
+        {"model": "m1", "name": "M1", "efforts": ["low", "high"], "default_effort": "low", "is_default": True}]
+
+
+def test_normalize_models_not_a_list_is_none():
+    assert lenders.normalize_models({"a": 1}) is None
+    for raw in (None, "m1", 1, True, ()):
+        assert lenders.normalize_models(raw) is None
+
+
+def test_normalize_models_fills_defaults_and_checks_field_types():
+    raw = [{"model": "m1"}, {"model": "m2", "name": 7, "efforts": "low", "default_effort": 7, "is_default": 1},
+           {"model": "m3", "name": "", "efforts": ["future", None, "", "future", False], "default_effort": "future"},
+           {}, {"model": None}, {"model": 3}, {"model": False}, None]
+    assert lenders.normalize_models(raw) == [
+        {"model": "m1", "name": "m1", "efforts": [], "default_effort": None, "is_default": False},
+        {"model": "m2", "name": "m2", "efforts": [], "default_effort": None, "is_default": False},
+        {"model": "m3", "name": "m3", "efforts": ["future", ""], "default_effort": "future", "is_default": False},
+    ]
+    assert lenders.normalize_models([]) == []
+
+
+def test_normalize_models_stops_after_200_items():
+    models = lenders.normalize_models([{"model": f"m{i}"} for i in range(201)])
+    assert [entry["model"] for entry in models] == [f"m{i}" for i in range(200)]
+
+
+def test_normalize_effort_keeps_only_known_values():
+    for effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
+        assert lenders.normalize_effort(effort) == effort
+    for value in (None, "", "HIGH", "future", 1, True, [], {}):
+        assert lenders.normalize_effort(value) is None
+
+
+def test_describe_models():
+    assert lenders.describe_models(None) == "なし"
+    assert lenders.describe_models([]) == "なし"
+    assert lenders.describe_models([{"model": "gpt-a", "efforts": ["low", "medium"]},
+                                   {"model": "gpt-b", "efforts": ["high"]}]) == "gpt-a（low・medium）、gpt-b（high）"
+
+
+def test_accepts_nothing_specified_even_v02():
+    assert lenders.lender_accepts(Lender(name="a"), None, None) is None
+
+
+@pytest.mark.parametrize("model, effort", [("m1", None), (None, "low"), ("m1", "low")])
+def test_accepts_v02_refuses_any_choice(model, effort):
+    reason = lenders.lender_accepts(Lender(name="a"), model, effort)
+    assert "v0.2 以前" in reason
+    assert reason == "「a」の exe は v0.2 以前のため、モデルと推論の強さを指定できません。"
+
+
+def test_accepts_no_list_yet():
+    lender = Lender(name="a", capabilities={"model_select": True}, models=None)
+    reason = lenders.lender_accepts(lender, "m1", None)
+    assert "まだ届いていません" in reason
+    assert reason == ("「a」のモデルの一覧がまだ届いていません（その人の Codex が起動すると届きます）。"
+                      "少し待つか、モデルと推論の強さを指定せずに依頼してください。")
+
+
+def test_accepts_unknown_model_lists_offer():
+    lender = Lender(name="a", capabilities={"model_select": True},
+                    models=[{"model": "m1", "efforts": ["low", "high"]}])
+    reason = lenders.lender_accepts(lender, "m2", None)
+    assert "m1（low・high）" in reason
+    assert reason == ("「a」は、指定のモデルと推論の強さを使わせていません。"
+                      "この人が使えるモデルと推論の強さ: m1（low・high）")
+    assert lenders.lender_accepts(lender, "m1", None) is None
+    assert lenders.lender_accepts(lender, "m1", "high") is None
+    assert lenders.lender_accepts(lender, "m1", "medium") == reason
+
+
+def test_accepts_effort_only_uses_default_model():
+    lender = Lender(name="a", capabilities={"model_select": True},
+                    models=[{"model": "m1", "efforts": ["low"]},
+                            {"model": "m2", "efforts": ["high"], "is_default": True}])
+    assert lenders.lender_accepts(lender, None, "high") is None
+    assert lenders.lender_accepts(lender, None, "low") is not None
+
+
+def test_accepts_effort_only_falls_back_to_first_model():
+    lender = Lender(name="a", capabilities={"model_select": True},
+                    models=[{"model": "m1", "efforts": ["low"]}, {"model": "m2", "efforts": ["high"]}])
+    assert lenders.lender_accepts(lender, None, "low") is None
+    assert lenders.lender_accepts(lender, None, "high") is not None
+
+
+def test_accepts_empty_offer_refuses_a_choice():
+    lender = Lender(name="a", capabilities={"model_select": True}, models=[])
+    for model, effort in (("m1", None), (None, "low")):
+        assert lenders.lender_accepts(lender, model, effort) == (
+            "「a」は、指定のモデルと推論の強さを使わせていません。この人が使えるモデルと推論の強さ: なし")
+    assert lenders.lender_accepts(lender, None, None) is None
 
 
 # ---- TaskManager with several lenders -----------------------------------
@@ -322,7 +435,7 @@ async def test_v1_agent_without_capabilities_is_resumable(mgr):
     await alice.push("hello", agent_version="0.1.0", codex_version="x", auth_mode="chatgpt", current_task_id=None)
     info = mgr.lenders()[0]
     assert info["name"] == "alice" and info["protocol"] == 1
-    assert info["capabilities"] == {"resumable": True, "pre_approval": False}
+    assert info["capabilities"] == {"resumable": True, "pre_approval": False, "model_select": False}
     t1 = await mgr.start("one")
     await alice.finish(t1, seq=1, thread_id="thA")
     await mgr.start("more", continue_task_id=t1)
@@ -335,7 +448,7 @@ async def test_hello_v2_records_capabilities_and_limits(mgr):
                      capabilities={"resumable": True, "pre_approval": True},
                      limits={"five_hour": 50, "weekly": 60, "force": False}, current_task_id=None)
     info = mgr.lenders()[0]
-    assert info["protocol"] == 2 and info["capabilities"] == {"resumable": True, "pre_approval": True}
+    assert info["protocol"] == 2 and info["capabilities"] == {"resumable": True, "pre_approval": True, "model_select": False}
     assert info["limits"] == {"five_hour": 50, "weekly": 60, "force": False}
     await alice.push("usage", **usage(five_hour=55))  # over alice's own limit, under the host's
     with pytest.raises(ToolError, match="再開可能"):
@@ -376,7 +489,8 @@ async def test_nothing_a_lender_sends_keeps_the_lists_from_being_json(mgr):
                      ts=NAN, friend_limits={"five_hour": INF, "weekly": NAN, "force": NAN}, extra=NAN)
     row = json.loads(json.dumps(mgr.lenders(), allow_nan=False))[0]
     assert (row["agent_version"], row["codex_version"], row["auth_mode"], row["protocol"]) == (None, None, None, 1)
-    assert row["capabilities"] == {"resumable": True, "pre_approval": False} and row["limits"] == NO_LIMITS
+    assert row["capabilities"] == {"resumable": True, "pre_approval": False, "model_select": False}
+    assert row["limits"] == NO_LIMITS
     assert row["usage"]["five_hour"] == {"used_percent": 10, "resets_at": None, "resets_at_local": None}
     assert set(row["usage"]["weekly"]) == {"used_percent", "resets_at", "resets_at_local"}
     assert row["usage"]["ts"] is None

@@ -191,7 +191,7 @@ def test_hello_says_protocol_2_what_this_agent_can_do_and_its_limits():
     assert h["limits"] == {"five_hour": 60, "weekly": None, "force": True}
     # what the host makes of it (host/lenders.py): the same, nothing dropped or turned around
     assert lenders.as_protocol(h["protocol"]) == 2
-    assert lenders.normalize_capabilities(h["capabilities"]) == h["capabilities"]
+    assert lenders.normalize_capabilities(h["capabilities"]) == {**h["capabilities"], "model_select": False}
     assert lenders.normalize_limits(h["limits"]) == h["limits"]
     h["limits"]["five_hour"] = 1  # a copy: the settings are not changed through it
     assert s["limits"]["five_hour"] == 60
