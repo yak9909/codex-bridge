@@ -9,14 +9,18 @@
 
 /* ---- the table of lenders ---- */
 .table-wrap { overflow-x: auto; }
-table.lenders { width: 100%; min-width: 980px; border-collapse: collapse; }
+table.lenders { width: 100%; min-width: 860px; border-collapse: collapse; }
 .lenders th { text-align: left; font-size: 12px; font-weight: 400; color: var(--muted); white-space: nowrap;
   padding: 0 14px 6px 0; border-bottom: 1px solid var(--line); }
 .lenders td { padding: 10px 14px 4px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
-.lenders td.usage { width: 40%; min-width: 340px; }
+.lenders td.usage { width: 30%; min-width: 260px; }
 .lenders td.empty { padding: 14px 0; }
 .lenders tr.off td { color: var(--muted); }
 .lenders .nowrap { white-space: nowrap; }
+details.model-list { white-space: normal; }
+details.model-list summary { cursor: pointer; color: var(--accent); font-size: 12px;
+  text-decoration: underline; white-space: nowrap; }
+details.model-list > div { max-width: 18em; white-space: normal; overflow-wrap: anywhere; }
 .lamp { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #c3c8d2; margin-right: 6px; }
 .lamp.on { background: #2fbf71; }
 .lender-foot { margin-top: 8px; }

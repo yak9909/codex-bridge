@@ -68,8 +68,11 @@ async function refreshTop() {
 
 function lenderRow(l, i) {
   const seen = l.since != null;  // has connected since the host started
+  const caps = l.capabilities;
   const about = [[l.agent_version && `exe ${l.agent_version}`, l.codex_version && `Codex ${l.codex_version}`]
-    .filter(Boolean).join("・"), l.auth_mode && `ログイン: ${l.auth_mode}`].filter(Boolean).map(esc).join("<br>");
+    .filter(Boolean).join("・"), l.auth_mode && `ログイン: ${l.auth_mode}`,
+    caps && `事前承認 ${caps.pre_approval ? "あり" : "なし"}・${caps.resumable ? "続けられる" : "使い捨て"}`]
+    .filter(Boolean).map(esc).join("<br>");
   const conn = l.connected
     ? `<span class="lamp on"></span>${l.ready ? "接続中" : "接続中（準備中）"}`
     : `<span class="lamp"></span>未接続<div class="small">${seen ? `最後の接続 ${UI.fmtTime(l.since)}` : "まだ接続していません"}</div>`;
@@ -80,10 +83,14 @@ function lenderRow(l, i) {
   const task = l.busy_elsewhere ? "ほかの依頼主の作業中" : l.current_task_id
     ? `<button type="button" class="link" data-task="${esc(l.current_task_id)}">${esc(l.current_task_id)}</button>`
     : seen ? "なし" : "—";
-  const caps = l.capabilities;
+  const defaultModel = l.models && l.models.find((m) => m.is_default === true);
   const models = !caps ? "—" : !caps.model_select ? "指定できません（古い版）"
     : l.models == null ? "一覧を待っています"
-    : l.models.map((m) => esc(m.name)).join("<br>") + `<div class="small">推論の強さ: 〜${esc(l.max_effort)}</div>`;
+    : (l.models.length ? `<details class="model-list" data-models="${esc(l.name)}"><summary>${defaultModel
+      ? `${esc(l.models.length)} 個（既定: ${esc(defaultModel.name || defaultModel.model)}）`
+      : `${esc(l.models.length)} 個`}</summary>
+      <div class="small">${l.models.map((m) => esc(m.name || m.model)).join("、")}</div></details>` : "なし")
+      + (l.max_effort ? `<div class="small">推論の強さ: 〜${esc(l.max_effort)}</div>` : "");
   const execModes = [["inherit", "全体と同じ"], ["off", "実行しない"], ["allowlist", "許可リストだけ自動"],
     ["ask", "毎回確認"], ["all", "すべて自動"]];
   return `<tr class="${l.connected ? "" : "off"}">
@@ -92,9 +99,7 @@ function lenderRow(l, i) {
     <td class="usage"><div data-m="${i}:five_hour" data-label="5 時間枠"></div><div data-m="${i}:weekly" data-label="週間枠"></div></td>
     <td class="nowrap">${limits}</td>
     <td class="nowrap">${task}</td>
-    <td class="nowrap">${!caps ? "—" : caps.pre_approval ? "あり" : "なし"}</td>
-    <td class="nowrap">${!caps ? "—" : caps.resumable ? "続けられる" : "使い捨て"}</td>
-    <td class="nowrap">${models}</td>
+    <td>${models}</td>
     <td><select data-exec="${esc(l.name)}" aria-label="${esc(l.name)} のコマンド実行">${execModes.map(([value, label]) =>
       `<option value="${esc(value)}"${value === (l.exec_mode || "inherit") ? " selected" : ""}>${esc(label)}</option>`).join("")}</select></td></tr>`;
 }
@@ -102,9 +107,11 @@ function lenderRow(l, i) {
 function drawLenders(rows, th) {
   const body = $("lenders"), sig = JSON.stringify([rows, th]);
   if (body._sig === sig || body.querySelector("select[data-exec]:focus")) return;
+  const openModels = new Set([...body.querySelectorAll("details.model-list[open]")].map((detail) => detail.dataset.models));
   body._sig = sig;
   body.innerHTML = rows.map(lenderRow).join("")
-    || '<tr><td colspan="9" class="empty">まだ誰もいません。下の「招待コード」で、Codex を貸してくれる人ごとにコードを発行してください。</td></tr>';
+    || '<tr><td colspan="7" class="empty">まだ誰もいません。下の「招待コード」で、Codex を貸してくれる人ごとにコードを発行してください。</td></tr>';
+  body.querySelectorAll("details.model-list").forEach((detail) => { detail.open = openModels.has(detail.dataset.models); });
   rows.forEach((l, i) => ["five_hour", "weekly"].forEach((k) => {
     const marks = [{ value: th[k], label: "依頼主", kind: "host" }];
     if (l.limits && l.limits[k] != null) marks.push({ value: l.limits[k], label: "貸している人", kind: "lender" });

@@ -166,9 +166,17 @@ async def test_admin_page_has_model_and_exec_controls(admin):
     page = (await admin.get("/admin/")).text
     assert 'id="req-model"' in page
     assert 'id="req-effort"' in page
+    assert "<th>事前承認</th>" not in page
+    assert "<th>続きの依頼</th>" not in page
     source = Path(__file__).resolve().parents[2] / "src/codex_bridge/host/web/static/app.js"
     js = source.read_text(encoding="utf-8")
     assert "data-exec" in js and "/exec-mode" in js
+    assert 'colspan="7"' in js
+    assert "事前承認 " in js
+    assert "model-list" in js
+    assert "個（既定:" in js
+    models = js.split("  const models =", 1)[1].split("  const execModes =", 1)[0]
+    assert '.join("<br>")' not in models
 
 
 async def test_invite_copy_feedback_is_served(admin):
