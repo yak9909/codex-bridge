@@ -8,7 +8,7 @@ from pathlib import Path, PureWindowsPath
 
 import yaml
 from fastapi import APIRouter, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from ...common.invite import make_invite
@@ -26,6 +26,7 @@ from .. import share as share_ops
 
 STATIC = Path(__file__).parent / "static"
 COMMON = Path(__file__).parents[2] / "common" / "web"  # UI parts shared with the lender's page
+APP_PAGE = COMMON / "app"  # the one-screen page (resident app; also /admin/ in the console way)
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 
@@ -40,13 +41,15 @@ def _guard(request: Request) -> None:
         raise HTTPException(403, "missing X-Codex-Bridge header")
 
 
-def admin_router(host) -> APIRouter:
+def admin_router(host, page_url: str | None = None) -> APIRouter:
     from fastapi import Depends
     r = APIRouter(prefix="/admin", dependencies=[Depends(_guard)])
 
     @r.get("/")
     async def index():
-        return FileResponse(STATIC / "index.html")
+        if page_url:
+            return RedirectResponse(page_url, status_code=302)
+        return FileResponse(APP_PAGE / "index.html")
 
     @r.get("/api/overview")
     async def overview():
@@ -373,6 +376,8 @@ def admin_router(host) -> APIRouter:
     return r
 
 
-def mount_static(app: FastAPI) -> None:
+def mount_static(app: FastAPI, page: bool = False) -> None:
+    if page:  # console way: the page's files come from here, there is no resident app
+        app.mount("/app/static", StaticFiles(directory=APP_PAGE), name="app-static")
     app.mount("/admin/static", StaticFiles(directory=STATIC), name="static")
     app.mount("/admin/common", StaticFiles(directory=COMMON), name="common")

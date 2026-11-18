@@ -48,7 +48,7 @@ def _wait_tailscale_ip() -> str:
 
 
 # ---- setup.bat ---------------------------------------------------------------
-def run_setup(config_path: Path, *, then_start: bool = False) -> None:
+def run_setup(config_path: Path, *, then_start: bool = False, from_app: bool = False) -> None:
     root = Path.cwd()
     config_path = Path(config_path).resolve()
     total = 5
@@ -92,9 +92,12 @@ def run_setup(config_path: Path, *, then_start: bool = False) -> None:
              "設定できませんでした。あとで setup.bat をもう一度実行してください。")
 
     _step(5, total, "完了")
-    _say("初期設定が終わりました。次にやること:")
+    if from_app:
+        _say("初期設定が終わりました。codex-bridge の画面に戻ってください。")
+    else:
+        _say("初期設定が終わりました。次にやること:")
     n = 0
-    if not then_start:
+    if not then_start and not from_app:
         n += 1
         _say(f"  {n}. start.bat（または exe をダブルクリックして「使う側」）で codex-bridge を起動する（管理画面が開きます）")
     n += 1
@@ -110,6 +113,8 @@ def run_setup(config_path: Path, *, then_start: bool = False) -> None:
         _say("次回からは、start.bat か、exe をダブルクリックして「使う側」を選ぶと起動できます。")
     if _yes("Tailscale の管理画面を開きますか？"):
         webbrowser.open("https://login.tailscale.com/admin/machines")
+    if from_app:
+        input("Enter キーを押すと閉じます。")  # the exit code 0 tells the app to start
     if then_start:
         _say()
         _say("このまま codex-bridge を起動します。"

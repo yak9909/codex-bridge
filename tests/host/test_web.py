@@ -163,7 +163,7 @@ async def test_admin_page_served(admin):
 
 
 async def test_admin_page_has_model_and_exec_controls(admin):
-    page = (await admin.get("/admin/")).text
+    page = (await admin.get("/admin/static/index.html")).text
     assert 'id="req-model"' in page
     assert 'id="req-effort"' in page
     assert "<th>事前承認</th>" not in page
@@ -192,7 +192,7 @@ async def test_shared_ui_parts_are_served_next_to_the_admin_page(admin, public):
     for part in ("meter", "stateBadge", "approvals", "taskList", "taskDetail", "choiceCards"):
         assert part in js
     assert "awaiting_lender" in js and "rejected_by_lender" in js
-    page = (await admin.get("/admin/")).text
+    page = (await admin.get("/admin/static/index.html")).text
     assert "/admin/common/ui.js" in page and "/admin/common/ui.css" in page
     assert (await public.get("/admin/common/ui.js")).status_code == 404
 
@@ -486,7 +486,7 @@ def test_folder_write_probe_cleans_up_after_close_error(tmp_path, monkeypatch):
 
 
 async def test_policy_problem_and_write_warning_banners(admin):
-    page = (await admin.get("/admin/")).text
+    page = (await admin.get("/admin/static/index.html")).text
     assert 'class="banner" id="policy-problem" role="alert" hidden' in page
     assert 'class="banner warn" id="folder-warning" role="status" hidden' in page
     node = shutil.which("node")

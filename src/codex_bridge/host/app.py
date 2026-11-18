@@ -128,7 +128,9 @@ def create_public_app(host: Host) -> FastAPI:
     return app
 
 
-def create_local_app(host: Host) -> FastAPI:
+def create_local_app(host: Host, page_url: str | None = None) -> FastAPI:
+    """page_url: the resident app's screen. Set, /admin/ redirects there; unset (console way), /admin/ serves
+    the same page itself and its files are mounted at /app/static."""
     from .web.app import admin_router, mount_static
 
     @asynccontextmanager
@@ -137,7 +139,7 @@ def create_local_app(host: Host) -> FastAPI:
             yield
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-    app.include_router(admin_router(host))
-    mount_static(app)
+    app.include_router(admin_router(host, page_url=page_url))
+    mount_static(app, page=page_url is None)
     app.mount("/claude", host.claude_ep.asgi)
     return app

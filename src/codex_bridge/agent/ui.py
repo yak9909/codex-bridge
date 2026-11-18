@@ -57,7 +57,7 @@ def create_ui_app(runner, settings: SettingsStore, client, *, versions: dict, da
 
     @app.exception_handler(RequestValidationError)
     async def invalid_body(request, error):
-        if request.url.path.startswith("/api/connections"):
+        if "/api/connections" in request.url.path:  # also under a mount prefix (/lend/api/connections)
             return JSONResponse({"detail": "招待コードや設定の形式が正しくありません"}, status_code=400)
         return await request_validation_exception_handler(request, error)
 

@@ -92,11 +92,13 @@ def main() -> None:
     ap.add_argument("command", nargs="?", default="serve", choices=["serve", "setup", "start", "stop", "install-mcp"])
     ap.add_argument("--config", default="host.yaml", type=Path)
     ap.add_argument("--then-start", action="store_true",
-                    help="setup のあと、同じ画面でそのまま起動する（exe の「使う側」用）")
+                    help="setup のあと、同じ画面でそのまま起動する（旧: exe の「使う側」用）")
+    ap.add_argument("--from-app", action="store_true",
+                    help="常駐アプリから開いた setup（終わったら画面に戻る案内を出し、起動はしない）")
     args = ap.parse_args()
     if args.command == "setup":
         from .setup_cli import run_setup
-        run_setup(args.config, then_start=args.then_start)
+        run_setup(args.config, then_start=args.then_start, from_app=args.from_app)
         return
     if args.command == "start":
         from .setup_cli import run_start

@@ -7,18 +7,15 @@ import os
 import shutil
 import subprocess
 import sys
-import threading
 import time
 import traceback
-import webbrowser
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urlsplit
-
-import uvicorn
 
 from .. import __version__
 from ..common.applog import AppLog
-from ..common.invite import Invite, make_invite, parse_invite
+from ..common.invite import parse_invite
 from ..common.protocol import FINAL_STATES
 from .appserver import AppServer, codex_command
 from .control_client import ControlClient
@@ -33,37 +30,11 @@ from .setup import (MIN_CODEX_VERSION, choose_codex, data_root, download_codex, 
 from .ui import create_ui_app
 from .worklog import WorkLog
 
-LOGVIEW_PORT = 8766
 TITLE = "codex-bridge"
 SHUTDOWN_TIMEOUT = 5.0
 
 
 # ---- small dialogs (tkinter) ---------------------------------------------
-def ask_invite() -> Invite | None:
-    import tkinter as tk
-    from tkinter import messagebox
-    result: dict = {}
-    root = tk.Tk()
-    root.title(f"{TITLE} の初期設定")
-    root.resizable(False, False)
-    tk.Label(root, text="依頼主から受け取った招待コードを貼り付けてください。", padx=16, pady=10).pack(anchor="w")
-    entry = tk.Entry(root, width=70)
-    entry.pack(padx=16)
-    entry.focus_set()
-
-    def ok() -> None:
-        try:
-            result["invite"] = parse_invite(entry.get())
-            root.destroy()
-        except ValueError as e:
-            messagebox.showerror(TITLE, str(e), parent=root)
-
-    tk.Button(root, text="OK", width=12, command=ok).pack(pady=12)
-    root.bind("<Return>", lambda e: ok())
-    root.mainloop()
-    return result.get("invite")
-
-
 def ask_yes_no(text: str) -> bool:
     import tkinter as tk
     from tkinter import messagebox
@@ -84,40 +55,6 @@ def show_info(text: str, error: bool = False) -> None:
     root.destroy()
 
 
-# ---- tray --------------------------------------------------------------
-class Tray:
-    def __init__(self, on_quit, on_pause_toggle) -> None:
-        import pystray
-        from PIL import Image, ImageDraw
-        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-        d = ImageDraw.Draw(img)
-        d.rounded_rectangle((4, 4, 60, 60), 14, fill=(47, 111, 222, 255))
-        d.text((18, 18), "CB", fill=(255, 255, 255, 255))
-        self.status = "起動中"
-        self.paused = False
-        self.icon = pystray.Icon("codex-bridge", img, TITLE, menu=pystray.Menu(
-            pystray.MenuItem(lambda item: f"状態: {self.status}", None, enabled=False),
-            pystray.MenuItem("画面を開く", lambda: webbrowser.open(f"http://127.0.0.1:{LOGVIEW_PORT}/"),
-                             default=True),
-            pystray.MenuItem(lambda item: "再開する" if self.paused else "一時停止する", lambda: on_pause_toggle()),
-            pystray.MenuItem("終了", lambda: on_quit()),
-        ))
-
-    def set_status(self, s: str) -> None:
-        self.status = s
-        self.icon.title = f"{TITLE}: {s}"
-        self.icon.update_menu()
-
-    def notify_pending(self, prompt: str) -> None:
-        try:
-            self.icon.notify(prompt[:200], "codex-bridge: 事前承認待ち")
-        except Exception:
-            pass
-
-    def run_detached(self) -> None:
-        threading.Thread(target=self.icon.run, daemon=True).start()
-
-
 # ---- main --------------------------------------------------------------
 def codex_version(cmd: list[str]) -> str:
     try:
@@ -131,8 +68,9 @@ def codex_version(cmd: list[str]) -> str:
 class AgentConnections:
     """Live objects for each stored host; all task admission goes through the runner's shared slot."""
 
-    def __init__(self, home: Path, *, app_factory, versions: dict, initial_backoff=1.0, on_log=None):
+    def __init__(self, home: Path, *, app_factory, versions: dict, initial_backoff=1.0, on_log=None, before_add=None):
         self.home = Path(home)
+        self.before_add = before_add  # async; runs first when a connection is added (the app resolves Codex here)
         self.on_log = on_log or (lambda m: None)
         self.store = ConnectionStore(home, on_log=self.on_log)  # migrate before projecting the shared store
         self.settings = SettingsStore(home / "settings.json", legacy_limits=home / "limits.json", shared=True)
@@ -292,6 +230,9 @@ class AgentConnections:
                 self._error("接続先の終了処理でエラーがありました", e)
 
     async def add(self, code):
+        parse_invite(code)  # a bad code must not start a Codex download
+        if self.before_add is not None:
+            await self.before_add()
         connection = self.store.add(code)
         self._install(connection)
         if self.started:
@@ -412,18 +353,57 @@ def applog_line(message: dict) -> tuple[str, str] | None:
     return None
 
 
-async def run_agent(invite: Invite | None, codex: Path, home: Path, applog: AppLog | None = None) -> bool:
-    """Runs all saved hosts until quit; True asks the exe to relaunch after moving its data."""
-    cmd = codex_command(codex)
-    store = LogStore(home / "logs")
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    relaunch = False
-    notified = None
+def resolve_codex(home: Path) -> Path | None:
+    """Find a usable Codex, or ask to download one. Blocks (dialogs, download): call it from a worker thread.
+    None means the user declined; a failed download raises."""
+    on_path = shutil.which("codex")
+    bundled = home / "bin" / "codex.exe"
+    codex = choose_codex(Path(on_path) if on_path else None, bundled if bundled.exists() else None)
+    if codex is not None:
+        return codex
+    need = ".".join(map(str, MIN_CODEX_VERSION))
+    if not ask_yes_no(f"Codex（コマンド版、{need} 以降）が見つからないか、古い版です。公式サイト"
+                      "（GitHub の openai/codex）から最新版をダウンロードしてよいですか？（約 200MB）\n"
+                      "※ あなたが普段使っている Codex には影響しません。"):
+        return None
+    return download_codex(home / "bin")
 
-    def factory(connection, current):
-        app = AppServer(cmd, connection.invite.url, connection.invite.token, resolve_workdir(current, home),
-                        disabled_mcp=user_mcp_names(), features=current["features"])
+
+class AgentRole:
+    """The lender's side inside the resident app. It runs with zero connections; Codex is resolved when the
+    first connection is added (or at start when there are connections already)."""
+
+    def __init__(self, home: Path, applog: AppLog, notify: Callable[[str, str], None]) -> None:
+        self.home, self.applog, self.notify = Path(home), applog, notify  # notify(title, body): a tray balloon
+        self.store = LogStore(self.home / "logs")
+        self.cmd: list[str] = []  # Codex command, known once resolved
+        self.error: str | None = None  # why Codex could not be set up, for the screen
+        self.moved = False  # the data was moved: the app must start again
+        self.on_moved: Callable[[], None] = lambda: None
+        self.versions = {"agent_version": __version__, "codex_version": "?", "auth_mode": "unknown"}
+        self._notified = None
+        self._codex_lock = asyncio.Lock()
+        self._watchdog: asyncio.Task | None = None
+        self.runtime = AgentConnections(self.home, app_factory=self._make_app, versions=self.versions,
+                                        on_log=self._on_log, before_add=self._before_add)
+
+    @property
+    def paused(self) -> bool:
+        return self.runtime.paused
+
+    async def set_paused(self, paused: bool) -> None:
+        await self.runtime.set_paused(paused)
+
+    def counts(self) -> tuple[int, int, int]:
+        """(borrowers connected, connections, approvals waiting) for the tray."""
+        rows = self.runtime.rows()
+        return (sum(bool(r["connected"]) for r in rows), len(rows),
+                sum(1 for r in self.runtime.runners.values() if r.pending_approval))
+
+    def _make_app(self, connection, current):
+        app = AppServer(self.cmd, connection.invite.url, connection.invite.token,
+                        resolve_workdir(current, self.home), disabled_mcp=user_mcp_names(),
+                        features=current["features"])
         original_start = app.start
 
         async def authenticated_start():
@@ -432,7 +412,7 @@ async def run_agent(invite: Invite | None, codex: Path, home: Path, applog: AppL
             if mode == "none":
                 await app.stop()
                 await asyncio.to_thread(show_info, "Codex にログインします。開いた画面の案内に従って ChatGPT でログインしてください。")
-                await asyncio.to_thread(run_login, cmd)
+                await asyncio.to_thread(run_login, self.cmd)
                 await original_start()
                 mode = await app.auth_mode()
                 if mode == "none":
@@ -440,78 +420,94 @@ async def run_agent(invite: Invite | None, codex: Path, home: Path, applog: AppL
         app.start = authenticated_start
         return app
 
-    def on_log(message):
-        nonlocal notified
+    def _on_log(self, message: dict) -> None:
         if message.get("type") in {"settings", "error"}:
-            store.add(message)
-        if applog is not None and (line := applog_line(message)) is not None:
-            applog.add("lend", *line)
+            self.store.add(message)
+        if (line := applog_line(message)) is not None:
+            self.applog.add("lend", *line)
         if message.get("type") == "task_state" and message.get("state") == "awaiting_lender":
-            runner = runtime.runners.get(message.get("connection_id"))
+            runner = self.runtime.runners.get(message.get("connection_id"))
             pending = runner.pending_approval if runner else None
             key = (runner.connection_id, pending["task_id"], pending["created"]) if pending else None
-            if key is not None and key != notified:
-                notified = key
-                tray.notify_pending(pending["prompt"])
+            if key is not None and key != self._notified:
+                self._notified = key
+                try:
+                    self.notify("codex-bridge: 事前承認待ち", pending["prompt"][:200])
+                except Exception:
+                    pass
 
-    versions = {"agent_version": __version__, "codex_version": codex_version(cmd), "auth_mode": "unknown"}
-    runtime = AgentConnections(home, app_factory=factory, versions=versions, on_log=on_log)
-    if invite is not None and not runtime.runners:
-        await runtime.add(make_invite(invite.url, invite.token, invite.name))
+    async def _ensure_codex(self) -> None:
+        if self.cmd:
+            return
+        async with self._codex_lock:
+            if self.cmd:
+                return
+            try:
+                codex = await asyncio.to_thread(resolve_codex, self.home)
+            except Exception as e:
+                raise RuntimeError(f"Codex をダウンロードできませんでした: {e}") from e
+            if codex is None:
+                raise RuntimeError("Codex が見つからないため、貸す人の接続を始められません")
+            cmd = codex_command(codex)
+            for runner in self.runtime.runners.values():
+                runner.app.codex_cmd = list(cmd)  # connections saved before Codex was known
+            self.cmd = cmd
+            self.versions["codex_version"] = await asyncio.to_thread(codex_version, cmd)
+            self.error = None
 
-    async def set_paused(paused):
-        await runtime.set_paused(paused)
-        tray.paused = paused
-        tray.icon.update_menu()
+    async def _before_add(self) -> None:
+        await self._ensure_codex()
+        if not self.runtime.started:
+            await self._begin()
 
-    def toggle_pause():
-        asyncio.run_coroutine_threadsafe(set_paused(not runtime.paused), loop)
+    async def _begin(self) -> None:
+        await self.runtime.start()
+        if self._watchdog is None:
+            self._watchdog = asyncio.create_task(self._watch())
 
-    tray = Tray(on_quit=lambda: loop.call_soon_threadsafe(stop.set), on_pause_toggle=toggle_pause)
-    tray.run_detached()
+    async def start(self) -> None:
+        if self.runtime.runners:
+            try:
+                await self._ensure_codex()
+            except RuntimeError as e:  # no runner starts; adding a connection tries again
+                self.error = str(e)
+                self.applog.add("lend", "error", self.error)
+                try:
+                    self.notify("codex-bridge", self.error)
+                except Exception:
+                    pass
+                return
+        await self._begin()
 
-    async def move_data(new):
-        nonlocal relaunch
-        left = await runtime.move_data(new)
-        relaunch = True
-        loop.call_later(1.0, stop.set)
-        return left
-
-    logview = make_ui_server(None, runtime.settings, None, versions=versions, data_root=home,
-                             connections=runtime, on_settings=runtime.apply_shared, on_move=move_data,
-                             on_pause=set_paused)
-
-    async def watchdog():
+    async def _watch(self) -> None:
         while True:
             await asyncio.sleep(5)
             try:
-                await runtime.settle()
+                await self.runtime.settle()
             except Exception as e:
-                store.add({"type": "error", "text": f"設定を反映できませんでした: {type(e).__name__}: {e}"})
-            tray.set_status("一時停止中" if runtime.paused else
-                            "作業中" if runtime.slot.owner else
-                            f"接続中 {sum(row['connected'] for row in runtime.rows())} 件")
+                self.store.add({"type": "error", "text": f"設定を反映できませんでした: {type(e).__name__}: {e}"})
 
-    tasks = []
-    try:
-        await runtime.start()
-        tasks = [asyncio.create_task(logview.serve()), asyncio.create_task(watchdog())]
-        await stop.wait()
-    finally:
+    async def stop(self) -> None:
+        if self._watchdog is not None:
+            self._watchdog.cancel()
+            await asyncio.gather(self._watchdog, return_exceptions=True)
+            self._watchdog = None
         try:
-            try:
-                await runtime.stop()
-            except Exception as e:
-                store.add({"type": "error", "text": f"終了処理でエラーがありました: {type(e).__name__}: {e}"})
-        finally:
-            logview.should_exit = True
-            for task in tasks[1:]:
-                task.cancel()
-            try:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            finally:
-                tray.icon.stop()
-    return relaunch
+            await self.runtime.stop()
+        except Exception as e:
+            self.store.add({"type": "error", "text": f"終了処理でエラーがありました: {type(e).__name__}: {e}"})
+
+    async def _move_data(self, new: Path):
+        left = await self.runtime.move_data(new)
+        self.moved = True
+        self.on_moved()
+        return left
+
+    def ui_app(self):
+        """The lender's local API (mounted at /lend in the resident app)."""
+        return create_ui_app(None, self.runtime.settings, None, versions=self.versions, data_root=self.home,
+                             connections=self.runtime, on_settings=self.runtime.apply_shared,
+                             on_move=self._move_data, on_pause=self.set_paused)
 
 
 def ensure_std_streams() -> None:
@@ -520,12 +516,6 @@ def ensure_std_streams() -> None:
         sys.stdout = open(os.devnull, "w", encoding="utf-8")
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
-
-
-def make_ui_server(runner, settings, client, **kwargs) -> uvicorn.Server:
-    # log_config=None: a windowed exe has no sys.stdout for uvicorn's logging setup.
-    return uvicorn.Server(uvicorn.Config(create_ui_app(runner, settings, client, **kwargs), host="127.0.0.1",
-                                         port=LOGVIEW_PORT, log_level="warning", log_config=None))
 
 
 def run_guarded(fn, home: Path):
@@ -541,13 +531,6 @@ def run_guarded(fn, home: Path):
                   f"お手数ですが、次のファイルを依頼主に送ってください:\n{log}", error=True)
 
 
-def main() -> None:
-    ensure_std_streams()
-    home = data_root()
-    if run_guarded(lambda: _main(home), home):
-        start_again()
-
-
 def start_again() -> None:
     """The data was moved (design 4.7): start the exe again so that it opens the new place."""
     if not getattr(sys, "frozen", False):
@@ -559,32 +542,3 @@ def start_again() -> None:
     subprocess.Popen([sys.executable, "agent"], env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}, close_fds=True,
                      creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
                      | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-
-
-def _main(home: Path) -> bool:
-    connections = ConnectionStore(home, on_log=LogStore(home / "logs").add)
-    invite = None
-    if not connections.list():
-        invite = ask_invite()
-        if invite is None:
-            return False
-        connections.add(make_invite(invite.url, invite.token, invite.name))
-    on_path = shutil.which("codex")
-    bundled = home / "bin" / "codex.exe"
-    codex = choose_codex(Path(on_path) if on_path else None, bundled if bundled.exists() else None)
-    if codex is None:
-        need = ".".join(map(str, MIN_CODEX_VERSION))
-        if not ask_yes_no(f"Codex（コマンド版、{need} 以降）が見つからないか、古い版です。公式サイト"
-                          "（GitHub の openai/codex）から最新版をダウンロードしてよいですか？（約 200MB）\n"
-                          "※ あなたが普段使っている Codex には影響しません。"):
-            return False
-        try:
-            codex = download_codex(home / "bin")
-        except Exception as e:
-            show_info(f"ダウンロードできませんでした: {e}", error=True)
-            return False
-    return asyncio.run(run_agent(invite, codex, home))
-
-
-if __name__ == "__main__":
-    main()

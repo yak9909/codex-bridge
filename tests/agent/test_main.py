@@ -9,29 +9,6 @@ from codex_bridge.agent import main as agent_main
 from codex_bridge.agent.settings import SettingsStore
 
 
-def test_logview_server_builds_without_console(tmp_path, monkeypatch):
-    # The windowed exe has no console: sys.stdout / sys.stderr are None.
-    monkeypatch.setattr(sys, "stdout", None)
-    monkeypatch.setattr(sys, "stderr", None)
-    server = agent_main.make_ui_server(SimpleNamespace(), SettingsStore(tmp_path / "settings.json"),
-                                       SimpleNamespace(), versions={}, data_root=tmp_path)
-    assert server.config.port == agent_main.LOGVIEW_PORT
-    assert server.config.host == "127.0.0.1" and server.config.log_config is None
-
-
-def test_tray_notification_and_os_failure_do_not_interrupt_task():
-    sent = []
-    tray = object.__new__(agent_main.Tray)
-    tray.icon = SimpleNamespace(notify=lambda body, title: sent.append((body, title)))
-    tray.notify_pending("承認してください")
-    assert sent == [("承認してください", "codex-bridge: 事前承認待ち")]
-
-    def fail(*args):
-        raise OSError("notifications disabled")
-    tray.icon.notify = fail
-    tray.notify_pending("test")  # Windows notification policy cannot fail the request
-
-
 def test_ensure_std_streams_fills_missing_streams(monkeypatch):
     monkeypatch.setattr(sys, "stdout", None)
     monkeypatch.setattr(sys, "stderr", None)
@@ -53,66 +30,61 @@ def test_crash_is_written_to_log_and_reported(tmp_path, monkeypatch):
     assert shown and "crash.log" in shown[0]
 
 
-def test_unreadable_legacy_invite_asks_for_a_new_code_and_starts(tmp_path, monkeypatch):
-    from codex_bridge.agent.connections import ConnectionStore
-    from codex_bridge.common.invite import Invite
+def make_role(tmp_path, monkeypatch=None):
+    from codex_bridge.common.applog import AppLog
+    notices = []
+    role = agent_main.AgentRole(tmp_path, AppLog(tmp_path / "logs" / "app.jsonl"),
+                                lambda title, body: notices.append((title, body)))
+    return role, notices
+
+
+def test_unreadable_legacy_invite_is_reported_and_the_role_still_builds(tmp_path):
     original = b"not a DPAPI invite"
     (tmp_path / "invite.bin").write_bytes(original)
-    invited, started = [], []
-    invite = Invite("http://new.invalid", "new-token", "friend")
-
-    def ask():
-        invited.append(True)
-        return invite
-
-    async def run(invite, codex, home):
-        started.append((codex, home))
-        assert ConnectionStore(home).list()[0].invite == invite
-        return False
-
-    monkeypatch.setattr(agent_main, "ask_invite", ask)
-    monkeypatch.setattr(agent_main, "choose_codex", lambda *args: tmp_path / "codex.exe")
-    monkeypatch.setattr(agent_main, "run_agent", run)
-    assert agent_main._main(tmp_path) is False
-    assert invited == [True] and started == [(tmp_path / "codex.exe", tmp_path)]
+    role, _ = make_role(tmp_path)
+    assert role.runtime.rows() == []
     assert (tmp_path / "invite.bin").read_bytes() == original
     assert "読めません" in (tmp_path / "logs" / "log.jsonl").read_text(encoding="utf-8")
 
 
-async def test_run_agent_stops_the_tray_even_if_runtime_cleanup_raises(tmp_path, monkeypatch):
-    stopped, refs = [], {}
-
+async def test_role_stops_even_if_runtime_cleanup_raises(tmp_path, monkeypatch):
     class Runtime:
         def __init__(self, *args, **kwargs):
-            self.runners = {"existing": None}
+            self.runners = {"existing": SimpleNamespace(app=SimpleNamespace())}
             self.settings = None
 
         async def start(self):
             pass
 
-        async def apply_shared(self, saved):
-            pass
-
         async def stop(self):
             raise OSError("cleanup failed")
 
-    def tray(on_quit, on_pause_toggle):
-        refs["quit"] = on_quit
-        return SimpleNamespace(run_detached=lambda: None,
-                               icon=SimpleNamespace(stop=lambda: stopped.append("tray")))
+    monkeypatch.setattr(agent_main, "AgentConnections", Runtime)
+    monkeypatch.setattr(agent_main, "resolve_codex", lambda home: tmp_path / "fake.exe")
+    monkeypatch.setattr(agent_main, "codex_version", lambda cmd: "fake")
+    role, _ = make_role(tmp_path)
+    await role.start()
+    await role.stop()
+    assert "cleanup failed" in (tmp_path / "logs" / "log.jsonl").read_text(encoding="utf-8")
 
-    def server(*args, **kwargs):
-        async def serve():
-            refs["quit"]()
-        return SimpleNamespace(serve=serve, should_exit=False)
+
+async def test_no_runner_starts_while_codex_is_missing(tmp_path, monkeypatch):
+    started = []
+
+    class Runtime:
+        def __init__(self, *args, **kwargs):
+            self.runners = {"existing": SimpleNamespace(app=SimpleNamespace())}
+            self.started = False
+
+        async def start(self):
+            started.append(True)
 
     monkeypatch.setattr(agent_main, "AgentConnections", Runtime)
-    monkeypatch.setattr(agent_main, "Tray", tray)
-    monkeypatch.setattr(agent_main, "make_ui_server", server)
-    monkeypatch.setattr(agent_main, "codex_version", lambda cmd: "fake")
-    assert await asyncio.wait_for(agent_main.run_agent(None, tmp_path / "fake.exe", tmp_path), 1) is False
-    assert stopped == ["tray"]
-    assert "cleanup failed" in (tmp_path / "logs" / "log.jsonl").read_text(encoding="utf-8")
+    monkeypatch.setattr(agent_main, "resolve_codex", lambda home: None)  # the user declined the download
+    role, notices = make_role(tmp_path)
+    await role.start()
+    assert started == [] and "Codex" in role.error and notices
+    assert "Codex" in role.applog.entries(side="lend")[-1]["text"]
 
 
 async def test_login_guide_keeps_event_loop_responsive(tmp_path, monkeypatch):
@@ -146,7 +118,7 @@ async def test_login_guide_keeps_event_loop_responsive(tmp_path, monkeypatch):
         def __init__(self, home, *, app_factory, **kwargs):
             connection = SimpleNamespace(invite=Invite("http://host.invalid", "tok", "friend"))
             self.app = app_factory(connection, defaults())
-            self.runners, self.settings = {"existing": None}, None
+            self.runners, self.settings = {"existing": SimpleNamespace(app=SimpleNamespace())}, None
 
         async def apply_shared(self, saved):
             pass
@@ -157,15 +129,6 @@ async def test_login_guide_keeps_event_loop_responsive(tmp_path, monkeypatch):
         async def stop(self):
             await self.app.stop()
 
-    def tray(on_quit, on_pause_toggle):
-        refs["quit"] = on_quit
-        return SimpleNamespace(run_detached=lambda: None, icon=SimpleNamespace(stop=lambda: None))
-
-    def server(*args, **kwargs):
-        async def serve():
-            refs["quit"]()
-        return SimpleNamespace(serve=serve, should_exit=False)
-
     async def respond_while_guide_is_open():
         while not opened.is_set():
             await asyncio.sleep(0)
@@ -174,15 +137,16 @@ async def test_login_guide_keeps_event_loop_responsive(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_main, "AppServer", lambda *args, **kwargs:
                         SimpleNamespace(start=start, stop=stop, auth_mode=auth_mode))
     monkeypatch.setattr(agent_main, "AgentConnections", Runtime)
-    monkeypatch.setattr(agent_main, "Tray", tray)
-    monkeypatch.setattr(agent_main, "make_ui_server", server)
+    monkeypatch.setattr(agent_main, "resolve_codex", lambda home: tmp_path / "fake.exe")
     monkeypatch.setattr(agent_main, "codex_version", lambda cmd: "fake")
     monkeypatch.setattr(agent_main, "user_mcp_names", lambda: [])
     monkeypatch.setattr(agent_main, "show_info", show_info)
     monkeypatch.setattr(agent_main, "run_login", login)
     response = asyncio.create_task(respond_while_guide_is_open())
     try:
-        assert await asyncio.wait_for(agent_main.run_agent(None, tmp_path / "fake.exe", tmp_path), 5) is False
+        role, _ = make_role(tmp_path)
+        await asyncio.wait_for(role.start(), 5)
+        await asyncio.wait_for(role.stop(), 5)
         await response
     finally:
         released.set()
