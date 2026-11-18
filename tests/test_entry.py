@@ -4,6 +4,7 @@ import ast
 import io
 import sys
 import runpy
+import subprocess
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,27 @@ import pytest
 from codex_bridge import entry
 from codex_bridge.agent import main as agent_main
 from codex_bridge.host import main as host_main
+
+
+def test_entry_hook_dispatch_skips_console(monkeypatch):
+    from codex_bridge import hook
+
+    unexpected = Mock(side_effect=AssertionError("hook must skip the console and dialog"))
+    monkeypatch.setattr(entry, "attach_console", unexpected)
+    monkeypatch.setattr(entry, "choose_role", unexpected)
+    hook_main = Mock(return_value=7)
+    monkeypatch.setattr(hook, "main", hook_main)
+    assert entry.main(["hook", "codex"]) == 7
+    hook_main.assert_called_once_with(["codex"])
+    unexpected.assert_not_called()
+
+
+def test_python_m_codex_bridge_hook():
+    result = subprocess.run([sys.executable, "-m", "codex_bridge", "hook", "codex", "--port", "1"],
+                            input=b"{}", capture_output=True, timeout=20)
+    assert result.returncode == 0
+    assert result.stdout == b""
+    assert result.stderr == b""
 
 
 @pytest.fixture

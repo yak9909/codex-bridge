@@ -143,6 +143,9 @@ def _run_host(argv: list[str], directory: Path | None = None, *, from_dialog: bo
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "hook":
+        from .hook import main as hook_main
+        return hook_main(argv[1:])
     if not argv:
         role = choose_role()
         if role is None:
