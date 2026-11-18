@@ -29,6 +29,32 @@
       });
       el.style.alignItems = saved;
     });
+    // type and space must come from the scale (spec 0.6)
+    const TYPE = new Set([14, 16, 20]);
+    const SPACE = new Set([0, 4, 8, 12, 16, 24, 32, 48]);
+    const badType = new Map(), badSpace = new Map();
+    document.querySelectorAll("main *, header *").forEach((e) => {
+      if (e.closest(".mock-tab, svg") || e.offsetParent === null) return;
+      const cs = getComputedStyle(e);
+      const hasText = [...e.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim());
+      const fs = parseFloat(cs.fontSize);
+      if (hasText && !TYPE.has(fs)) badType.set(fs, (badType.get(fs) || 0) + 1);
+      const props = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "marginTop", "marginBottom", "marginLeft", "marginRight"];
+      if (/flex|grid/.test(cs.display)) props.push("rowGap", "columnGap");
+      const typed = e.computedStyleMap ? e.computedStyleMap() : null;
+      props.forEach((p) => {
+        // auto margins (centering, pushing to the right) are not spacing choices
+        const css = p.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
+        if (p.startsWith("margin") && typed && String(typed.get(css)) === "auto") return;
+        const v = parseFloat(cs[p]);
+        if (!Number.isNaN(v) && !SPACE.has(Math.abs(v))) {
+          const key = `${p}=${v}`;
+          badSpace.set(key, (badSpace.get(key) || 0) + 1);
+        }
+      });
+    });
+    if (badType.size) out.push("type off-scale: " + [...badType].map(([k, n]) => `${k}px×${n}`).join(", "));
+    if (badSpace.size) out.push("space off-scale: " + [...badSpace].map(([k, n]) => `${k}×${n}`).join(", "));
     document.body.setAttribute("data-check", out.length ? out.join(" | ") : "OK");
   });
 })();
