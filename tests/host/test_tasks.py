@@ -43,6 +43,185 @@ async def agent(mgr):
     return a
 
 
+@pytest.fixture
+async def model_agent(mgr):
+    a = FakeAgent(mgr)
+    await a.push("hello", protocol=3, capabilities={"model_select": True},
+                 models=[{"model": "m1", "efforts": ["low", "high"], "is_default": True}], max_effort="xhigh")
+    return a
+
+
+async def test_hello_models_shown_in_lenders(mgr, model_agent):
+    row = mgr.lenders()[0]
+    assert row["models"][0]["model"] == "m1" and row["max_effort"] == "xhigh"
+    assert mgr.agent_info()["models"] == row["models"]
+    assert mgr.agent_info()["max_effort"] == "xhigh"
+    await model_agent.push("hello", protocol=2, capabilities={"resumable": True})
+    assert mgr.lenders()[0]["models"] is None and mgr.lenders()[0]["max_effort"] is None
+
+
+async def test_lender_models_message_updates_offer(mgr, model_agent):
+    changes = []
+    mgr.on_change.append(lambda: changes.append(mgr.lenders()[0]))
+    await model_agent.push("lender_models", models=[None, {"model": 7},
+                           {"model": "m2", "efforts": ["low", 3, "low"], "is_default": True}], max_effort="high")
+    assert len(changes) == 1
+    assert changes[0]["models"] == [{"model": "m2", "name": "m2", "efforts": ["low"],
+                                     "default_effort": None, "is_default": True}]
+    assert changes[0]["max_effort"] == "high"
+    await model_agent.push("lender_models", models={}, max_effort=3)
+    assert len(changes) == 2 and changes[-1]["models"] is None and changes[-1]["max_effort"] is None
+
+
+async def test_start_sends_model_and_effort(mgr, model_agent):
+    tid = await mgr.start("do it", model="m1", effort="high", origin="claude", session="caller-session")
+    msg = model_agent.last("task_start")
+    assert msg["model"] == "m1" and msg["effort"] == "high"
+    rec = mgr.tasks[tid]
+    assert (rec.origin, rec.session, rec.model, rec.effort) == ("claude", "caller-session", "m1", "high")
+    expected = {"origin": "claude", "model": "m1", "effort": "high", "actual_model": None,
+                "actual_effort": None, "rerouted": None}
+    for row in (mgr.status(tid), mgr.result(tid), mgr.list_tasks()[0]):
+        assert {k: row[k] for k in expected} == expected
+
+
+async def test_start_without_spec_sends_no_model_keys(mgr, model_agent):
+    await mgr.start("do it")
+    assert "model" not in model_agent.last("task_start")
+    assert "effort" not in model_agent.last("task_start")
+
+
+@pytest.mark.parametrize("model, effort", [("m2", None), ("m1", "ultra")])
+@pytest.mark.parametrize("busy", [False, True])
+async def test_named_lender_refuses_unoffered_model(mgr, model_agent, model, effort, busy):
+    if busy:
+        await mgr.start("already working")
+    with pytest.raises(ToolError, match="使えるモデルと推論の強さ"):
+        await mgr.start("do it", lender="friend", model=model, effort=effort)
+    assert len(mgr.tasks) == int(busy)
+
+
+async def test_v02_lender_refuses_model(mgr, agent):
+    await agent.push("hello", protocol=2, capabilities={"resumable": True})
+    with pytest.raises(ToolError, match="v0.2 以前"):
+        await mgr.start("do it", lender="friend", model="m1")
+    assert mgr.tasks == {}
+
+
+async def test_auto_pick_only_among_accepting(mgr):
+    a, b = FakeAgent(mgr, "A"), FakeAgent(mgr, "B")
+    for agent, model, used in ((a, "m1", 10), (b, "m2", 60)):
+        await agent.push("hello", protocol=3, capabilities={"model_select": True},
+                         models=[{"model": model, "efforts": ["low", "high"], "is_default": True}],
+                         max_effort="xhigh")
+        await agent.push("usage", **usage(five_hour=used))
+    tid = await mgr.start("do it", model="m2")
+    assert mgr.tasks[tid].lender == "B" and b.last("task_start")["model"] == "m2"
+    assert "effort" not in b.last("task_start")
+    assert not [m for m in a.sent if m["type"] == "task_start"]
+
+
+@pytest.mark.parametrize("model, effort", [("m2", None), (None, "ultra")])
+async def test_auto_pick_none_accepting_names_reasons(mgr, model_agent, model, effort):
+    old = FakeAgent(mgr, "old")
+    await old.push("hello", protocol=2)
+    with pytest.raises(ToolError) as exc:
+        await mgr.start("do it", model=model, effort=effort)
+    assert str(exc.value) == (
+        "指定のモデル（" + (model or "既定") + "）と推論の強さ（" + (effort or "既定")
+        + "）を使わせている人が、接続中の中にいません。"
+        "「friend」は、指定のモデルと推論の強さを使わせていません。"
+        "この人が使えるモデルと推論の強さ: m1（low・high） "
+        "「old」の exe は v0.2 以前のため、モデルと推論の強さを指定できません。")
+    assert mgr.tasks == {}
+
+
+@pytest.mark.parametrize("spec, expected", [({}, {"model": "m1", "effort": "high"}),
+                                           ({"model": "m1"}, {"model": "m1", "effort": None}),
+                                           ({"effort": "low"}, {"model": None, "effort": "low"})])
+async def test_continuation_inherits_model(mgr, model_agent, spec, expected):
+    first = await mgr.start("first", model="m1", effort="high")
+    await model_agent.push("event", task_id=first, kind="model", data={"model": "m9", "effort": "low"})
+    await model_agent.finish(first)
+    tid = await mgr.start("next", continue_task_id=first, **spec)
+    assert model_agent.last("task_start")["continue_thread_id"] == "th1"
+    for key, value in expected.items():
+        assert mgr.result(tid)[key] == value
+        if value is None:
+            assert key not in model_agent.last("task_start")
+        else:
+            assert model_agent.last("task_start")[key] == value
+
+
+async def test_continuation_rechecks_model_offer_before_busy(mgr, model_agent):
+    tid = await mgr.start("first", model="m1", effort="high")
+    await model_agent.finish(tid)
+    await model_agent.push("lender_models", models=[], max_effort="xhigh")
+    await mgr.start("already working")
+    with pytest.raises(ToolError, match="使えるモデルと推論の強さ"):
+        await mgr.start("next", continue_task_id=tid)
+
+
+async def test_model_event_sets_actual_and_rerouted(mgr, model_agent):
+    tid = await mgr.start("do it", model="m1", effort="high")
+    other = FakeAgent(mgr, "other")
+    await other.push("event", task_id=tid, kind="model", data={"model": "wrong"})
+    assert mgr.result(tid)["actual_model"] is None and mgr.events(tid) == []
+    data = {"model": "m9", "effort": "high", "rerouted_from": "m1", "reason": "x"}
+    await model_agent.push("event", task_id=tid, kind="model", data=data)
+    expected = {"model": "m1", "effort": "high", "actual_model": "m9", "actual_effort": "high",
+                "rerouted": {"from": "m1", "reason": "x"}}
+    for row in (mgr.result(tid), mgr.status(tid), mgr.list_tasks()[0]):
+        assert {k: row[k] for k in expected} == expected
+    assert mgr.events(tid)[0]["kind"] == "model" and mgr.events(tid)[0]["data"] == data
+    for invalid in (None, [], "model", {}, {"model": 3, "effort": False, "rerouted_from": 5},
+                    {"model": "", "effort": "", "rerouted_from": ""}):
+        await model_agent.push("event", task_id=tid, kind="model", data=invalid)
+        assert {k: mgr.result(tid)[k] for k in expected} == expected
+    await model_agent.push("event", task_id=tid, kind="model", data={"rerouted_from": "m2", "reason": 3})
+    assert mgr.result(tid)["rerouted"] == {"from": "m2", "reason": None}
+
+
+async def test_new_fields_survive_restart(tmp_path, mgr, model_agent):
+    tid = await mgr.start("do it", model="m1", effort="high", origin="codex", session="caller-session")
+    await model_agent.push("event", task_id=tid, kind="model",
+                           data={"model": "m9", "effort": "high", "rerouted_from": "m1", "reason": "x"})
+    mgr.tasks[tid].notified_final = True
+    mgr._save(mgr.tasks[tid])
+    again = TaskManager(tmp_path / "data", touched_fn=lambda tid: [])
+    rec = again.tasks[tid]
+    assert (rec.origin, rec.session, rec.model, rec.effort) == ("codex", "caller-session", "m1", "high")
+    assert (rec.actual_model, rec.actual_effort, rec.rerouted) == ("m9", "high", {"from": "m1", "reason": "x"})
+    assert rec.notified_final is True
+
+
+@pytest.mark.parametrize("state", protocol.FINAL_STATES)
+async def test_loaded_final_tasks_count_as_notified(tmp_path, mgr, model_agent, state):
+    completed = await mgr.start("completed")
+    await model_agent.push("task_state", task_id=completed, state=state)
+    running = await mgr.start("running")
+    await model_agent.push("task_state", task_id=running, state="running")
+    assert mgr.tasks[completed].notified_final is False
+    again = TaskManager(tmp_path / "data", touched_fn=lambda tid: [])
+    assert again.tasks[completed].notified_final is True
+    assert again.tasks[running].state == "agent_offline" and again.tasks[running].notified_final is False
+    assert json.loads((mgr.dir / f"{completed}.json").read_text(encoding="utf-8"))["notified_final"] is False
+
+
+@pytest.mark.parametrize("rerouted, expected", [(None, None), ([], None), ({"from": 3}, None),
+                                               ({"from": "m1", "reason": 3}, {"from": "m1", "reason": None})])
+@pytest.mark.parametrize("notified, expected_notified", [(True, True), (1, False), ("true", False), (False, False)])
+def test_loaded_new_fields_are_validated(tmp_path, rerouted, expected, notified, expected_notified):
+    tasks = tmp_path / "data" / "tasks"
+    tasks.mkdir(parents=True)
+    raw = {"task_id": "t1", "state": "running", "origin": 3, "session": [], "model": False, "effort": {},
+           "actual_model": 5, "actual_effort": True, "rerouted": rerouted, "notified_final": notified}
+    (tasks / "t1.json").write_text(json.dumps(raw), encoding="utf-8")
+    rec = TaskManager(tmp_path / "data", touched_fn=lambda tid: []).tasks["t1"]
+    assert (rec.origin, rec.session, rec.model, rec.effort, rec.actual_model, rec.actual_effort) == (None,) * 6
+    assert rec.rerouted == expected and rec.notified_final is expected_notified
+
+
 def usage(five_hour=None, weekly=None, resets_at=1_800_000_000):
     w = lambda p: None if p is None else {"used_percent": p, "resets_at": resets_at}
     return {"five_hour": w(five_hour), "weekly": w(weekly), "ts": 0}

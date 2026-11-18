@@ -554,6 +554,38 @@ async def test_send_followup_and_cancel_from_admin(admin, host):
     assert r.status_code == 200 and sent[-1]["continue_thread_id"] == "th"
 
 
+@pytest.mark.parametrize("spec, model, effort", [({"model": "m1"}, "m1", None),
+                                                ({"effort": "high"}, None, "high"),
+                                                ({"model": "m1", "effort": "high"}, "m1", "high"),
+                                                ({"model": "", "effort": ""}, None, None)])
+async def test_admin_send_task_with_model(admin, host, spec, model, effort):
+    sent = []
+
+    async def send(msg):
+        sent.append(msg)
+    await join(host, "friend", send, protocol=3, capabilities={"model_select": True},
+               models=[{"model": "m1", "efforts": ["low", "high"], "is_default": True}], max_effort="xhigh")
+    r = await admin.post("/admin/api/tasks", json={"prompt": "x", **spec}, headers=H)
+    assert r.status_code == 200, r.text
+    rec = host.mgr.tasks[r.json()["task_id"]]
+    assert rec.origin == "admin" and rec.model == model and rec.effort == effort
+    assert r.json() == {"task_id": rec.task_id, "lender": "friend", "model": model, "effort": effort}
+    for key, value in (("model", model), ("effort", effort)):
+        if value is None:
+            assert key not in sent[-1]
+        else:
+            assert sent[-1][key] == value
+
+
+@pytest.mark.parametrize("field", ["model", "effort"])
+@pytest.mark.parametrize("value", [3, None, False, [], {}])
+async def test_admin_send_task_bad_model_type(admin, host, field, value):
+    r = await admin.post("/admin/api/tasks", json={"prompt": "x", field: value}, headers=H)
+    assert r.status_code == 400
+    assert r.json()["detail"] == "モデルと推論の強さは名前で指定してください"
+    assert host.mgr.tasks == {}
+
+
 async def test_task_detail_has_what_the_page_shows(admin, host):
     # heading of the detail: who did it, when it started and ended (design 5); the record: plan and the rest
     link = await join(host, "alice")

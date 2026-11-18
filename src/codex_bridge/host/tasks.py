@@ -13,8 +13,9 @@ from typing import Callable, Iterable
 
 from ..common import protocol
 from ..common.protocol import FINAL_STATES, LOG_VISIBILITY, TASK_STATES
-from .lenders import (Lender, SendFn, as_protocol, as_text, blocked_until, moment, normalize_capabilities,
-                      normalize_limits, normalize_window, number, pick_lender)
+from .lenders import (Lender, SendFn, as_protocol, as_text, blocked_until, lender_accepts, moment,
+                      normalize_capabilities, normalize_effort, normalize_limits, normalize_models,
+                      normalize_window, number, pick_lender)
 from .paths import ToolError
 
 ACTIVE_STATES = ("queued", "running", "agent_offline", "awaiting_lender")  # awaiting_lender: the lender has not approved yet
@@ -52,6 +53,14 @@ class TaskRecord:
     lender: str | None = None  # invite name of the lender doing the task (None: a v0.1 record)
     finished: float | None = None  # when it reached a final state (None: still going, or an older record)
     guessed: bool = False  # "failed" is the host's own guess (the agent did not name the task in hello): the agent may still say how it ended
+    origin: str | None = None
+    session: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    actual_model: str | None = None
+    actual_effort: str | None = None
+    rerouted: dict | None = None
+    notified_final: bool = False
 
 
 def _known_state(v) -> str | None:
@@ -65,13 +74,20 @@ def _record(raw) -> TaskRecord | None:
     if not isinstance(raw, dict) or not as_text(raw.get("task_id")):
         return None
     state = _known_state(raw.get("state"))
+    rerouted = raw.get("rerouted")
+    rerouted = ({"from": rerouted["from"], "reason": as_text(rerouted.get("reason"))}
+                if isinstance(rerouted, dict) and isinstance(rerouted.get("from"), str) else None)
     return TaskRecord(
         task_id=raw["task_id"], prompt=as_text(raw.get("prompt")) or "", created=number(raw.get("created")) or 0.0,
         state=state or "failed", thread_id=as_text(raw.get("thread_id")),
         report=as_text(raw.get("report")) or (None if state else SPOILT), resume_at=moment(raw.get("resume_at")),
         continue_task_id=as_text(raw.get("continue_task_id")),
         state_before_offline=_known_state(raw.get("state_before_offline")), lender=as_text(raw.get("lender")),
-        finished=number(raw.get("finished")), guessed=raw.get("guessed") is True and state == "failed")
+        finished=number(raw.get("finished")), guessed=raw.get("guessed") is True and state == "failed",
+        origin=as_text(raw.get("origin")), session=as_text(raw.get("session")),
+        model=as_text(raw.get("model")), effort=as_text(raw.get("effort")),
+        actual_model=as_text(raw.get("actual_model")), actual_effort=as_text(raw.get("actual_effort")),
+        rerouted=rerouted, notified_final=raw.get("notified_final") is True)
 
 
 def _read_events(path: Path) -> list[dict]:
@@ -126,6 +142,8 @@ class TaskManager:
                 rec = None
             if rec is None:
                 continue  # not readable (cut off while being written, ...): left on disk, not listed
+            if rec.state in FINAL_STATES:
+                rec.notified_final = True
             if rec.state in ACTIVE_STATES:
                 if rec.state == "awaiting_lender":  # a pending approval is still pending when the agent comes back
                     rec.state_before_offline = rec.state
@@ -228,7 +246,8 @@ class TaskManager:
     def _info(l: Lender) -> dict:
         return {"connected": l.connected, "ready": l.ready, "since": l.since, "name": l.name,
                 "agent_version": l.agent_version, "codex_version": l.codex_version, "auth_mode": l.auth_mode,
-                "protocol": l.protocol, "capabilities": dict(l.capabilities)}
+                "protocol": l.protocol, "capabilities": dict(l.capabilities),
+                "models": l.models, "max_effort": l.max_effort}
 
     def agent_info(self, lender: str | None = None) -> dict:
         """Without a name: the latest connection (the single-lender view). With a name: that lender
@@ -272,6 +291,8 @@ class TaskManager:
                 as_text(m.get(k)) for k in ("agent_version", "codex_version", "auth_mode"))
             lender.protocol = as_protocol(m.get("protocol"))
             lender.capabilities = normalize_capabilities(m.get("capabilities"))
+            lender.models = normalize_models(m.get("models"))
+            lender.max_effort = normalize_effort(m.get("max_effort"))
             limits = normalize_limits(m.get("limits"))
             if limits is not None:
                 lender.limits = limits
@@ -279,6 +300,10 @@ class TaskManager:
                 self._reconcile(lender, m.get("current_task_id"))
             lender.ready = True
             await lender.send(self._settings_msg())
+            self._changed()
+        elif t == "lender_models":
+            lender.models = normalize_models(m.get("models"))
+            lender.max_effort = normalize_effort(m.get("max_effort"))
             self._changed()
         elif t == "lender_status":
             if isinstance(m.get("busy_elsewhere"), bool):
@@ -296,7 +321,7 @@ class TaskManager:
         elif t == "event":
             # kept and shown as it comes, so: a kind in words, and no number in the data that JSON cannot carry
             task_id, kind = as_text(m.get("task_id")), as_text(m.get("kind"))
-            if kind and self._own_task(lender, task_id):
+            if kind and (rec := self._own_task(lender, task_id)):
                 if kind == "progress":  # the half-written message: shown under "working", not part of the record
                     data = m.get("data")
                     text = data.get("text") if isinstance(data, dict) else None
@@ -306,6 +331,14 @@ class TaskManager:
                     return
                 if kind == "agent_message":
                     self._progress.pop(task_id, None)  # it is written now
+                if kind == "model":
+                    data = m.get("data")
+                    if isinstance(data, dict):
+                        rec.actual_model = as_text(data.get("model")) or rec.actual_model
+                        rec.actual_effort = as_text(data.get("effort")) or rec.actual_effort
+                        if rerouted_from := as_text(data.get("rerouted_from")):
+                            rec.rerouted = {"from": rerouted_from, "reason": as_text(data.get("reason"))}
+                        self._save(rec)
                 self._append_event(task_id, {"ts": time.time(), "kind": kind, "data": protocol.finite(m.get("data"))})
         elif t == "task_state":
             rec = self._own_task(lender, as_text(m.get("task_id")))
@@ -433,9 +466,9 @@ class TaskManager:
         if blocked:
             raise ToolError(QUOTA.format(iso_local(blocked)))
 
-    def _pick(self, now: float) -> Lender:
+    def _pick(self, now: float, among: list[Lender] | None = None) -> Lender:
         """Automatic routing (design §3.3): the free lender with the most headroom."""
-        online = self._connected()
+        online = among if among is not None else self._connected()
         lender = pick_lender(online, self.settings["thresholds"], now)
         if lender is not None:
             return lender
@@ -452,7 +485,8 @@ class TaskManager:
             raise ToolError(BUSY.format(", ".join(busy)))
         raise ToolError(NOT_READY.format("、".join(l.name for l in online)))
 
-    def _continue_target(self, prev: TaskRecord, lender: str | None, now: float) -> Lender:
+    def _continue_target(self, prev: TaskRecord, lender: str | None, now: float, *,
+                         model: str | None = None, effort: str | None = None) -> Lender:
         """The session lives in one lender's Codex, so a continuation can only go back there."""
         if prev.lender is None:  # a v0.1 record: there was only one lender then
             target = self._resolve(lender)
@@ -464,6 +498,9 @@ class TaskManager:
             if target is None or not target.connected or not self._invited(prev.lender):
                 raise ToolError(f"このタスクの会話を持つ「{prev.lender}」の agent が接続されていません。{RETRY_FRESH}")
         self._ready(target)
+        reason = lender_accepts(target, model, effort)
+        if reason:
+            raise ToolError(reason)
         if not target.capabilities.get("resumable", True):
             raise ToolError(f"「{target.name}」は使い捨てのセッションで動いているため、会話が残っていません。{RETRY_FRESH}")
         if not prev.thread_id:
@@ -471,7 +508,9 @@ class TaskManager:
         self._require_free(target, now, advice=RETRY_FRESH)
         return target
 
-    async def start(self, prompt: str, continue_task_id: str | None = None, lender: str | None = None) -> str:
+    async def start(self, prompt: str, continue_task_id: str | None = None, lender: str | None = None, *,
+                    model: str | None = None, effort: str | None = None,
+                    origin: str | None = None, session: str | None = None) -> str:
         if self.check_start:
             self.check_start()
         if not self._connected():
@@ -480,21 +519,35 @@ class TaskManager:
         thread_id = None
         if continue_task_id:
             prev = self._get(continue_task_id)
-            target = self._continue_target(prev, lender, now)
+            if model is None and effort is None:
+                model, effort = prev.model, prev.effort
+            target = self._continue_target(prev, lender, now, model=model, effort=effort)
             thread_id = prev.thread_id
         elif lender is not None:
             target = self._ready(self._resolve(lender))
+            reason = lender_accepts(target, model, effort)
+            if reason:
+                raise ToolError(reason)
             self._require_free(target, now)
+        elif model is not None or effort is not None:
+            online = self._connected()
+            among = [l for l in online if lender_accepts(l, model, effort) is None]
+            if not among:
+                reasons = [lender_accepts(l, model, effort) for l in online]
+                raise ToolError("指定のモデル（" + (model or "既定") + "）と推論の強さ（" + (effort or "既定")
+                                + "）を使わせている人が、接続中の中にいません。" + " ".join(reasons))
+            target = self._pick(now, among)
         else:
             target = self._pick(now)
         task_id = time.strftime("t%Y%m%d-%H%M%S") + f"-{next(self._task_ids)}"
         rec = TaskRecord(task_id=task_id, prompt=prompt, created=now, continue_task_id=continue_task_id,
-                         lender=target.name)
+                         lender=target.name, origin=origin, session=session, model=model, effort=effort)
         self.tasks[task_id] = rec
         self._events[task_id] = []
         target.last_assigned = now
         self._save(rec)  # also marks the lender as working
-        await target.send(protocol.msg("task_start", task_id=task_id, prompt=prompt, continue_thread_id=thread_id))
+        spec = {k: v for k, v in (("model", model), ("effort", effort)) if v is not None}
+        await target.send(protocol.msg("task_start", task_id=task_id, prompt=prompt, continue_thread_id=thread_id, **spec))
         return task_id
 
     async def _send_for(self, rec: TaskRecord, m: dict) -> None:
@@ -529,6 +582,8 @@ class TaskManager:
         rec = self._get(task_id)
         return {
             "task_id": rec.task_id, "state": rec.state, "lender": rec.lender, "thread_id": rec.thread_id,
+            "origin": rec.origin, "model": rec.model, "effort": rec.effort,
+            "actual_model": rec.actual_model, "actual_effort": rec.actual_effort, "rerouted": rec.rerouted,
             "resume_at": iso_local(rec.resume_at), "recent_events": self.events(task_id)[-15:],
             # the agent of this task's own lender; None for a v0.1 record, which names no lender
             "agent": self.agent_info(rec.lender) if rec.lender is not None else None,
@@ -538,6 +593,8 @@ class TaskManager:
         rec = self._get(task_id)
         return {
             "task_id": rec.task_id, "state": rec.state, "lender": rec.lender, "prompt": rec.prompt,
+            "origin": rec.origin, "model": rec.model, "effort": rec.effort,
+            "actual_model": rec.actual_model, "actual_effort": rec.actual_effort, "rerouted": rec.rerouted,
             "report": rec.report, "thread_id": rec.thread_id, "resume_at": iso_local(rec.resume_at),
             "created": rec.created, "finished": rec.finished,
             "changed_files": self.touched_fn(task_id), "event_count": len(self._events.get(task_id, [])),
@@ -545,6 +602,8 @@ class TaskManager:
 
     def list_tasks(self) -> list[dict]:
         return [{"task_id": r.task_id, "state": r.state, "lender": r.lender, "prompt": r.prompt[:200],
+                 "origin": r.origin, "model": r.model, "effort": r.effort,
+                 "actual_model": r.actual_model, "actual_effort": r.actual_effort, "rerouted": r.rerouted,
                  "created": r.created}
                 for r in sorted(self.tasks.values(), key=lambda r: r.created, reverse=True)]
 

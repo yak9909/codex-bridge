@@ -227,6 +227,8 @@ def admin_router(host) -> APIRouter:
     @r.post("/api/tasks")
     async def send_task(body: dict):
         """lender: the invite name of who gets the task; left out (or empty) the host picks by headroom."""
+        if any(k in body and not isinstance(body[k], str) for k in ("model", "effort")):
+            raise HTTPException(400, "モデルと推論の強さは名前で指定してください")
         prompt = str(body.get("prompt") or "").strip()
         if not prompt:
             raise HTTPException(400, "依頼の内容を書いてください")
@@ -234,10 +236,13 @@ def admin_router(host) -> APIRouter:
         if lender is not None and not isinstance(lender, str):  # 0, false, [] ... are not "automatic"
             raise HTTPException(400, "送り先は名前で指定してください")
         try:
-            task_id = await host.mgr.start(prompt, body.get("continue_task_id") or None, lender or None)
+            task_id = await host.mgr.start(prompt, body.get("continue_task_id") or None, lender or None,
+                                           model=body.get("model") or None, effort=body.get("effort") or None,
+                                           origin="admin")
         except ToolError as e:
             raise HTTPException(409, str(e))
-        return {"task_id": task_id, "lender": host.mgr.tasks[task_id].lender}
+        rec = host.mgr.tasks[task_id]
+        return {"task_id": task_id, "lender": rec.lender, "model": rec.model, "effort": rec.effort}
 
     @r.post("/api/tasks/{task_id}/followup")
     async def followup(task_id: str, body: dict):
