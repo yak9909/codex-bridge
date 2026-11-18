@@ -85,6 +85,14 @@ label.field > span { font-size: var(--fs-sub); color: var(--muted); letter-spaci
 .listbox li.off .ic { visibility: hidden; }
 .listbox li .tag { margin-left: auto; }
 
+/* field-level disclosure: one summary line, the long list only on demand */
+details.field-more > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: var(--s2); }
+details.field-more > summary::-webkit-details-marker { display: none; }
+details.field-more > summary .more { color: var(--accent); font-size: var(--fs-sub); letter-spacing: 0; display: inline-flex; align-items: center; gap: var(--s1); }
+details.field-more > summary .more .ic { width: 16px; height: 16px; transition: transform .15s; }
+details.field-more[open] > summary .more .ic { transform: rotate(90deg); }
+details.field-more > .listbox { margin-top: var(--s2); }
+
 /* multi-select combobox: closed = summary; open = search + check list */
 .combo { position: relative; max-width: 24em; }
 .combo-box { display: flex; align-items: center; gap: var(--s2); height: var(--ctl); padding: 0 var(--s3); border: 1px solid #c4cad5;
