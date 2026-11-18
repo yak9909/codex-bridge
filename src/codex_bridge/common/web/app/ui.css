@@ -284,3 +284,7 @@ table.grid .indent { padding-left: var(--s4); }
 .frame > .pane { overflow: hidden; }
 .empty-pane { padding: var(--s4); color: var(--muted); }
 .view { display: contents; }
+.work.no-alerts { grid-template-rows: minmax(0, 1fr); }
+.surface > [hidden] { display: none; }
+.empty-pane { display: grid; gap: var(--s3); justify-items: start; align-content: start; }
+.tl-body { white-space: pre-wrap; overflow-wrap: anywhere; }
