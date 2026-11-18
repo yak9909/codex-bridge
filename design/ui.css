@@ -175,6 +175,41 @@ label.chip:has(input:checked) { background: var(--accent-soft); border-color: va
 .card.add { border-style: dashed; }
 .card.add > summary { color: var(--accent); display: flex; align-items: center; gap: var(--s2); }
 
+/* ---- Windows settings pattern: SettingsExpander (header row + item rows) and SettingsCard (header left, control right) ---- */
+.settings { display: grid; gap: var(--s1); }
+.sc, .sx > summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--s3) var(--s4);
+  min-height: 64px; padding: var(--s3) var(--s4); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-ctl); }
+.sc-text { display: grid; gap: 0; min-width: 0; }
+.sc-text .d { font-size: var(--fs-sub); line-height: 1.6; letter-spacing: 0; color: var(--muted); }
+.sc-ctl { display: flex; align-items: center; gap: var(--s2); justify-content: flex-end; flex-wrap: wrap; }
+.sc-val { text-align: right; }
+.sx > summary { list-style: none; cursor: pointer; }
+.sx > summary::-webkit-details-marker { display: none; }
+.sx > summary .chev { color: var(--muted); transition: transform .15s; }
+.sx[open] > summary { border-radius: var(--r-ctl) var(--r-ctl) 0 0; }
+.sx[open] > summary .chev { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .sx > summary .chev { transition: none; } }
+.sx > summary .sx-extra { grid-column: 1 / -1; }
+.sx-items { border: 1px solid var(--line); border-top: 0; border-radius: 0 0 var(--r-ctl) var(--r-ctl); background: var(--surface); }
+.sx-items .sc { border: 0; border-top: 1px solid var(--line); border-radius: 0; padding-left: var(--s6); }
+.sx-items .sc:first-child { border-top: 0; }
+.sx-items .sub-head { padding: var(--s3) var(--s4) 0 var(--s6); font-size: var(--fs-sub); letter-spacing: 0; color: var(--muted); border-top: 1px solid var(--line); }
+.sx.add > summary { color: var(--accent); border-style: dashed; }
+
+/* toggle switch */
+.switch { display: inline-flex; align-items: center; gap: var(--s2); cursor: pointer; }
+.switch input { position: absolute; opacity: 0; pointer-events: none; }
+.switch .track { width: 40px; height: 20px; border-radius: 10px; border: 1px solid #8a93a3; background: var(--surface); position: relative; transition: background .15s; }
+.switch .track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: #5d6576; transition: left .15s; }
+.switch input:checked + .track { background: var(--accent); border-color: var(--accent); }
+.switch input:checked + .track::after { left: 23px; background: #fff; }
+.switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* read-only state of a selection control (carbon read-only states: transparent field, weaker border, muted signifier) */
+.combo-box.ro { background: transparent; border-color: var(--line); cursor: default; }
+details.combo > summary.combo-box.ro { cursor: pointer; }
+.combo-box.ro .ic { color: var(--idle); }
+
 /* ---- label | value rows (aligned on the text baseline; every control has the same height) ---- */
 .rows { display: grid; grid-template-columns: 10em minmax(0, 1fr); gap: var(--s3) var(--s4); align-items: baseline; }
 .rows > dt { font-size: var(--fs-sub); letter-spacing: 0; color: var(--muted); }

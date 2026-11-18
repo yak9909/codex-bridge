@@ -54,6 +54,8 @@
 
 - 貸す人の使えるモデルは展開式にする。最初から縦幅を取ってよいわけがない。
 
+- 「コンボボックスと同じ見え方」に直したあと: このようなウィジェットや表現の仕方はすでにあるはず。調べて、デザインを学ぶ。当たり前のことに気付けていないことが問題。
+
 根本の問題（2026-11-19 の振り返り）: 今ある機能と設定の一覧を、そのまま画面に写していた。見る人の立場から「誰が決めるものか」「全体か人ごとか」「その人は何を知りたいか」「数が増えても読めるか」「文でなく表示で示せないか」を一つずつ問い直していない。並べ方の点検（0.5 節）だけでは見つからない。画面を描く前に、中身の設計を見直す手順（0.8 節）を置く。
 
 ## 0.5 画面を作ったら毎回確かめること（作業の手順）
@@ -92,6 +94,25 @@
 - **自動の点検**: `check-layout.js` が、14px 未満の文字・決まりの外の大きさと余白を数える。
 
 ## 0.8 中身の設計（画面を描く前に毎回やる。2026-11-19 から）
+
+手順 0（2026-11-19 から、いちばん先にやる）: 部品と見せ方は、まず既存のデザインシステムの部品から選び、出典を書く。自分で作るのは、どれも合わないときだけで、そのときは「合うものがなかった」と理由を書く。引き方: component.gallery（部品の総覧・別名つき）→ 対象の OS や似た製品のデザインシステム（このアプリは Windows のトレイ常駐なので、まず Windows の設定の指針）→ Carbon・Primer・Atlassian・GOV.UK・SmartHR・デジタル庁。
+
+### 要素ごとの既存の部品（2026-11-19）
+
+| 要素 | 既存の部品 | 出典 |
+|---|---|---|
+| 貸す人・依頼主のカード | SettingsExpander（見出しの行を開くと、中に設定の行が並ぶ） | ms-app-settings-guidelines.md「Use a SettingsExpander when a setting has sub-options」, ms-settings-expander.md |
+| カードの中の設定 1 つ | SettingsCard（左に見出しと説明、右端に操作部品） | ms-app-settings-guidelines.md「Each card has a Header, an optional Description, an optional HeaderIcon, and an action control」 |
+| 相手が決めた値（見るだけ） | 同じ SettingsCard の右端に、値の文字。選択肢の集まりは、選択部品の読むだけの状態（権限で変えられない場合） | carbon-read-only-states.md:66-68「Permissions」、:84-90（背景は透明、枠を弱める、目印の色を落とす） |
+| 使わせるモデル（貸す人が選ぶ） | 検索つきの複数選択（MultiCombobox） | smarthr-selection-component-usage.md |
+| 2 択の設定 | トグル | ms-app-settings-guidelines.md「make use of binary (on/off) controls」 |
+| 使用量 | 進捗バー（ラベルは上、値はすぐ近く） | carbon-progress-bar.md:210 |
+| つながりの状態 | 状態のラベル（Lozenge） | atlassian-lozenge.md |
+| 承認待ち | 一覧と、項目ごとの操作 | （既存の承認キューの形。GOV.UK の summary list の行と操作に近い: govuk-summary-list.md） |
+| 招待コード | コードと「コピー」ボタン | （Carbon code snippet。原文は未取得） |
+| ログ | ログの表示（検索・絞り込み・書き出し） | docker-desktop-logs.md:1959-1995 |
+| トレイ | 通知領域のアイコン | ms-notification-area.md |
+| 保存 | 変えたらすぐ反映。確認のボタンを置かない（複数行の文の入力だけは、入力を終えたときに反映） | ms-app-settings-guidelines.md「don't require a confirmation button」 |
 
 手順（OOUI: gihyo-2020-ooui-sample.txt「単に名詞を機械的に抜き出すのではなく、ユーザーの関心の対象となる概念は何かを考えて」／コグニティブ・ウォークスルー: wikipedia-cognitive-walkthrough.md:140-146）:
 1. 見る人と、その人が来る理由（問い）を書く。

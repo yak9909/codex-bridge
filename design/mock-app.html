@@ -54,12 +54,13 @@
 
 <section class="section">
   <div class="section-head"><h2><svg class="ic"><use href="icons.svg#i-users"/></svg>貸す人</h2></div>
-  <div class="cards">
-    <details class="card" open>
+  <div class="settings">
+
+    <details class="sx" open>
       <summary>
-        <div class="card-head"><span class="dot ok"></span><b>yamada</b><span class="sub">作業中 t12「テストを直す」</span>
-          <span class="card-toggle">閉じる<svg class="ic"><use href="icons.svg#i-chevron-right"/></svg></span></div>
-        <div class="meters">
+        <div class="sc-text"><span class="card-head"><span class="dot ok"></span><b>yamada</b></span><span class="d">作業中 t12「テストを直す」</span></div>
+        <svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg>
+        <div class="sx-extra meters">
           <div class="meter"><div class="m-head"><span class="m-label">5時間</span><span class="m-val">45%</span></div>
             <div class="m-bar"><div class="m-fill" style="width:45%"></div><div class="m-mark" style="left:80%"></div></div>
             <div class="m-foot"><span>15:40 に戻る</span><span>上限 80%</span></div></div>
@@ -68,25 +69,18 @@
             <div class="m-foot"><span>11/19 03:00 に戻る</span></div></div>
         </div>
       </summary>
-      <div class="card-body">
-        <div>
-          <p class="group-title">あなたが決める</p>
-          <dl class="rows">
-            <dt>コマンド実行</dt>
-            <dd><select><option>実行しない</option><option selected>許可リストだけ自動</option><option>毎回承認</option><option>すべて自動</option></select></dd>
-            <dt>削除</dt>
-            <dd><select><option selected>承認待ちにする</option><option>承認なしで削除</option></select></dd>
-            <dt>相手に見せる記録</dt>
-            <dd><select><option selected>依頼文と報告だけ</option><option>道具の名前と対象まで</option><option>道具の結果まで</option></select></dd>
-            <dt>招待コード</dt>
-            <dd class="card-actions"><button class="secondary sm">発行し直す</button><button class="danger sm">取り消す</button></dd>
-          </dl>
-        </div>
-        <div>
-          <p class="group-title">yamada さんの設定</p>
-          <dl class="rows">
-            <dt>使えるモデル</dt>
-            <dd><details class="combo"><summary class="combo-box"><span class="summary">7 個（10 個中）・既定 GPT-6.1-Sol</span><svg class="ic"><use href="icons.svg#i-chevron-right"/></svg></summary>
+      <div class="sx-items">
+        <div class="sc"><div class="sc-text"><span>コマンド実行</span></div>
+          <div class="sc-ctl"><select><option>実行しない</option><option selected>許可リストだけ自動</option><option>毎回承認</option><option>すべて自動</option></select></div></div>
+        <div class="sc"><div class="sc-text"><span>削除の前に承認する</span></div>
+          <div class="sc-ctl"><label class="switch"><span>オン</span><input type="checkbox" checked><span class="track"></span></label></div></div>
+        <div class="sc"><div class="sc-text"><span>相手に見せる記録</span><span class="d">依頼文・発言・報告は、いつも見せます</span></div>
+          <div class="sc-ctl"><select><option selected>見せない</option><option>道具の名前と対象</option><option>道具の結果まで</option></select></div></div>
+        <div class="sc"><div class="sc-text"><span>招待コード</span><span class="d">11/10 発行</span></div>
+          <div class="sc-ctl"><button class="secondary sm">発行し直す</button><button class="danger sm">取り消す</button></div></div>
+        <p class="sub-head">yamada さんの設定</p>
+        <div class="sc"><div class="sc-text"><span>使えるモデル</span></div>
+          <div class="sc-ctl"><details class="combo" style="width:20em"><summary class="combo-box ro"><span class="summary">7 個・既定 GPT-6.1-Sol</span><svg class="ic"><use href="icons.svg#i-chevron-right"/></svg></summary>
             <ul class="listbox">
               <li><svg class="ic"><use href="icons.svg#i-check"/></svg>GPT-6.1-Sol<span class="tag accent">既定</span></li>
               <li><svg class="ic"><use href="icons.svg#i-check"/></svg>GPT-6.2-Sol</li>
@@ -98,21 +92,19 @@
               <li class="off"><svg class="ic"><use href="icons.svg#i-check"/></svg>GPT-5.6-Sol</li>
               <li class="off"><svg class="ic"><use href="icons.svg#i-check"/></svg>GPT-5.6-Terra</li>
               <li class="off"><svg class="ic"><use href="icons.svg#i-check"/></svg>GPT-5.6-Luna</li>
-            </ul></details></dd>
-            <dt>推論の強さ</dt><dd>xhigh まで</dd>
-            <dt>上限を超えたとき</dt><dd>止めて報告が届く</dd>
-            <dt>始める前の許可</dt><dd>要る（新しい依頼。30 分で取り消し）</dd>
-            <dt>続きの依頼</dt><dd>できる</dd>
-          </dl>
-        </div>
+            </ul></details></div></div>
+        <div class="sc"><div class="sc-text"><span>推論の強さ</span></div><div class="sc-val">xhigh まで</div></div>
+        <div class="sc"><div class="sc-text"><span>上限を超えたとき</span></div><div class="sc-val">止めて報告が届く</div></div>
+        <div class="sc"><div class="sc-text"><span>始める前の許可</span><span class="d">新しい依頼のとき</span></div><div class="sc-val">要る（30 分で取り消し）</div></div>
+        <div class="sc"><div class="sc-text"><span>続きの依頼</span></div><div class="sc-val">できる</div></div>
       </div>
     </details>
 
-    <details class="card">
+    <details class="sx">
       <summary>
-        <div class="card-head"><span class="dot ok"></span><b>suzuki</b><span class="sub">待機中</span><span class="tag warn">コマンド: すべて自動</span>
-          <span class="card-toggle">開く<svg class="ic"><use href="icons.svg#i-chevron-right"/></svg></span></div>
-        <div class="meters">
+        <div class="sc-text"><span class="card-head"><span class="dot ok"></span><b>suzuki</b><span class="tag warn">コマンド: すべて自動</span></span><span class="d">待機中</span></div>
+        <svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg>
+        <div class="sx-extra meters">
           <div class="meter"><div class="m-head"><span class="m-label">5時間</span><span class="m-val">8%</span></div>
             <div class="m-bar"><div class="m-fill" style="width:8%"></div></div><div class="m-foot"><span>16:20 に戻る</span></div></div>
           <div class="meter"><div class="m-head"><span class="m-label">週間</span><span class="m-val">31%</span></div>
@@ -121,38 +113,29 @@
       </summary>
     </details>
 
-    <details class="card">
+    <details class="sx">
       <summary>
-        <div class="card-head"><span class="dot warn"></span><b>tanaka</b><span class="sub">準備中</span><span class="tag warn">古い版: モデルを選べません</span>
-          <span class="card-toggle">開く<svg class="ic"><use href="icons.svg#i-chevron-right"/></svg></span></div>
-        <div class="meters">
-          <div class="meter"><div class="m-head"><span class="m-label">5時間</span><span class="m-val muted">—</span></div><div class="m-bar"></div><div class="m-foot"></div></div>
-          <div class="meter"><div class="m-head"><span class="m-label">週間</span><span class="m-val muted">—</span></div><div class="m-bar"></div><div class="m-foot"></div></div>
-        </div>
+        <div class="sc-text"><span class="card-head"><span class="dot warn"></span><b>tanaka</b><span class="tag warn">古い版: モデルを選べません</span></span><span class="d">準備中</span></div>
+        <svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg>
       </summary>
     </details>
 
-    <details class="card">
+    <details class="sx">
       <summary>
-        <div class="card-head"><span class="dot"></span><b>sato</b><span class="sub">未接続・最後 11/17 22:10</span>
-          <span class="card-toggle">開く<svg class="ic"><use href="icons.svg#i-chevron-right"/></svg></span></div>
-        <div class="meters">
-          <div class="meter"><div class="m-head"><span class="m-label">5時間</span><span class="m-val muted">—</span></div><div class="m-bar"></div><div class="m-foot"></div></div>
-          <div class="meter"><div class="m-head"><span class="m-label">週間</span><span class="m-val muted">—</span></div><div class="m-bar"></div><div class="m-foot"></div></div>
-        </div>
+        <div class="sc-text"><span class="card-head"><span class="dot"></span><b>sato</b></span><span class="d">未接続・最後 11/17 22:10</span></div>
+        <svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg>
       </summary>
     </details>
 
-    <details class="card add" open>
-      <summary><svg class="ic"><use href="icons.svg#i-key-round"/></svg>貸す人を招待</summary>
-      <div class="card-body">
-        <dl class="rows">
-          <dt>名前</dt><dd><input placeholder="例: kimura"></dd>
-          <dt>コマンド実行</dt><dd><select><option>実行しない</option><option selected>許可リストだけ自動</option><option>毎回承認</option><option>すべて自動</option></select></dd>
-          <dt></dt><dd><button>招待コードを発行</button></dd>
-          <dt>招待コード</dt><dd><div class="row"><code>cb1.eyJ1cmwiOiJodHRwOi8vMTAwLjY0LjAuMTo4NzY1In0.Zk3…</code><button class="secondary sm"><svg class="ic"><use href="icons.svg#i-copy"/></svg>コピー</button></div>
-            <p class="hint">kimura さんに渡してください。もう一度は表示できません。</p></dd>
-        </dl>
+    <details class="sx add" open>
+      <summary><div class="sc-text"><span class="row"><svg class="ic"><use href="icons.svg#i-key-round"/></svg>貸す人を招待</span></div><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></summary>
+      <div class="sx-items">
+        <div class="sc"><div class="sc-text"><span>名前</span></div><div class="sc-ctl"><input placeholder="例: kimura"></div></div>
+        <div class="sc"><div class="sc-text"><span>コマンド実行</span></div>
+          <div class="sc-ctl"><select><option>実行しない</option><option selected>許可リストだけ自動</option><option>毎回承認</option><option>すべて自動</option></select></div></div>
+        <div class="sc"><div class="sc-text"><span>招待コード</span><span class="d">kimura さんに渡してください。もう一度は表示できません</span></div>
+          <div class="sc-ctl"><code>cb1.eyJ1cmwiOiJodHRwOi8v…</code><button class="secondary sm"><svg class="ic"><use href="icons.svg#i-copy"/></svg>コピー</button></div></div>
+        <div class="sc"><div class="sc-text"></div><div class="sc-ctl"><button>招待コードを発行</button></div></div>
       </div>
     </details>
   </div>
@@ -195,14 +178,13 @@
         <li><span class="time">14:21</span><span>テストを走らせて、落ちている 3 件を確かめます。</span></li>
         <li class="state"><span class="time">14:23</span><span>コマンド実行の承認待ち: npm test</span></li>
       </ol>
-      <div class="row"><input class="grow" style="flex:1" placeholder="追加の指示"><button class="secondary">送る</button><button class="danger">中止</button></div>
+      <div class="row"><input style="flex:1" placeholder="追加の指示"><button class="secondary">送る</button><button class="danger">中止</button></div>
     </div>
   </div>
 </section>
 
 <section class="section">
-  <div class="section-head"><h2><svg class="ic"><use href="icons.svg#i-folder"/></svg>共有フォルダ</h2><span class="sub">Codex から見えるのは、ここに並べたフォルダだけです</span>
-    <div class="actions"><span class="tag warn">未保存の変更</span><button class="secondary sm">元に戻す</button><button class="sm">保存</button></div></div>
+  <div class="section-head"><h2><svg class="ic"><use href="icons.svg#i-folder"/></svg>共有フォルダ</h2><span class="sub">Codex から見えるのは、ここに並べたフォルダだけです</span></div>
   <div class="stack">
     <table class="list">
       <thead><tr><th>フォルダ</th><th>権限</th><th></th></tr></thead>
@@ -225,9 +207,12 @@
     <textarea rows="4" spellcheck="false" style="font-family:var(--mono)">python scripts/**/*.py *
 npm test *</textarea>
     <p class="hint"><code>*</code> は名前の一部か任意の引数、<code>**</code> は下のフォルダすべて。<code>&amp;&amp;</code> や <code>|</code> を含むものは承認待ち。</p>
-    <label class="check"><input type="checkbox" checked>作業中に書き換えたスクリプトは承認待ちにする</label>
+    <div class="settings">
+      <div class="sc"><div class="sc-text"><span>作業中に書き換えたスクリプトは承認待ちにする</span></div>
+        <div class="sc-ctl"><label class="switch"><span>オン</span><input type="checkbox" checked><span class="track"></span></label></div></div>
+    </div>
     <p class="note-warn"><svg class="ic"><use href="icons.svg#i-triangle-alert"/></svg>実行したプログラムは、共有フォルダの外も読めます。</p>
-    <div class="row"><button>保存</button><span class="spacer"></span><button class="link">policy.yaml を直接編集する</button></div>
+    <div class="row"><span class="sub">入力を終えると保存します</span><span class="spacer"></span><button class="link">policy.yaml を直接編集する</button></div>
   </div>
 </section>
 
@@ -236,7 +221,7 @@ npm test *</textarea>
 
 <div class="banner warn"><svg class="ic"><use href="icons.svg#i-circle-alert"/></svg><b>Codex にログインしていません</b><span class="grow">Codex を開いてログインしてください。</span></div>
 
-<section class="approvals" aria-label="事前承認待ち">
+<section class="approvals" aria-label="許可を待っている依頼">
   <div class="section-head"><h2><svg class="ic"><use href="icons.svg#i-shield-check"/></svg>許可を待っている依頼<span class="count">1</span></h2><span class="sub">あと 27 分で取り消されます</span></div>
   <div class="approval">
     <div><div class="what">新しい依頼（hanako）</div><pre>web のテストが落ちているので直してください。</pre><p class="sub">GPT-6.1-Sol・high・3 分前</p>
@@ -256,61 +241,49 @@ npm test *</textarea>
         <div class="m-bar"><div class="m-fill" style="width:62%"></div></div>
         <div class="m-foot"><span>11/22 09:00 に戻る</span><label class="row">上限 <input type="number" placeholder="なし"> %</label></div></div>
     </div>
-    <div class="row">
-      <span>上限を超えたら</span>
-      <div class="seg"><label><input type="radio" name="f" checked>止めて報告させる</label><label><input type="radio" name="f">すぐ強制終了</label></div>
-      <span class="hint">報告の分だけ少し超えることがあります</span>
-      <span class="spacer"></span><button>保存</button>
+    <div class="settings">
+      <div class="sc"><div class="sc-text"><span>上限を超えたとき</span><span class="d">止めて報告させると、報告の分だけ少し超えることがあります</span></div>
+        <div class="sc-ctl"><span class="seg"><label><input type="radio" name="f" checked>止めて報告させる</label><label><input type="radio" name="f">すぐ強制終了</label></span></div></div>
     </div>
   </div>
 </section>
 
 <section class="section">
   <div class="section-head"><h2><svg class="ic"><use href="icons.svg#i-users"/></svg>依頼主</h2><span class="sub">作業は全員合わせて同時に 1 つです</span></div>
-  <div class="cards">
-    <details class="card" open>
+  <div class="settings">
+    <details class="sx" open>
       <summary>
-        <div class="card-head"><span class="dot ok"></span><b>hanako</b><span class="sub">100.64.0.1・作業中 t12「テストを直す」</span>
-          <span class="card-toggle">閉じる<svg class="ic"><use href="icons.svg#i-chevron-right"/></svg></span></div>
+        <div class="sc-text"><span class="card-head"><span class="dot ok"></span><b>hanako</b></span><span class="d">100.64.0.1・作業中 t12「テストを直す」</span></div>
+        <svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg>
       </summary>
-      <div class="card-body">
-        <dl class="rows">
-          <dt>使わせるモデル</dt>
-          <dd><div class="combo">
-            <div class="combo-box" role="combobox" aria-expanded="true"><span class="summary">7 個（10 個中）</span><svg class="ic"><use href="icons.svg#i-chevron-right"/></svg></div>
-            <div class="combo-pop">
-              <input type="search" placeholder="モデルを探す">
-              <ul>
-                <li><label><input type="checkbox" checked>GPT-6.1-Sol<span class="tag accent">既定</span></label></li>
-                <li><label><input type="checkbox" checked>GPT-6.2-Sol</label></li>
-                <li><label><input type="checkbox">GPT-6.2-Astra</label></li>
-                <li><label><input type="checkbox" checked>GPT-6.1-Terra</label></li>
-                <li><label><input type="checkbox" checked>GPT-6-Astra</label></li>
-                <li><label><input type="checkbox" checked>GPT-6-Sol</label></li>
-                <li><label><input type="checkbox" checked>GPT-6-Luna</label></li>
-                <li><label><input type="checkbox">GPT-5.6-Sol</label></li>
-              </ul>
-              <div class="foot"><button class="link">すべて選ぶ</button><button class="link">すべて外す</button></div>
-            </div>
-          </div></dd>
-          <dt>推論の強さの上限</dt><dd><select><option>xhigh（おすすめ）</option><option>high</option><option>max</option></select></dd>
-          <dt>始める前の許可</dt><dd><span class="row"><select><option>新しい依頼のとき要る</option><option>依頼と追加の指示のとき要る</option><option>要らない</option></select>
-            <label class="row"><input type="number" value="30"> 分で取り消し</label></span></dd>
-          <dt>続きの依頼</dt><dd><span class="seg"><label><input type="radio" name="d" checked>できる</label><label><input type="radio" name="d">できない</label></span></dd>
-          <dt>止める機能</dt><dd><span class="row"><label class="check"><input type="checkbox" checked>Web 検索</label><label class="check"><input type="checkbox">画像の生成</label></span></dd>
-          <dt>この画面の記録</dt><dd><select><option>依頼文と報告だけ</option><option>道具の名前と対象まで</option><option>道具の結果まで</option></select></dd>
-        </dl>
-        <div class="card-actions"><button>保存</button><span class="sub">作業中の分は、作業が終わってから反映します</span><span class="spacer"></span><button class="secondary sm">招待コードを入れ直す</button><button class="danger sm">外す</button></div>
+      <div class="sx-items">
+        <div class="sc"><div class="sc-text"><span>使わせるモデル</span></div>
+          <div class="sc-ctl"><div class="combo-box" role="combobox" style="width:20em"><span class="summary">7 個（10 個中）</span><svg class="ic"><use href="icons.svg#i-chevron-right"/></svg></div></div></div>
+        <div class="sc"><div class="sc-text"><span>推論の強さの上限</span></div>
+          <div class="sc-ctl"><select><option>xhigh（おすすめ）</option><option>high</option><option>max</option></select></div></div>
+        <div class="sc"><div class="sc-text"><span>始める前の許可</span></div>
+          <div class="sc-ctl"><select><option>新しい依頼のとき要る</option><option>依頼と追加の指示のとき要る</option><option>要らない</option></select>
+            <label class="row"><input type="number" value="30"> 分で取り消し</label></div></div>
+        <div class="sc"><div class="sc-text"><span>続きの依頼を受ける</span></div>
+          <div class="sc-ctl"><label class="switch"><span>オン</span><input type="checkbox" checked><span class="track"></span></label></div></div>
+        <div class="sc"><div class="sc-text"><span>Web 検索を使わせる</span></div>
+          <div class="sc-ctl"><label class="switch"><span>オフ</span><input type="checkbox"><span class="track"></span></label></div></div>
+        <div class="sc"><div class="sc-text"><span>画像の生成を使わせる</span></div>
+          <div class="sc-ctl"><label class="switch"><span>オン</span><input type="checkbox" checked><span class="track"></span></label></div></div>
+        <div class="sc"><div class="sc-text"><span>この画面に出す道具の記録</span></div>
+          <div class="sc-ctl"><select><option>見せない</option><option>道具の名前と対象</option><option>道具の結果まで</option></select></div></div>
+        <div class="sc"><div class="sc-text"><span>つなぎ方</span><span class="d">作業中の分は、作業が終わってから反映します</span></div>
+          <div class="sc-ctl"><button class="secondary sm">招待コードを入れ直す</button><button class="danger sm">外す</button></div></div>
       </div>
     </details>
-    <details class="card">
-      <summary><div class="card-head"><span class="dot warn"></span><b>jiro</b><span class="sub">100.64.0.7・つなぎ直し中</span><span class="card-toggle">開く<svg class="ic"><use href="icons.svg#i-chevron-right"/></svg></span></div></summary>
+    <details class="sx">
+      <summary><div class="sc-text"><span class="card-head"><span class="dot warn"></span><b>jiro</b></span><span class="d">100.64.0.7・つなぎ直し中</span></div><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></summary>
     </details>
-    <details class="card">
-      <summary><div class="card-head"><span class="dot bad"></span><b>mika</b><span class="sub">100.64.0.9・招待コードが無効です</span><span class="card-toggle">開く<svg class="ic"><use href="icons.svg#i-chevron-right"/></svg></span></div></summary>
+    <details class="sx">
+      <summary><div class="sc-text"><span class="card-head"><span class="dot bad"></span><b>mika</b></span><span class="d">100.64.0.9・招待コードが無効です</span></div><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></summary>
     </details>
-    <details class="card add">
-      <summary><svg class="ic"><use href="icons.svg#i-plug"/></svg>依頼主を追加</summary>
+    <details class="sx add">
+      <summary><div class="sc-text"><span class="row"><svg class="ic"><use href="icons.svg#i-plug"/></svg>依頼主を追加</span></div><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></summary>
     </details>
   </div>
 </section>
@@ -333,15 +306,18 @@ npm test *</textarea>
 
 <section class="section">
   <div class="section-head"><h2><svg class="ic"><use href="icons.svg#i-cpu"/></svg>この PC</h2></div>
-  <div class="stack">
-    <dl class="rows">
-      <dt>作業フォルダ</dt><dd><input placeholder="空欄なら既定" style="width:min(100%, 32em)"><p class="hint">今 <code>C:\ProgramData\codex-bridge-agent\work-7f3a</code></p></dd>
-      <dt>記録を残す日数</dt><dd><span class="row"><input type="number" value="30"> 日<button class="danger sm">記録を消す</button></span></dd>
-      <dt>データの場所</dt><dd><code>%LOCALAPPDATA%\codex-bridge</code> <button class="link">移す</button></dd>
-      <dt>ブラウザの通知</dt><dd><button class="secondary sm"><svg class="ic"><use href="icons.svg#i-bell"/></svg>承認待ちを知らせる</button></dd>
-      <dt>版</dt><dd>codex-bridge 0.3.0・Codex 0.167.0</dd>
-    </dl>
-    <div><button>保存</button></div>
+  <div class="settings">
+    <div class="sc"><div class="sc-text"><span>作業フォルダ</span><span class="d">今 C:\ProgramData\codex-bridge-agent\work-7f3a</span></div>
+      <div class="sc-ctl"><button class="secondary sm">変える</button></div></div>
+    <div class="sc"><div class="sc-text"><span>記録を残す日数</span></div>
+      <div class="sc-ctl"><input type="number" value="30"> 日<button class="danger sm">記録を消す</button></div></div>
+    <div class="sc"><div class="sc-text"><span>データの場所</span><span class="d">%LOCALAPPDATA%\codex-bridge</span></div>
+      <div class="sc-ctl"><button class="secondary sm">移す</button></div></div>
+    <div class="sc"><div class="sc-text"><span>承認待ちをブラウザで知らせる</span></div>
+      <div class="sc-ctl"><label class="switch"><span>オフ</span><input type="checkbox"><span class="track"></span></label></div></div>
+    <details class="sx">
+      <summary><div class="sc-text"><span>codex-bridge</span><span class="d">0.3.0</span></div><svg class="ic chev"><use href="icons.svg#i-chevron-right"/></svg></summary>
+    </details>
   </div>
 </section>
 
