@@ -6,6 +6,7 @@ datas = [
     ("src/codex_bridge/host/web/static", "codex_bridge/host/web/static"),
     ("src/codex_bridge/agent/static", "codex_bridge/agent/static"),
     ("src/codex_bridge/common/web", "codex_bridge/common/web"),
+    ("src/codex_bridge/common/web/app", "codex_bridge/common/web/app"),
     ("src/codex_bridge/assets/codex-bridge.ico", "codex_bridge/assets"),
 ]
 for pkg in ("mcp", "mcp_types", "fastapi", "starlette", "pydantic", "uvicorn", "websockets"):

@@ -1,6 +1,7 @@
 """The resident app: fake roles, no real tray, no real Codex, no fixed ports, nothing under %LOCALAPPDATA%."""
 
 import asyncio
+import re
 import socket
 import subprocess
 import sys
@@ -324,15 +325,46 @@ async def test_console_way_serves_the_page_itself(tmp_path):
     host = make_host(tmp_path)
     async with client_for(create_local_app(host), "http://127.0.0.1:8770") as local:
         r = await local.get("/admin/")
-        assert r.status_code == 200 and "<h1>codex-bridge</h1>" in r.text
+        assert r.status_code == 200 and "/app/static/app.js" in r.text
         assert (await local.get("/app/static/index.html")).status_code == 200
         assert (await local.get("/app/api/state")).status_code == 404  # no resident: the page runs in console mode
 
 
 async def test_resident_serves_page_and_static(web):
     r = await web.get("/")
-    assert r.status_code == 200 and "<h1>codex-bridge</h1>" in r.text
+    assert r.status_code == 200 and "/app/static/app.js" in r.text
     assert (await web.get("/app/static/index.html")).status_code == 200
+
+
+# ---- the page shell ------------------------------------------------------------
+async def test_page_served_on_8766(web):
+    r = await web.get("/")
+    assert r.status_code == 200
+    assert "/app/static/app.js" in r.text and "/app/static/ui.css" in r.text
+    assert re.search(r"<script(?![^>]*\bsrc=)[^>]*>", r.text) is None  # the CSP forbids inline scripts
+    assert re.search(r"<script[^>]*>\s*[^<\s]", r.text) is None
+
+
+async def test_static_assets(web):
+    for name, needle in (("ui.css", "--fs-cap2"), ("ui.js", "--sbw"), ("icons.svg", "i-send"),
+                         ("app.js", "location.hash"), ("api.js", "X-Codex-Bridge"), ("log.js", "renderLog")):
+        r = await web.get(f"/app/static/{name}")
+        assert r.status_code == 200 and needle in r.text, name
+    assert "mock page only" not in (await web.get("/app/static/ui.css")).text
+
+
+async def test_admin_page_on_8770(tmp_path):
+    host = make_host(tmp_path)
+    async with client_for(create_local_app(host), "http://127.0.0.1:8770") as local:
+        page = (await local.get("/admin/")).text
+        assert page == (await local.get("/app/static/index.html")).text
+        assert "/app/static/app.js" in page
+        assert (await local.get("/app/static/ui.css")).status_code == 200
+
+
+def test_spec_bundles_app_folder():
+    spec = (Path(__file__).resolve().parents[1] / "codex-bridge.spec").read_text(encoding="utf-8")
+    assert '("src/codex_bridge/common/web/app", "codex_bridge/common/web/app")' in spec
 
 
 # ---- overrides ---------------------------------------------------------------
