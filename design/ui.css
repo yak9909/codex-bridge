@@ -75,6 +75,30 @@ label.field > span { font-size: var(--fs-sub); color: var(--muted); letter-spaci
 .seg label:has(input:checked) { background: var(--accent); color: #fff; }
 .seg label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -3px; }
 
+/* read-only list (many items): one per line, scrolls past 6 rows */
+.listbox { list-style: none; padding: 0; border: 1px solid var(--line); border-radius: var(--r-ctl); max-height: calc(6 * 36px + 2px);
+  overflow: auto; max-width: 24em; }
+.listbox li { display: flex; align-items: center; gap: var(--s2); height: 36px; padding: 0 var(--s3); border-top: 1px solid var(--line); }
+.listbox li:first-child { border-top: 0; }
+.listbox li .ic { width: 16px; height: 16px; color: var(--accent); }
+.listbox li.off { color: var(--idle); }
+.listbox li.off .ic { visibility: hidden; }
+.listbox li .tag { margin-left: auto; }
+
+/* multi-select combobox: closed = summary; open = search + check list */
+.combo { position: relative; max-width: 24em; }
+.combo-box { display: flex; align-items: center; gap: var(--s2); height: var(--ctl); padding: 0 var(--s3); border: 1px solid #c4cad5;
+  border-radius: var(--r-ctl); background: var(--surface); cursor: pointer; }
+.combo-box .summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.combo-box .ic { color: var(--muted); transform: rotate(90deg); }
+.combo-pop { margin-top: var(--s1); border: 1px solid #c4cad5; border-radius: var(--r-ctl); background: var(--surface);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .12); }
+.combo-pop input[type="search"] { width: 100%; border: 0; border-bottom: 1px solid var(--line); border-radius: var(--r-ctl) var(--r-ctl) 0 0; }
+.combo-pop ul { list-style: none; padding: var(--s1) 0; margin: 0; max-height: calc(6 * 36px); overflow: auto; }
+.combo-pop li label { display: flex; align-items: center; gap: var(--s2); height: 36px; padding: 0 var(--s3); cursor: pointer; }
+.combo-pop li label:hover { background: var(--ground); }
+.combo-pop .foot { display: flex; justify-content: space-between; padding: var(--s2) var(--s3); border-top: 1px solid var(--line); }
+
 /* chips */
 .chips { display: flex; flex-wrap: wrap; gap: var(--s2); }
 .chip { display: inline-flex; align-items: center; gap: var(--s2); height: var(--ctl-sm); padding: 0 var(--s3); border: 1px solid var(--line);
