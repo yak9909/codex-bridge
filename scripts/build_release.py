@@ -1,7 +1,7 @@
 """Build one exe and assemble the one release zip into release/.
 
 Run from the repo root:  uv run python scripts/build_release.py
-  release/codex-bridge-v0.2.0.zip   for both the owner and the friend
+  release/codex-bridge-v0.3.0.zip   for both the owner and the friend
 The release version comes from pyproject.toml.
 Only the same-version zip (and same-version admin/friend zips of earlier
 builds) are replaced; other releases are kept.
@@ -28,6 +28,7 @@ README = """codex-bridge v{ver}
   2. 「貸す側」を選ぶ
   3. 依頼主からもらった招待コードを貼る
   ほかのファイルは使いません。
+  使わせるモデルと推論の強さの上限は、設定の画面で決められます。
   詳しくは docs\\friend-guide.md を見てください。
 
 ■ 依頼主（使う側）の方へ
@@ -38,6 +39,7 @@ README = """codex-bridge v{ver}
         setup.bat をダブルクリックすると、初期設定だけできます）
     3. 管理画面で、Codex に触らせる共有フォルダを選ぶ
     4. install-mcp.bat をダブルクリック（Claude Code / Codex から使えるようにする）
+       （承認待ちと終了の知らせも入ります。Codex では一度 /hooks でフックを信頼してください）
     5. 管理画面の「招待コード」を発行し、この zip と一緒に知人に渡す
     6. Tailscale の管理画面で、この PC を知人と共有する
 
@@ -47,6 +49,8 @@ README = """codex-bridge v{ver}
     先に古いフォルダの stop.bat で止める（または古い黒いウィンドウを閉じる）。
     そのあと古いフォルダの host.yaml と data フォルダを新しいフォルダにコピーしてから、
     「使う側」を選ぶか start.bat を実行します。
+    新しいフォルダで install-mcp.bat も実行し直してください。Codex の登録とフックを更新します。
+    フックが変わったときは、Codex の /hooks でもう一度信頼してください。
 
   毎回
     codex-bridge.exe で「使う側」を選ぶか、start.bat をダブルクリックして起動します。
@@ -56,6 +60,7 @@ README = """codex-bridge v{ver}
   頼み方
     start.bat などで起動してから、Claude Code か Codex で「codex-bridge で、○○の開発を依頼して」と頼むだけです。
     管理画面の「Codex に依頼する」欄から直接頼むこともできます。
+    承認待ちか終了になると、依頼したエージェントに自動で知らせが届きます。
 
   詳しくは docs\\operation-guide.md を見てください。
 """
