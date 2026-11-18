@@ -28,10 +28,10 @@ class App:
     async def rate_limits(self):
         return UsageSnapshot(Window(46, 2000000000), Window(23, 2000100000))
 
-    async def thread_start(self, *args):
+    async def thread_start(self, developer_instructions, ephemeral=False, model=None):
         return {"id": "new-thread", "model": None, "effort": None}
 
-    async def turn_start(self, *args):
+    async def turn_start(self, thread_id, text, model=None, effort=None):
         return "turn"
 
     async def thread_delete(self, thread_id):

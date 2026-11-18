@@ -20,6 +20,7 @@ DEFAULTS = {
     "features": {"web_search": False, "image_generation": False, "multi_agent": False, "goals": False},
     "pre_approval": {"enabled": False, "timeout_min": 30},
     "disposable": False, "workdir": None, "log_retention_days": 30,
+    "allowed_models": None, "max_effort": "xhigh",
 }
 RUNNING = {"after": {"turn/start": [n.turn_started()], "turn/steer": [n.agent_completed("追加も済み"), n.turn_completed()],
                      "turn/interrupt": [n.turn_completed("interrupted")]}}

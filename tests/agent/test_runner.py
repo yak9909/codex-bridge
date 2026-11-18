@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from codex_bridge.agent.models import parse_model_list
 from codex_bridge.agent.runner import AgentRunner
 from codex_bridge.agent.sessions import SessionRegistry
 from codex_bridge.agent.usage import STOP_TEXT, QuotaGuard
@@ -53,6 +54,91 @@ async def env(tmp_path, request):
 
 
 DONE_SCRIPT = {"after": {"turn/start": [TURN_STARTED, agent_msg("できました"), turn_completed()]}}
+
+
+@pytest.fixture
+async def model_env(env):
+    env.runner.catalog = parse_model_list(await env.fake.app.model_list())
+    return env
+
+
+async def test_start_passes_chosen_model_and_effort(model_env):
+    env = model_env
+    await env.runner.handle({"type": "task_start", "task_id": "t1", "prompt": "do"})
+    assert env.fake.received("thread/start")["model"] == "gpt-fake"
+    turn = env.fake.received("turn/start")
+    assert turn["model"] == "gpt-fake" and turn["effort"] == "medium"
+
+
+async def test_start_with_requested_effort(model_env):
+    env = model_env
+    await env.runner.handle({"type": "task_start", "task_id": "t1", "prompt": "do", "effort": "high"})
+    assert env.fake.received("turn/start")["effort"] == "high"
+
+
+async def test_refused_model_rejects_task_and_frees_slot(model_env):
+    env = model_env
+    await env.runner.handle({"type": "task_start", "task_id": "t1", "prompt": "do", "model": "nope"})
+    rejected = await env.wait_state("rejected_by_lender")
+    assert "使えるモデル" in rejected["report"]
+    assert env.fake.received("thread/start") is None
+    assert env.fake.received("turn/start") is None
+    assert env.runner.active_task_id() is None
+
+
+async def test_model_event_after_started(model_env):
+    env = model_env
+    await env.runner.handle({"type": "task_start", "task_id": "t1", "prompt": "do"})
+    events = env.of("event")
+    kinds = [event["kind"] for event in events]
+    assert kinds[kinds.index("started") + 1] == "model"
+    assert next(event["data"] for event in events if event["kind"] == "model") == {
+        "model": "gpt-fake", "effort": "medium"}
+
+
+async def test_reroute_reports_new_model(model_env):
+    env = model_env
+    await env.runner.handle({"type": "task_start", "task_id": "t1", "prompt": "do"})
+    await env.runner._on_event({"method": "model/rerouted", "params": {
+        "threadId": "th1", "turnId": "u1", "fromModel": "gpt-fake", "toModel": "gpt-mini",
+        "reason": "highRiskCyberActivity"}})
+    events = [event for event in env.of("event") if event["kind"] == "model"]
+    assert events[-1]["data"] == {"model": "gpt-mini", "effort": "medium", "rerouted_from": "gpt-fake",
+                                  "reason": "highRiskCyberActivity"}
+    assert env.runner.cur.model == "gpt-mini"
+
+
+@pytest.mark.parametrize("env", [{"errors": {"turn/steer": {"code": 1, "message": "no turn"}}}], indirect=True)
+@pytest.mark.parametrize("active_turn", [False, True])
+async def test_followup_new_turn_keeps_model(model_env, active_turn):
+    env = model_env
+    await env.runner.handle({"type": "task_start", "task_id": "t1", "prompt": "do", "effort": "high"})
+    if not active_turn:
+        env.runner.cur.turn_id = None
+    await env.runner.handle({"type": "task_followup", "task_id": "t1", "text": "also"})
+    turn = env.fake.received("turn/start")
+    assert turn["input"] == [{"type": "text", "text": "also"}]
+    assert turn["model"] == "gpt-fake" and turn["effort"] == "high"
+
+
+async def test_resume_passes_model(model_env):
+    env = model_env
+    env.sessions.add("th1", "previous")
+    await env.runner.handle({"type": "task_start", "task_id": "t1", "prompt": "more",
+                             "continue_thread_id": "th1", "model": "gpt-fake", "effort": "high"})
+    assert env.fake.received("thread/resume")["model"] == "gpt-fake"
+    turn = env.fake.received("turn/start")
+    assert turn["model"] == "gpt-fake" and turn["effort"] == "high"
+    assert env.fake.received("thread/start") is None
+
+
+@pytest.mark.parametrize("env", [{"responses": {"thread/start": {
+    "thread": {"id": "th1"}, "model": None, "reasoningEffort": "medium"}}}], indirect=True)
+async def test_task_without_model_from_v02_host(env):
+    await env.runner.handle({"type": "task_start", "task_id": "t1", "prompt": "do"})
+    turn = env.fake.received("turn/start")
+    assert turn["effort"] == "medium" and "model" not in turn
+    assert "model" not in env.fake.received("thread/start")
 
 
 @pytest.mark.parametrize("env", [DONE_SCRIPT], indirect=True)

@@ -13,9 +13,10 @@ from typing import Awaitable, Callable
 
 from ..common import protocol
 from .appserver import AppServer, AppServerError
+from .models import ModelRefused, choose
 from .pre_approval import CANCELLED, FOLLOWUP, START, WAITING, PreApproval
 from .sessions import SessionRegistry
-from .settings import defaults, feature_instructions
+from .settings import defaults, feature_instructions, models_fields
 from .usage import BlockNew, Interrupt, QuotaGuard, Steer, Suspend, Unblock
 from .worklog import WorkLog
 
@@ -64,6 +65,8 @@ class Current:
     task_id: str
     thread_id: str | None = None
     turn_id: str | None = None
+    model: str | None = None
+    effort: str | None = None
     last_message: str | None = None
     cancelling: bool = False
     ephemeral: bool = False            # a disposable session: fixed when the task starts, dropped when it ends
@@ -137,6 +140,7 @@ class AgentRunner:
         self.clock = clock
         self.cur: Current | None = None
         self.settings = defaults()  # the lender's settings (settings.py); apply_settings() brings in a changed one
+        self.catalog: list[dict] | None = None
         self.approval = PreApproval(self)  # a request waiting for the lender's yes (design 4.5)
         self.last_usage = None  # latest snapshot for the local screen
         self.log_visibility = "summary"
@@ -156,6 +160,9 @@ class AgentRunner:
     async def send_busy_status(self) -> None:
         if self.slot:
             await self._safe_send(protocol.msg("lender_status", busy_elsewhere=self.slot.owner not in (None, self)))
+
+    async def send_models(self) -> None:
+        await self._safe_send(protocol.msg("lender_models", **models_fields(self.settings, self.catalog)))
 
     async def _claim_slot(self) -> None:
         if self.slot and self.slot.owner is not self:
@@ -348,26 +355,36 @@ class AgentRunner:
         if self.cur is not None:
             await self._state("failed", report="別のタスクが作業中です", task_id=m["task_id"])
             return
-        self.cur = Current(task_id=m["task_id"], ephemeral=bool(self.settings["disposable"]))
+        cur = self.cur = Current(task_id=m["task_id"], ephemeral=bool(self.settings["disposable"]))
         self._prune_worklog()
         if not shown:
             self.log_prompt(m["task_id"], m["prompt"])
         try:
             if self.prepare:
                 await self.prepare()
+            model, effort = choose(self.catalog, self.settings["allowed_models"], self.settings["max_effort"],
+                                   m.get("model"), m.get("effort"))
             cont = m.get("continue_thread_id")
             if cont:
-                if self.cur.ephemeral:
+                if cur.ephemeral:
                     raise AppServerError(NO_RESUME)
                 if not self.sessions.owns(cont):
                     raise AppServerError(NOT_OWNED)
-                self.cur.thread_id = (await self.app.thread_resume(cont, self._instructions()))["id"]
+                info = await self.app.thread_resume(cont, self._instructions(), model=model)
             else:
-                self.cur.thread_id = (await self.app.thread_start(self._instructions(), self.cur.ephemeral))["id"]
-            self.sessions.add(self.cur.thread_id, self.cur.task_id, self.cur.ephemeral)
+                info = await self.app.thread_start(self._instructions(), cur.ephemeral, model=model)
+            cur.thread_id = info["id"]
+            cur.model = info["model"] or model
+            cur.effort = effort
+            self.sessions.add(cur.thread_id, cur.task_id, cur.ephemeral)
             await self._state("running")
             await self._event("started")
-            self.cur.turn_id = await self.app.turn_start(self.cur.thread_id, m["prompt"])
+            await self._event("model", model=cur.model, effort=cur.effort)
+            cur.turn_id = await self.app.turn_start(cur.thread_id, m["prompt"], model=cur.model, effort=cur.effort)
+        except ModelRefused as e:
+            await self._state("rejected_by_lender", report=str(e))
+            await self._end()
+            return
         except Exception as e:  # app-server gone, pipe broken, timeout...: never keep a stale task
             await self._state("failed", report=f"開始できませんでした: {type(e).__name__}: {e}")
             await self._end()
@@ -406,7 +423,7 @@ class AgentRunner:
             except Exception:
                 pass  # the turn may have just ended: start a new one below
         try:
-            cur.turn_id = await self.app.turn_start(cur.thread_id, m["text"])
+            cur.turn_id = await self.app.turn_start(cur.thread_id, m["text"], model=cur.model, effort=cur.effort)
         except Exception as e:
             await self._state("failed", report=f"追加の指示を渡せませんでした: {type(e).__name__}: {e}")
             await self._end()
@@ -461,7 +478,13 @@ class AgentRunner:
     async def _on_event(self, ev: dict) -> None:
         method, p = ev.get("method"), ev.get("params") or {}
         cur = self.cur
-        if method == "turn/started":
+        if method == "model/rerouted":
+            if cur and p.get("threadId") == cur.thread_id:
+                old = cur.model
+                cur.model = p.get("toModel")
+                await self._event("model", model=cur.model, effort=cur.effort,
+                                  rerouted_from=p.get("fromModel") or old, reason=p.get("reason"))
+        elif method == "turn/started":
             if cur:
                 cur.turn_id = p["turn"]["id"]
                 cur.tokens_in = cur.tokens_out = 0

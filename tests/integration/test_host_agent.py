@@ -1,6 +1,7 @@
 """Real host control channel over a real WebSocket; agent uses the fake app-server."""
 
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -107,6 +108,48 @@ async def test_startup_reports_auth_and_usage_to_every_host_without_a_task(multi
         overview = (await http.get("/api/overview")).json()
     assert overview["usage"]["five_hour"]["used_percent"] == 12
     assert overview["auth_mode"] == "chatgpt" and overview["state"] == "idle"
+
+
+def model_list_count(tmp_path):
+    return sum(json.loads(line).get("received", {}).get("method") == "model/list"
+               for record in tmp_path.glob("fake-*/record.jsonl")
+               for line in record.read_text(encoding="utf-8").splitlines())
+
+
+async def test_catalog_loaded_once_and_offer_reaches_host(multiple, tmp_path):
+    runtime, connections, managers, messages = multiple
+    await runtime._usage_probe
+    await until(lambda: all(any(m["type"] == "lender_models" for m in stream) for stream in messages))
+    for stream in messages:
+        offers = [m for m in stream if m["type"] == "lender_models"]
+        assert len(offers) == 1
+        assert offers[0]["models"][0]["model"] == "gpt-fake"
+        assert offers[0]["max_effort"] == "xhigh" and "seq" not in offers[0]
+        assert offers[0]["models"][0]["efforts"] == ["low", "medium", "high", "xhigh"]
+    assert all(runner.catalog is runtime.catalog for runner in runtime.runners.values())
+    assert model_list_count(tmp_path) == 1
+    await runtime.runners[connections[1].id].prepare()
+    assert model_list_count(tmp_path) == 1
+
+
+async def test_settings_change_refetches_catalog(multiple, tmp_path):
+    runtime, connections, managers, messages = multiple
+    await runtime._usage_probe
+    assert model_list_count(tmp_path) == 1
+    await runtime.update_settings(connections[0].id, {"allowed_models": [], "max_effort": "high"})
+    assert runtime.catalog is None
+    assert model_list_count(tmp_path) == 1
+    await until(lambda: [m for m in messages[0] if m["type"] == "hello"][-1].get("models") == [])
+    hello = [m for m in messages[0] if m["type"] == "hello"][-1]
+    assert hello["max_effort"] == "high"
+    await runtime.runners[connections[0].id].prepare()
+    assert model_list_count(tmp_path) == 2
+    assert all(runner.catalog is runtime.catalog for runner in runtime.runners.values())
+    await until(lambda: any(m["type"] == "lender_models" and m["models"] == [] for m in messages[0]))
+    offer = [m for m in messages[0] if m["type"] == "lender_models"][-1]
+    assert offer["models"] == [] and offer["max_effort"] == "high"
+    other = [m for m in messages[1] if m["type"] == "lender_models"][-1]
+    assert other["models"][0]["model"] == "gpt-fake" and other["max_effort"] == "xhigh"
 
 
 @pytest.mark.parametrize("pending", [False, True])
@@ -239,7 +282,8 @@ def pre_approval(runner, on=True):
                            "features": {"web_search": False, "image_generation": False, "multi_agent": False,
                                         "goals": False},
                            "pre_approval": {"enabled": on, "timeout_min": 30}, "disposable": False,
-                           "workdir": None, "log_retention_days": 30})
+                           "workdir": None, "log_retention_days": 30,
+                           "allowed_models": None, "max_effort": "xhigh"})
 
 
 @pytest.mark.parametrize("live", [{"after": {"turn/start": [TURN_STARTED, MSG, DONE]}}], indirect=True)

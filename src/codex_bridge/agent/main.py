@@ -22,6 +22,7 @@ from .appserver import AppServer, codex_command
 from .control_client import ControlClient
 from .connections import ConnectionStore
 from .logview import LogStore
+from .models import parse_model_list
 from .runner import AgentRunner, TaskSlot
 from .sessions import SessionRegistry
 from .settings import SettingsApplier, SettingsStore, hello_fields, resolve_workdir, move_data_root
@@ -137,6 +138,7 @@ class AgentConnections:
         self.app_factory, self.versions = app_factory, versions
         self.initial_backoff = initial_backoff
         self.slot = TaskSlot()
+        self.catalog: list[dict] | None = None
         self.runners, self.clients, self.links = {}, {}, {}
         self.started, self.paused, self.moving = False, False, False
         self._usage_probe = None
@@ -169,6 +171,8 @@ class AgentConnections:
                     other.guard.enabled = mode == "chatgpt"
                 await asyncio.gather(*(client.refresh_hello() for client in self.clients.values()),
                                      return_exceptions=True)
+            if self.catalog is None:
+                await self._load_catalog(app)
             await runner.refresh_usage()
 
         runner = AgentRunner(app, make_guard(self.versions.get("auth_mode", "chatgpt")),
@@ -177,10 +181,11 @@ class AgentConnections:
                              prepare=prepare, on_log=lambda m: self.on_log({**m, **runner.connection_fields()}),
                              worklog=WorkLog(root / "logs" / "tasks", current["log_retention_days"]))
         runner.apply_settings(current)
+        runner.catalog = self.catalog
         runner.last_usage = self.slot.last_usage
         runner.log_visibility = current["log_visibility"]
         client = ControlClient(connection.invite, runner,
-                               hello=lambda: {**self.versions, **hello_fields(runner.settings)},
+                               hello=lambda: {**self.versions, **hello_fields(runner.settings, runner.catalog)},
                                initial_backoff=self.initial_backoff)
         client.paused = self.paused
         self.runners[connection.id], self.clients[connection.id] = runner, client
@@ -206,6 +211,22 @@ class AgentConnections:
             self.on_log({"type": "error", "text": f"{text}: {type(error).__name__}: {error}"})
         except Exception:
             pass
+
+    async def _load_catalog(self, app) -> None:
+        try:
+            catalog = parse_model_list(await app.model_list())
+        except Exception as e:
+            self._error("Codex のモデルの一覧を取得できませんでした", e)
+            return
+        self.catalog = catalog
+        runners = list(self.runners.values())
+        for runner in runners:
+            runner.catalog = catalog
+        for runner in runners:
+            try:
+                await runner.send_models()
+            except Exception:
+                pass
 
     def _ensure_usage_probe(self):
         if (not self.started or self.moving or not self.runners
@@ -298,6 +319,7 @@ class AgentConnections:
 
     async def update_settings(self, id, patch):
         saved = self.store.update_settings(id, patch)
+        self.catalog = None
         runner = self.runners[id]
         runner.apply_settings({**self.settings.get(), **saved})
         await self.clients[id].refresh_hello()
