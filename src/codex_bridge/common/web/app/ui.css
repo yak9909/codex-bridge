@@ -296,3 +296,32 @@ table.grid .indent { padding-left: var(--s4); }
 .composer-bar > button { margin-left: auto; }
 @media (min-width: 721px) { .alert { grid-template-columns: auto minmax(0, 1fr) minmax(0, auto) auto; } }
 .d-title h2 { overflow-wrap: anywhere; }
+
+/* Lend uses the same controls and panes as the mock. */
+.frame:has(.lend-shell) .brand { white-space: nowrap; }
+.lend-shell [data-part="head"] { display: contents; }
+.lend-shell .meters:empty { display: none; }
+.grow { flex: 1; min-width: 0; }
+.pre-timeout { display: inline-flex; align-items: center; gap: var(--s2); }
+.pre-timeout[hidden], .pop li[hidden] { display: none; }
+.lend-shell .set .ctl > .combo[data-combo="pre"] { flex: 1; width: auto; min-width: 160px; }
+.model-search input { width: 100%; }
+.lend-shell .alert .body { min-width: 0; }
+.lend-shell .alert input { width: 100%; min-width: 0; max-width: 24em; }
+.lend-shell .alerts { max-height: 40vh; overflow: auto; scrollbar-width: thin; }
+.pending-prompt { white-space: pre-wrap; overflow-wrap: anywhere; }
+.lend-shell .rowset .lbl { min-width: 0; flex-wrap: wrap; }
+.lend-shell .rowset .cap { overflow-wrap: anywhere; }
+.lend-shell .rowset .ctl { min-width: 0; }
+@media (min-width: 721px) and (max-width: 1040px) {
+  .lend-shell .lv { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 2fr); }
+  .lend-shell .list { border-right: 0; border-bottom: 1px solid var(--edge); }
+}
+@media (max-width: 1040px) {
+  .lend-shell .alert.multi { grid-template-columns: auto minmax(0, 1fr); }
+  .lend-shell .alert.multi .decide { grid-column: 1 / -1; }
+  .lend-shell .t-meta { flex-wrap: wrap; }
+}
+@media (max-width: 720px) {
+  .lend-shell .rowset .set { grid-template-columns: minmax(0, 1fr); }
+}

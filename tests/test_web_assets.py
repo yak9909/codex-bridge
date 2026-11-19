@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from codex_bridge.host.web.app import admin_router
+from codex_bridge.agent.ui import create_ui_app
 
 APP = Path(__file__).parents[1] / "src" / "codex_bridge" / "common" / "web" / "app"
 
@@ -33,3 +34,26 @@ def test_use_js_has_no_inline_handlers_or_scripts():
     for name, text in use_sources().items():
         assert not re.search(r"""\son[a-z]+\s*=""", text), f"{name}: inline event handler"
         assert "<script" not in text and "javascript:" not in text, f"{name}: inline script"
+
+
+def test_lend_js_exports_renderLend():
+    assert re.search(r"export\s+(async\s+)?function\s+renderLend\s*\(", (APP / "lend.js").read_text(encoding="utf-8"))
+
+
+def test_lend_js_uses_only_existing_routes():
+    app = create_ui_app(None, None, None, versions={}, data_root=Path("unused"))
+    routes = ["/lend" + r.path for r in app.routes if r.path.startswith("/api/")]
+    assert routes
+    patterns = [re.compile("^" + re.sub(r"\\\{[^}]*\\\}", "[^/]+", re.escape(p)) + "$") for p in routes]
+    seen = set()
+    sources = sorted(APP.glob("lend*.js"))
+    assert sources, "the lend tab has no script"
+    for source in sources:
+        text = source.read_text(encoding="utf-8")
+        for m in re.finditer(r"""["'`](/lend/api/[^"'`]*)["'`]""", text):
+            path = re.sub(r"\$\{[^}]*\}", "x", m.group(1)).split("?")[0]
+            seen.add(path)
+            assert any(p.match(path) for p in patterns), f"{source.name}: no lender route for {m.group(1)}"
+        assert not re.search(r"""\son[a-z]+\s*=""", text), f"{source.name}: inline event handler"
+        assert "<script" not in text and "javascript:" not in text, f"{source.name}: inline script"
+    assert seen, "the lend tab names no /lend/api route"

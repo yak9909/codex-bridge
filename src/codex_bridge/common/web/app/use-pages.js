@@ -1,6 +1,6 @@
 // The plain pages of the use tab: shared folders, the allowlist, and the empty state before the host is set up.
 import { esc } from "/app/static/api.js";
-import { icon } from "/app/static/use-util.js";
+import { icon } from "/app/static/common.js";
 
 const LEVELS = [["write", "書ける"], ["read", "読むだけ"], ["hidden", "見せない"]];
 

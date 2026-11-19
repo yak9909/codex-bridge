@@ -1,6 +1,6 @@
 // The 依頼 tab of the use tab: the list, the detail with its timeline, and the composer's pickers.
 import { esc, fmtTime, fmtDay } from "/app/static/api.js";
-import { icon, elapsed, taskTitle, stateLozenge, ACTIVE } from "/app/static/use-util.js";
+import { icon, elapsed, taskTitle, stateLozenge, ACTIVE } from "/app/static/common.js";
 
 const EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 const COMMAND_TOOLS = /^(run_command|commandExecution|command_execution)$/i;
@@ -13,12 +13,12 @@ const ENDINGS = {
   rejected_by_lender: ["circle-x", "相手が断りました"],
 };
 
-export function listHtml(tasks, selected) {
+export function listHtml(tasks, selected, keyFor = (t) => t.task_id) {
   const now = Date.now() / 1000;
   return tasks.map((t) => {
     const when = ACTIVE.includes(t.state) ? `<span>${esc(elapsed(now - t.created))}</span>` : `<span>${esc(fmtDay(t.created))}</span>`;
     const who = t.lender ? `<span>${esc(t.lender)}</span>` : "";
-    return `<li data-id="${esc(t.task_id)}" aria-selected="${selected === t.task_id}"><span class="t-title">${esc(taskTitle(t))}</span>` +
+    return `<li data-id="${esc(keyFor(t))}" aria-selected="${selected === keyFor(t)}"><span class="t-title">${esc(taskTitle(t))}</span>` +
       `<span class="t-meta">${stateLozenge(t.state)}${who}${when}</span></li>`;
   }).join("");
 }
@@ -27,7 +27,7 @@ export function newHeadHtml() {
   return '<div class="d-title"><h2>新しい依頼</h2></div>';
 }
 
-export function headHtml(r) {
+export function headHtml(r, readonly = false) {
   const now = Date.now() / 1000;
   const active = ACTIVE.includes(r.state);
   const model = r.actual_model || r.model;
@@ -41,7 +41,7 @@ export function headHtml(r) {
   const span = (r.finished || now) - r.created;
   const body = String(r.prompt || "").split(/\r?\n/).slice(1).join("\n");
   return `<div class="d-title"><h2>${esc(taskTitle(r))}</h2>` +
-    `${active ? `<button class="danger sm" data-act="cancel" data-id="${esc(r.task_id)}">中止</button>` : ""}</div>` +
+    `${active && !readonly ? `<button class="danger sm" data-act="cancel" data-id="${esc(r.task_id)}">中止</button>` : ""}</div>` +
     `<div class="d-meta">${stateLozenge(r.state)}${r.lender ? `<b>${esc(r.lender)}</b>` : ""}${used ? `<span>${esc(used)}</span>` : ""}${switched}` +
     `<span>${esc(elapsed(span))}</span></div>${body ? `<p class="d-body">${esc(body)}</p>` : ""}`;
 }

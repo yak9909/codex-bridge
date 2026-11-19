@@ -2,7 +2,7 @@
 // Every part is drawn into a container that stays in the page, and a refresh only writes what changed and is not being used
 // (a focused field, an open list), so scroll positions, open cards, the chosen request and typed text survive it.
 import { get, send, onChange, showError, clearError, esc, ago } from "/app/static/api.js";
-import { icon, busyInside, taskTitle, ACTIVE } from "/app/static/use-util.js";
+import { icon, busyInside, taskTitle, ACTIVE } from "/app/static/common.js";
 import { lenderParts } from "/app/static/use-lenders.js";
 import { listHtml, newHeadHtml, headHtml, timelineHtml, pickerOptions } from "/app/static/use-tasks.js";
 import { emptyHtml, foldersHtml, allowHtml } from "/app/static/use-pages.js";

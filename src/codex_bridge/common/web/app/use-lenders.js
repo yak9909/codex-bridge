@@ -1,11 +1,8 @@
 // The lender cards of the use tab: header, usage meters, and (open) the settings rows.
 import { esc, fmtDay } from "/app/static/api.js";
-import { icon, backAt, monthDay, onOff, taskTitle } from "/app/static/use-util.js";
+import { icon, monthDay, taskTitle, meter, row, toggle, logCombo as sharedLogCombo, OVER_LIMIT, CHEV } from "/app/static/common.js";
 
 const EXEC_MODES = [["off", "実行しない"], ["allowlist", "許可リストだけ自動"], ["ask", "毎回承認"], ["all", "すべて自動"]];
-const OVER_LIMIT = { report: "止めて報告させる", stop: "すぐ強制終了" };
-const LOG_LABEL = { summary: "なし", files: "道具の名前と対象", all: "道具の名前と対象・道具の結果" };
-const CHEV = icon("chevron-right");
 
 function stateOf(l) {
   if (l.connected && l.current_task_id) return ["作業中", "ok"];
@@ -21,16 +18,6 @@ function caption(l, tasks) {
   if (t) return `<span class="cap ellipsis">${esc(taskTitle(t))}</span>`;
   if (l.current_task_id) return `<span class="cap ellipsis">${esc(l.current_task_id)}</span>`;
   return '<span class="cap low">依頼はありません</span>';
-}
-
-function meter(label, win, limit) {
-  if (!win) return "";
-  const used = Math.max(0, Math.min(100, Math.round(win.used_percent)));
-  const hot = used >= (limit ?? 90) ? " hot" : "";
-  const help = [win.resets_at ? backAt(win.resets_at) : "", limit != null ? `上限 ${Math.round(limit)}%` : ""].filter(Boolean).join("・");
-  const mark = limit != null ? `<div class="m-mark" style="left:${Math.min(100, limit)}%"></div>` : "";
-  return `<span class="m-label">${label}</span><div class="m-bar"><div class="m-fill${hot}" style="width:${used}%"></div>${mark}</div>` +
-    `<span class="m-val${hot}">${used}%</span>${help ? `<span class="m-help">${esc(help)}</span>` : ""}`;
 }
 
 function head(l, ui, tasks) {
@@ -51,21 +38,13 @@ function sec(l) {
   return rows ? `<div class="ent-sec"><div class="meters">${rows}</div></div>` : "";
 }
 
-function row(label, control, cap = "") {
-  return `<div class="set"><span class="lbl">${label}${cap ? `<span class="cap">${cap}</span>` : ""}</span><div class="ctl">${control}</div></div>`;
-}
-
 function execSelect(l) {
   const opts = EXEC_MODES.map(([v, t]) => `<option value="${v}"${v === l.exec_mode ? " selected" : ""}>${t}</option>`).join("");
   return `<select data-act="exec-mode" data-name="${esc(l.name)}">${opts}</select>`;
 }
 
 function logCombo(l) {
-  const v = l.log_visibility || "summary";
-  const files = v === "files" || v === "all";
-  return `<details class="combo"><summary class="combo-box"><span class="summary">${esc(LOG_LABEL[v] || LOG_LABEL.summary)}</span>${CHEV}</summary>` +
-    `<ul class="pop"><li><label class="check"><input type="checkbox" data-act="log-files" data-name="${esc(l.name)}"${files ? " checked" : ""}>道具の名前と対象</label></li>` +
-    `<li><label class="check"><input type="checkbox" data-act="log-result" data-name="${esc(l.name)}"${v === "all" ? " checked" : ""}>道具の結果</label></li></ul></details>`;
+  return sharedLogCombo(l.log_visibility || "summary", `data-name="${esc(l.name)}"`);
 }
 
 function inviteRow(l, ui) {
@@ -89,7 +68,7 @@ function inviteRow(l, ui) {
 
 // ---- the lender's own settings, read-only: the same controls as on the lender's screen ----
 const dash = () => '<select class="ro" aria-readonly="true" tabindex="-1"><option>—</option></select>';
-const ro = (on) => `<label class="switch ro"><input type="checkbox" disabled${on ? " checked" : ""}><span class="track"></span><span>${onOff(on)}</span></label>`;
+const ro = (on) => toggle(on, "", true);
 
 function modelsRow(view) {
   const all = view && view.models_all;
@@ -127,7 +106,7 @@ function viewGroup(l) {
 }
 
 function setBody(l, ui) {
-  const del = `<label class="switch"><input type="checkbox" data-act="delete-approval" data-name="${esc(l.name)}"${l.delete_approval ? " checked" : ""}><span class="track"></span><span>${onOff(l.delete_approval)}</span></label>`;
+  const del = toggle(l.delete_approval, `data-act="delete-approval" data-name="${esc(l.name)}"`);
   return `<div class="ent-set">${row("コマンド実行", execSelect(l))}${row("削除の前に承認する", del)}${row("相手に見せる記録", logCombo(l))}` +
     `${inviteRow(l, ui)}${viewGroup(l)}</div>`;
 }
