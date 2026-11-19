@@ -4,7 +4,7 @@
 import { get, send, onChange, showError, clearError, esc, ago } from "/app/static/api.js";
 import { icon, codeFieldHtml, busyInside, taskTitle, ACTIVE } from "/app/static/common.js";
 import { lenderParts } from "/app/static/use-lenders.js";
-import { listHtml, newHeadHtml, headHtml, timelineHtml, pickerOptions } from "/app/static/use-tasks.js";
+import { listHtml, newHeadHtml, headHtml, promptHtml, timelineHtml, pickerOptions } from "/app/static/use-tasks.js";
 import { emptyHtml, foldersHtml, allowHtml, policyWarningsHtml } from "/app/static/use-pages.js";
 
 // what the user has chosen; it outlives the tab being left and entered again
@@ -55,6 +55,7 @@ const SHELL = `
           </section>
           <section class="detail" aria-label="依頼の詳細">
             <header class="d-head" data-slot="dhead"></header>
+            <div class="d-req scroll" data-slot="dreq"></div>
             <div class="d-log scroll" data-slot="dlog"></div>
             <form class="composer"><textarea rows="2" data-slot="text"></textarea><div class="composer-bar" data-slot="bar"></div></form>
           </section>
@@ -72,11 +73,11 @@ export function renderUse(root) {
   const q = (slot) => shell.querySelector(`[data-slot="${slot}"]`);
   const el = {
     count: q("count"), invite: q("invite"), lenders: q("lenders"), approvals: q("approvals"), items: q("items"),
-    dhead: q("dhead"), dlog: q("dlog"), text: q("text"), bar: q("bar"), form: shell.querySelector("form.composer"),
+    dhead: q("dhead"), dreq: q("dreq"), dlog: q("dlog"), text: q("text"), bar: q("bar"), form: shell.querySelector("form.composer"),
     folders: shell.querySelector('[data-panel="folders"]'), allow: shell.querySelector('[data-panel="allow"]'),
     tasks: shell.querySelector('[data-panel="tasks"]'), notices: q("notices"), warnings: q("policy-warnings"),
   };
-  const cache = { warnings: null, approvals: null, items: null, dhead: null, dlog: null, bar: null, folders: null, allow: null, empty: null };
+  const cache = { warnings: null, approvals: null, items: null, dhead: null, dreq: null, dlog: null, bar: null, folders: null, allow: null, empty: null };
   const view = { mode: null, sel: null, selKey: undefined, lenders: [], tasks: [], logFor: null };
   let alive = true;
   let busy = false;
@@ -145,28 +146,6 @@ export function renderUse(root) {
     el.count.textContent = String(view.lenders.length);
   }
 
-  function fitApprovalTitles() {
-    const range = document.createRange();
-    for (const title of el.approvals.querySelectorAll(".cap > .ellipsis")) {
-      const full = title.title;
-      title.textContent = full;
-      const width = title.getBoundingClientRect().width;
-      if (title.scrollWidth <= title.clientWidth) continue;
-      // Native ellipsis can leave unused space before the next flex item.
-      // Fit the text itself so the separator follows the ellipsis immediately.
-      const chars = Array.from(full);
-      let low = 0, high = chars.length;
-      while (low < high) {
-        const mid = Math.ceil((low + high) / 2);
-        title.textContent = chars.slice(0, mid).join("") + "…";
-        range.selectNodeContents(title);
-        if (range.getBoundingClientRect().width <= width) low = mid;
-        else high = mid - 1;
-      }
-      title.textContent = chars.slice(0, low).join("") + "…";
-    }
-  }
-
   function syncNotices() {
     const visible = !!cache.warnings || !el.approvals.hidden;
     el.notices.hidden = !visible;
@@ -190,9 +169,8 @@ export function renderUse(root) {
       const t = byTask.get(a.task_id);
       const title = t ? taskTitle(t) : "";
       const meta = [t && t.lender, ago(now - (a.age_sec || 0))].filter(Boolean).join("・");
-      const cap = `${title ? `<span class="ellipsis" title="${esc(title)}">${esc(title)}</span>` : ""}<span>${title ? "・" : ""}${esc(meta)}</span>`;
-      return `<div class="alert"><span class="lz warn">${a.kind === "command" ? "コマンド実行" : "削除"}</span><code>${esc(a.summary)}</code>` +
-        `<span class="cap">${cap}</span><span class="decide"><button class="sm" data-act="approve" data-id="${esc(a.id)}" data-yes="1">許可</button>` +
+      return `<div class="alert multi"><span class="lz warn">${a.kind === "command" ? "コマンド実行" : "削除"}</span><div class="body approval-body"><code>${esc(a.summary)}</code>` +
+        `<span class="pending-prompt" tabindex="0">${esc(title)}</span><span class="cap">${esc(meta)}</span></div><span class="decide"><button class="sm" data-act="approve" data-id="${esc(a.id)}" data-yes="1">許可</button>` +
         `<button class="danger sm" data-act="approve" data-id="${esc(a.id)}" data-yes="0">拒否</button></span></div>`;
     }).join("");
     el.approvals.hidden = !list.length;
@@ -200,7 +178,6 @@ export function renderUse(root) {
     if (html !== cache.approvals) {
       cache.approvals = html;
       el.approvals.innerHTML = html;
-      fitApprovalTitles();
     }
   }
 
@@ -259,6 +236,12 @@ export function renderUse(root) {
     if (head !== cache.dhead) {
       cache.dhead = head;
       el.dhead.innerHTML = head;
+    }
+    const req = isNew || !result ? "" : promptHtml(result);
+    if (req !== cache.dreq || view.logFor !== S.selected) {
+      if (req !== cache.dreq) el.dreq.innerHTML = req;
+      cache.dreq = req;
+      if (view.logFor !== S.selected) el.dreq.scrollTop = 0;
     }
     const body = isNew || !result ? "" : timelineHtml(result, result.events, result.progress);
     const fresh = view.logFor !== S.selected;
@@ -661,14 +644,11 @@ export function renderUse(root) {
   document.addEventListener("click", closeLists);
   document.addEventListener("keydown", closeLists);
 
-  const approvalResize = new ResizeObserver(fitApprovalTitles);
-  approvalResize.observe(el.approvals);
   drawInvite();
   refresh();
   const stop = onChange(refresh);
   return () => {
     alive = false;
-    approvalResize.disconnect();
     stop();
     root.removeEventListener("click", onClick);
     document.removeEventListener("click", closeLists);

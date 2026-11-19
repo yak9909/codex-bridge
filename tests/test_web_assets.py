@@ -150,15 +150,18 @@ assert.equal(policyWarningsHtml({}), "");
 def test_shared_task_detail_escapes_both_sides_and_keeps_approval_perspective(run_app_js):
     run_app_js('''
 import assert from "node:assert/strict";
-import { headHtml, timelineHtml } from "./use-tasks.js";
+import { headHtml, promptHtml, timelineHtml } from "./use-tasks.js";
 const task = {task_id: "t", state: "awaiting_lender", created: 1,
   lender: '<img src=x>', prompt: '<script>title</script>\\n<script>body</script>'};
 for (const side of ["use", "lend"]) {
   const head = headHtml(task, side === "lend", side);
   assert.ok(head.includes("&lt;img src=x&gt;"));
   assert.ok(head.includes("&lt;script&gt;title&lt;/script&gt;"));
-  assert.ok(head.includes("&lt;script&gt;body&lt;/script&gt;"));
   assert.ok(!head.includes("<script>") && !head.includes("<img"));
+  const prompt = promptHtml(task);
+  assert.ok(prompt.includes("&lt;script&gt;title&lt;/script&gt;"));
+  assert.ok(prompt.includes("&lt;script&gt;body&lt;/script&gt;"));
+  assert.ok(!prompt.includes("<script>"));
   const log = timelineHtml(task, [{kind:"agent_message", data:{text:"<script>message</script>"}}], "", side);
   assert.ok(log.includes("&lt;script&gt;message&lt;/script&gt;"));
   assert.ok(log.includes(side === "lend" ? "あなたの許可を待っています" : "相手の許可を待っています"));

@@ -39,11 +39,16 @@ export function headHtml(r, readonly = false, side = "use") {
     switched = `<span class="badge" title="${esc(`途中で ${r.rerouted.from} から切り替わりました${why}`)}">${esc(r.rerouted.from)} から切り替え</span>`;
   }
   const span = (r.finished || now) - r.created;
-  const body = String(r.prompt || "").split(/\r?\n/).slice(1).join("\n");
-  return `<div class="d-title"><h2>${esc(taskTitle(r))}</h2>` +
+  // the title is one line; the whole request is in its own scrolling region (promptHtml), so no length can push the log away
+  return `<div class="d-title"><h2 class="ellipsis" title="${esc(taskTitle(r))}">${esc(taskTitle(r))}</h2>` +
     `${active && !readonly ? `<button class="danger sm" data-act="cancel" data-id="${esc(r.task_id)}">中止</button>` : ""}</div>` +
     `<div class="d-meta">${stateLozenge(r.state, side)}${r.lender ? `<b>${esc(r.lender)}</b>` : ""}${used ? `<span>${esc(used)}</span>` : ""}${switched}` +
-    `<span>${esc(elapsed(span))}</span></div>${body ? `<p class="d-body">${esc(body)}</p>` : ""}`;
+    `<span>${esc(elapsed(span))}</span></div>`;
+}
+
+export function promptHtml(r) {
+  const prompt = String(r?.prompt || "");
+  return prompt ? `<h3>依頼文</h3><p class="d-prompt">${esc(prompt)}</p>` : "";
 }
 
 function item(cls, iconId, body, ts) {

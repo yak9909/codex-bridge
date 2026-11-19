@@ -17,6 +17,7 @@
   --warn: #7a4507; --warn-soft: #fdf3e2; --warn-line: #efd29b; --warn-mark: #d9930d;
   --bad: #b42318; --bad-soft: #fdecea; --ok: #1b7a4b;
   --fs-title: 16px; --fs: 14px; --fs-cap: 12px; --fs-cap2: 10px; /* cap2: meter helper only */
+  --lh-body: 20px;
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px;
   --ctl: 32px; --ctl-sm: 24px; --r: 6px;
   --font: "BIZ UDPGothic", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
@@ -25,7 +26,7 @@
   --sbw: 0px; /* width of a classic scrollbar, set by ui.js; stays 0 with overlay scrollbars */
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--ground); color: var(--ink); font-family: var(--font); font-size: var(--fs); line-height: 20px; font-variant-numeric: tabular-nums; }
+body { margin: 0; background: var(--ground); color: var(--ink); font-family: var(--font); font-size: var(--fs); line-height: var(--lh-body); font-variant-numeric: tabular-nums; }
 h1, h2, h3, p, ol, ul, dl { margin: 0; }
 h2 { font-size: var(--fs-title); line-height: 24px; font-weight: 700; }
 h3 { font-size: var(--fs); font-weight: 700; }
@@ -210,14 +211,18 @@ select.ro, input.ro { pointer-events: none; appearance: none; }
 .items .t-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .items .t-meta { display: flex; align-items: center; gap: var(--s2); font-size: var(--fs-cap); line-height: 16px; color: var(--muted); }
 
-/* details: title, then one meta line right under it, then the request; the activity log scrolls under its own heading */
-.detail { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-height: 0; min-width: 0; }
+/* details: title and one meta line; then two regions that scroll on their own — the request (at most 4/10 of the pane, so a
+   long request never hides the log) and the activity log (the rest); then the composer */
+.detail { display: grid; grid-template-rows: auto fit-content(40%) minmax(0, 1fr) auto; min-height: 0; min-width: 0; }
+.d-req { min-height: 0; padding: var(--s3) max(0px, calc(var(--s4) - var(--sbw))) var(--s3) var(--s4); border-bottom: 1px solid var(--line); }
+.d-req:empty { display: none; }
+.d-req > h3 { font-size: var(--fs-cap); color: var(--muted); margin-bottom: var(--s2); }
+.d-prompt { white-space: pre-wrap; overflow-wrap: anywhere; }
 .d-head { display: grid; gap: var(--s2); padding: var(--s4); border-bottom: 1px solid var(--line); }
 .d-title { display: flex; align-items: center; gap: var(--s2); }
 .d-title h2 { flex: 1; min-width: 0; }
 .d-meta { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; font-size: var(--fs-cap); line-height: 16px; color: var(--muted); }
 .d-meta b { color: var(--ink); }
-.d-body { padding-top: var(--s1); white-space: pre-wrap; }
 .d-log { min-height: 0; padding: var(--s3) max(0px, calc(var(--s4) - var(--sbw))) var(--s3) var(--s4); }
 .d-log > h3 { font-size: var(--fs-cap); color: var(--muted); margin-bottom: var(--s2); }
 /* activity timeline (primer-timeline.md): vertical line, small badge per item, time on the right */
@@ -270,6 +275,7 @@ table.grid .indent { padding-left: var(--s4); }
   .list { border-right: 0; border-bottom: 1px solid var(--edge); }
   .items { max-height: 40vh; }
   .d-log { max-height: 50vh; }
+  .d-req { max-height: 30vh; }
   .topbar { flex-wrap: wrap; height: auto; padding: var(--s2) var(--s4); }
   .alert { grid-template-columns: auto minmax(0, 1fr); }
   .alert .decide { grid-column: 1 / -1; }
@@ -293,12 +299,22 @@ table.grid .indent { padding-left: var(--s4); }
 .tl-body { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* Keep the hidden toggle inputs inside their scroll pane's containing block. */
 .switch { position: relative; }
-.alert > .cap { display: flex; align-items: center; min-width: 0; max-width: 240px; white-space: nowrap; }
-.alert > .cap > span:last-child { flex: none; }
+/* Only the request scrolls: keep metadata and decision controls outside its box.
+   Equal rows also keep multiple approvals within the same share of the window. */
+.alerts { display: grid; grid-auto-rows: minmax(0, 1fr); max-height: 30vh; }
+.alerts[hidden] { display: none; }
+.alert.multi { min-height: 0; grid-template-rows: minmax(0, 1fr); }
+.alert.multi .body { min-width: 0; min-height: 0; align-self: stretch; grid-template-rows: minmax(0, 1fr) auto auto; }
+.alert.multi .approval-body { grid-template-rows: auto minmax(0, 1fr) auto; }
+.pending-prompt { display: block; min-height: 0; max-height: calc(5 * var(--lh-body)); overflow: auto; scrollbar-width: thin;
+  font-size: var(--fs); line-height: var(--lh-body); white-space: pre-wrap; overflow-wrap: anywhere;
+  padding: var(--s2); border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); }
 .composer-bar { flex-wrap: wrap; }
 .composer-bar > button { margin-left: auto; }
 @media (min-width: 721px) { .alert { grid-template-columns: auto minmax(0, 1fr) minmax(0, auto) auto; } }
-.d-title h2 { overflow-wrap: anywhere; }
+
+/* A grid's automatic minimum must not let the unwrapped title widen the detail. */
+.d-head { grid-template-columns: minmax(0, 1fr); }
 
 /* Lend uses the same controls and panes as the mock. */
 .frame:has(.lend-shell) .brand { white-space: nowrap; }
@@ -309,10 +325,7 @@ table.grid .indent { padding-left: var(--s4); }
 .pre-timeout[hidden], .pop li[hidden] { display: none; }
 .lend-shell .set .ctl > .combo[data-combo="pre"] { flex: 1; width: auto; min-width: 160px; }
 .model-search input { width: 100%; }
-.lend-shell .alert .body { min-width: 0; }
 .lend-shell .alert input { width: 100%; min-width: 0; max-width: 24em; }
-.lend-shell .alerts { max-height: 40vh; overflow: auto; scrollbar-width: thin; }
-.pending-prompt { white-space: pre-wrap; overflow-wrap: anywhere; }
 .lend-shell .rowset .lbl { min-width: 0; flex-wrap: wrap; }
 .lend-shell .rowset .cap { overflow-wrap: anywhere; }
 .lend-shell .rowset .ctl { min-width: 0; }
@@ -321,8 +334,8 @@ table.grid .indent { padding-left: var(--s4); }
   .lend-shell .list { border-right: 0; border-bottom: 1px solid var(--edge); }
 }
 @media (max-width: 1040px) {
-  .lend-shell .alert.multi { grid-template-columns: auto minmax(0, 1fr); }
-  .lend-shell .alert.multi .decide { grid-column: 1 / -1; }
+  .alert.multi { grid-template-columns: auto minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+  .alert.multi .decide { grid-column: 1 / -1; }
   .lend-shell .t-meta { flex-wrap: wrap; }
 }
 @media (max-width: 720px) {

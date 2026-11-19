@@ -1,7 +1,7 @@
 // The lender's screen. Stable slots keep typing, popovers and scrolling intact during refresh.
 import { get, send, onChange, showError, clearError, esc, ago } from "/app/static/api.js";
 import { icon, meter, busyInside, ACTIVE, LOG_LABEL } from "/app/static/common.js";
-import { listHtml, headHtml, timelineHtml } from "/app/static/use-tasks.js";
+import { listHtml, headHtml, promptHtml, timelineHtml } from "/app/static/use-tasks.js";
 import { connectionHead, settingsHtml, modelSummary, preSummary } from "/app/static/lend-cards.js";
 import { pcHtml, setupErrorHtml } from "/app/static/lend-pages.js";
 
@@ -31,7 +31,7 @@ const SHELL = `<div class="shell lend-shell">
   <div class="work no-alerts"><div class="alerts" data-slot="pending" aria-label="許可を待っている依頼" hidden></div>
     <div class="surface"><nav class="tablist" role="tablist"><button class="tab" role="tab" data-tab="tasks" aria-selected="true">依頼</button><button class="tab" role="tab" data-tab="pc" aria-selected="false">この PC</button></nav>
       <div class="lv" data-panel="tasks"><section class="list" aria-label="依頼の一覧"><div class="pane-head" data-slot="filter"></div><ul class="items" data-slot="items"></ul></section>
-        <section class="detail" aria-label="依頼の詳細"><header class="d-head" data-slot="head"></header><div class="d-log scroll" data-slot="log"></div><div></div></section></div>
+        <section class="detail" aria-label="依頼の詳細"><header class="d-head" data-slot="head"></header><div class="d-req scroll" data-slot="req"></div><div class="d-log scroll" data-slot="log"></div><div></div></section></div>
       <div class="page scroll" data-panel="pc" hidden></div>
     </div>
   </div></div>`;
@@ -40,7 +40,7 @@ export function renderLend(root) {
   const shell = fromHtml(SHELL);
   root.replaceChildren(shell);
   const q = (slot) => shell.querySelector(`[data-slot="${slot}"]`);
-  const el = Object.fromEntries(["meters", "limits", "count", "invite", "connections", "pending", "filter", "items", "head", "log", "setup-error"].map((k) => [k, q(k)]));
+  const el = Object.fromEntries(["meters", "limits", "count", "invite", "connections", "pending", "filter", "items", "head", "req", "log", "setup-error"].map((k) => [k, q(k)]));
   el.pc = shell.querySelector('[data-panel="pc"]');
   const view = { connections: [], tasks: [], settings: new Map(), pending: null, shared: null, overview: {}, logFor: null, pendingKey: null };
   let alive = true, reading = false, again = false, revision = 0, writing = 0;
@@ -106,7 +106,7 @@ export function renderLend(root) {
     const key = p ? JSON.stringify([p.connection_id, p.task_id, p.created]) : null;
     if (key !== view.pendingKey) {
       const meta = p ? pendingMeta(p) : "";
-      patch(el.pending, p ? `<div class="alert multi"><span class="lz warn">${p.kind === "start" ? "新しい依頼" : "追加の指示"}</span><div class="body"><span class="pending-prompt">${esc(p.prompt)}</span><span class="cap" data-pending-meta>${esc(meta)}</span><input class="sm" data-act="reason" placeholder="拒否する理由（任意）" aria-label="拒否する理由（任意）"></div><span class="decide"><button class="sm" data-act="decide" data-yes="1">許可</button><button class="danger sm" data-act="decide" data-yes="0">拒否</button></span></div>` : "");
+      patch(el.pending, p ? `<div class="alert multi"><span class="lz warn">${p.kind === "start" ? "新しい依頼" : "追加の指示"}</span><div class="body"><span class="pending-prompt" tabindex="0">${esc(p.prompt)}</span><span class="cap" data-pending-meta>${esc(meta)}</span><input class="sm" data-act="reason" placeholder="拒否する理由（任意）" aria-label="拒否する理由（任意）"></div><span class="decide"><button class="sm" data-act="decide" data-yes="1">許可</button><button class="danger sm" data-act="decide" data-yes="0">拒否</button></span></div>` : "");
       view.pendingKey = key;
     } else if (p) {
       el.pending.querySelector('[data-pending-meta]').innerHTML = esc(pendingMeta(p));
@@ -136,6 +136,8 @@ export function renderLend(root) {
       rerouted: result.rerouted || (rerouted ? { from: rerouted.rerouted_from, reason: rerouted.reason } : null) } : null;
     patch(el.head, detail ? headHtml(detail, true, "lend") : "");
     const fresh = view.logFor !== S.selected;
+    patch(el.req, promptHtml(result));
+    if (fresh) el.req.scrollTop = 0;
     const atEnd = el.log.scrollHeight - el.log.scrollTop - el.log.clientHeight < 24;
     patch(el.log, result ? timelineHtml(result, result.events, result.progress, "lend") : "");
     if (fresh || atEnd) el.log.scrollTop = el.log.scrollHeight;
