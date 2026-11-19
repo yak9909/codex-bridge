@@ -40,7 +40,7 @@ export function headHtml(r) {
   }
   const span = (r.finished || now) - r.created;
   const body = String(r.prompt || "").split(/\r?\n/).slice(1).join("\n");
-  return `<div class="d-title"><h2 class="ellipsis">${esc(taskTitle(r))}</h2>` +
+  return `<div class="d-title"><h2>${esc(taskTitle(r))}</h2>` +
     `${active ? `<button class="danger sm" data-act="cancel" data-id="${esc(r.task_id)}">中止</button>` : ""}</div>` +
     `<div class="d-meta">${stateLozenge(r.state)}${r.lender ? `<b>${esc(r.lender)}</b>` : ""}${used ? `<span>${esc(used)}</span>` : ""}${switched}` +
     `<span>${esc(elapsed(span))}</span></div>${body ? `<p class="d-body">${esc(body)}</p>` : ""}`;

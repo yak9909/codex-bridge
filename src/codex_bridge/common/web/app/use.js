@@ -142,6 +142,28 @@ export function renderUse(root) {
     el.count.textContent = String(view.lenders.length);
   }
 
+  function fitApprovalTitles() {
+    const range = document.createRange();
+    for (const title of el.approvals.querySelectorAll(".cap > .ellipsis")) {
+      const full = title.title;
+      title.textContent = full;
+      const width = title.getBoundingClientRect().width;
+      if (title.scrollWidth <= title.clientWidth) continue;
+      // Native ellipsis can leave unused space before the next flex item.
+      // Fit the text itself so the separator follows the ellipsis immediately.
+      const chars = Array.from(full);
+      let low = 0, high = chars.length;
+      while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        title.textContent = chars.slice(0, mid).join("") + "…";
+        range.selectNodeContents(title);
+        if (range.getBoundingClientRect().width <= width) low = mid;
+        else high = mid - 1;
+      }
+      title.textContent = chars.slice(0, low).join("") + "…";
+    }
+  }
+
   function drawApprovals(list) {
     const byTask = new Map(view.tasks.map((t) => [t.task_id, t]));
     const now = Date.now() / 1000;
@@ -149,7 +171,7 @@ export function renderUse(root) {
       const t = byTask.get(a.task_id);
       const title = t ? taskTitle(t) : "";
       const meta = [t && t.lender, ago(now - (a.age_sec || 0))].filter(Boolean).join("・");
-      const cap = `${title ? `<span class="ellipsis">${esc(title)}</span>・` : ""}<span>${esc(meta)}</span>`;
+      const cap = `${title ? `<span class="ellipsis" title="${esc(title)}">${esc(title)}</span>` : ""}<span>${title ? "・" : ""}${esc(meta)}</span>`;
       return `<div class="alert"><span class="lz warn">${a.kind === "command" ? "コマンド実行" : "削除"}</span><code>${esc(a.summary)}</code>` +
         `<span class="cap">${cap}</span><span class="decide"><button class="sm" data-act="approve" data-id="${esc(a.id)}" data-yes="1">許可</button>` +
         `<button class="danger sm" data-act="approve" data-id="${esc(a.id)}" data-yes="0">拒否</button></span></div>`;
@@ -159,6 +181,7 @@ export function renderUse(root) {
     if (html !== cache.approvals) {
       cache.approvals = html;
       el.approvals.innerHTML = html;
+      fitApprovalTitles();
     }
   }
 
@@ -615,11 +638,14 @@ export function renderUse(root) {
   document.addEventListener("click", closeLists);
   document.addEventListener("keydown", closeLists);
 
+  const approvalResize = new ResizeObserver(fitApprovalTitles);
+  approvalResize.observe(el.approvals);
   drawInvite();
   refresh();
   const stop = onChange(refresh);
   return () => {
     alive = false;
+    approvalResize.disconnect();
     stop();
     root.removeEventListener("click", onClick);
     document.removeEventListener("click", closeLists);

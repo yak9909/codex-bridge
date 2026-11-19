@@ -295,3 +295,4 @@ table.grid .indent { padding-left: var(--s4); }
 .composer-bar { flex-wrap: wrap; }
 .composer-bar > button { margin-left: auto; }
 @media (min-width: 721px) { .alert { grid-template-columns: auto minmax(0, 1fr) minmax(0, auto) auto; } }
+.d-title h2 { overflow-wrap: anywhere; }
