@@ -65,6 +65,7 @@ class FakeHostRole:
 class FakeAgent:
     def __init__(self, connections=0):
         self.paused = False
+        self.error = None
         self.connections = connections
         self.on_moved = None
 
@@ -300,7 +301,8 @@ def test_setup_from_app_text(tmp_path, monkeypatch, capsys):
     run_setup(tmp_path / "host.yaml", from_app=True)
     out = capsys.readouterr().out
     assert "画面に戻ってください" in out
-    assert "start.bat" not in out and "使う側" not in out and "知人" not in out
+    for word in ("start.bat", "使う側", "知人", "管理画面"):
+        assert word not in out and not any(word in p for p in prompts)
     assert "「使う」タブで「招待」を押してコードを発行し" in out and "「貸す」タブにコードを貼る" in out
     assert prompts[-1].startswith("Enter キーを押すと閉じます")  # it waits for Enter before the exit code 0
     assert (tmp_path / "host.yaml").exists()
@@ -435,7 +437,7 @@ async def test_state_counts(tmp_path):
     async with client_for(create_resident_app(res)) as web:
         assert (await web.get("/app/api/state")).json() == {
             "use": {"configured": True, "running": False, "error": None},
-            "lend": {"connections": 4}, "paused": False}
+            "lend": {"connections": 4, "error": None}, "paused": False}
     res.host_role.running = True
     assert res.status_line() == "貸す人 1/2・依頼主 3/4・承認待ち 7"
 
@@ -551,6 +553,7 @@ async def test_declined_codex_download_is_a_message_not_a_crash(tmp_path, monkey
             r = await web.post("/lend/api/connections", headers=H,
                                json={"code": make_invite("http://host.invalid", "tok", "友")})
             assert r.status_code == 409 and "Codex" in r.json()["detail"]
+            assert (await web.get("/app/api/state")).json()["lend"]["error"] == r.json()["detail"]
             assert (await web.get("/lend/api/connections")).json() == []
     finally:
         await role.stop()
@@ -784,3 +787,161 @@ async def test_one_server_dying_stops_the_other_and_a_retry_works(tmp_path):
         assert role.running and role.error is None
     finally:
         await role.stop()
+
+
+@pytest.mark.parametrize("overlap", ["start", "stop"])
+async def test_host_lifecycle_calls_are_serialized(tmp_path, monkeypatch, overlap):
+    role = HostRole(role_config(tmp_path), AppLog(tmp_path / "app.jsonl"), tailscale_ip=None)
+    entered, release = asyncio.Event(), asyncio.Event()
+    refreshes = []
+
+    async def refresh():
+        refreshes.append(True)
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(role, "_refresh_public_bind", refresh)
+    first = asyncio.create_task(role.start())
+    await asyncio.wait_for(entered.wait(), 2)
+    second = asyncio.create_task(getattr(role, overlap)())
+    await asyncio.sleep(0)
+    release.set()
+    try:
+        await asyncio.wait_for(asyncio.gather(first, second), 5)
+        assert len(refreshes) == 1
+        if overlap == "start":
+            assert role.running and role.host is not None and role.error is None
+            assert len(role._tasks) == 2 and all(not t.done() for t in role._tasks)
+        else:
+            assert not role.running and role.host is None and not role._tasks
+    finally:
+        release.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+        await role.stop()
+
+
+async def test_resident_retries_a_host_whose_server_ends(tmp_path):
+    role = HostRole(role_config(tmp_path), AppLog(tmp_path / "app.jsonl"), tailscale_ip=None)
+    res = make_resident(tmp_path, host_role=role)
+    res.retry_interval = 0.01
+    try:
+        await res.start_host()
+        original = role.host
+        role._tasks[0].cancel()
+
+        async def restarted():
+            while not (role.running and role.host is not None and role.host is not original):
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(restarted(), 5)
+        assert role.error is None
+        assert any("使う側が止まりました" in e["text"] for e in role.applog.entries(min_level="error"))
+    finally:
+        for task in res._background:
+            task.cancel()
+        await asyncio.gather(*res._background, return_exceptions=True)
+        await role.stop()
+
+
+async def test_shutdown_after_log_folder_is_removed_stops_both_roles(tmp_path):
+    applog = AppLog(tmp_path / "logs" / "app.jsonl")
+    role = HostRole(role_config(tmp_path), applog, tailscale_ip=None)
+    agent = FakeAgentRun()
+    res = Resident(applog=applog, agent=agent, host_role=role, config_path=role.config_path)
+    await role.start()
+    applog.path.unlink()
+    applog.path.parent.rmdir()
+    serving = asyncio.create_task(asyncio.sleep(0))
+    await res._shutdown(SimpleNamespace(should_exit=False), serving)
+    assert not role.running and role.host is None
+    assert agent.log == ["stop"]
+    assert not applog.path.parent.exists()
+
+
+@pytest.mark.parametrize("saved_pause", [False, True])
+@pytest.mark.parametrize("host_fails", [False, True])
+async def test_resident_applies_saved_host_pause_before_lending_starts(tmp_path, saved_pause, host_fails):
+    host = make_host(tmp_path)
+    host.policy.update(paused=saved_pause)
+    observed = []
+
+    class Agent(FakeAgentRun):
+        async def start(self):
+            observed.append(self.paused)
+            res.stop_event.set()
+
+    class Server:
+        should_exit = False
+
+        async def serve(self):
+            while not self.should_exit:
+                await asyncio.sleep(0.01)
+
+    agent = Agent()
+    agent.paused = not saved_pause
+    tray = FakeTray()
+    tray.run_detached = tray.stop = lambda: None
+    role = FakeHostRole(host=host, error="ポートは使用中です" if host_fails else None)
+    res = Resident(applog=AppLog(tmp_path / "app.jsonl"), agent=agent, host_role=role,
+                   config_path=host.config_path, tray_factory=lambda r: tray,
+                   server_factory=lambda app, port: Server())
+    await asyncio.wait_for(res._run(), 5)
+    assert observed == [saved_pause] and agent.paused is saved_pause
+
+
+async def test_starting_host_after_lender_pause_pauses_both(tmp_path):
+    res = make_resident(tmp_path)
+    await res.set_paused(True)
+    host = make_host(tmp_path)  # setup finishes after the lender was paused
+    res.host_role = FakeHostRole(host=host)
+    try:
+        await res.start_host()
+        assert res.agent.paused and host.policy.current().paused and res.paused
+    finally:
+        for task in res._background:
+            task.cancel()
+        await asyncio.gather(*res._background, return_exceptions=True)
+
+
+async def test_resume_while_host_is_down_updates_its_saved_pause(tmp_path):
+    host = make_host(tmp_path)
+    host.policy.update(paused=True)
+    res = make_resident(tmp_path)  # no Host object until a retry succeeds
+    async with client_for(create_resident_app(res)) as web:
+        assert (await web.get("/app/api/state")).json()["paused"] is True
+        assert (await web.post("/app/api/pause", json={"paused": False}, headers=H)).json() == {"paused": False}
+    assert not res.agent.paused and not host.policy.current().paused
+
+
+@pytest.mark.parametrize("host_paused,agent_paused", [(True, False), (False, True)])
+async def test_pause_state_and_tray_use_either_side_and_resume_both(tmp_path, host_paused, agent_paused):
+    host = make_host(tmp_path)
+    host.policy.update(paused=host_paused)
+    role = FakeHostRole(host=host)
+    role.running = True
+    res = make_resident(tmp_path, host_role=role)
+    res.agent.paused = agent_paused
+    menu = []
+
+    class Icon:
+        def __init__(self, *args, **kwargs):
+            menu.extend(kwargs["menu"])
+
+    # Capture the real tray menu label callback without creating a native icon.
+    from unittest.mock import patch
+    with patch.dict(sys.modules, {"pystray": SimpleNamespace(
+            Icon=Icon, Menu=lambda *items: items,
+            MenuItem=lambda text, action, **kwargs: (text, action))}):
+        res._make_tray(res)
+    assert menu[2][0](None) == "再開"
+    async with client_for(create_resident_app(res)) as web:
+        assert (await web.get("/app/api/state")).json()["paused"] is True
+        assert (await web.post("/app/api/pause", json={"paused": False}, headers=H)).json() == {"paused": False}
+        assert (await web.get("/app/api/state")).json()["paused"] is False
+    assert not res.agent.paused and not host.policy.current().paused
+    assert menu[2][0](None) == "一時停止"
+
+
+async def test_state_exposes_lender_setup_error(web, res):
+    res.agent.error = "Codex をダウンロードできませんでした: オフラインです"
+    assert (await web.get("/app/api/state")).json()["lend"]["error"] == res.agent.error

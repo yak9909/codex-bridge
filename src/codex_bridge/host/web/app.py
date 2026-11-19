@@ -221,7 +221,7 @@ def admin_router(host, page_url: str | None = None) -> APIRouter:
                  "delete_approval": policy.delete_approval_for(row["name"]),
                  "log_visibility": host.mgr.log_visibility_for(row["name"]),
                  "invite_created": created.get(row["name"])}
-                for row in host.mgr.lenders(i["name"] for i in invites)]
+                for row in host.mgr.lenders(created) if row["name"] in created]
 
     def _known_lender(name: str) -> None:
         if name not in {i["name"] for i in host.tokens.list()}:
@@ -328,10 +328,10 @@ def admin_router(host, page_url: str | None = None) -> APIRouter:
     @r.post("/api/invites")
     async def issue(body: dict):
         name = str(body.get("name") or "friend").strip()
-        token = host.tokens.issue(name)
         if name not in host.policy.current().lender_exec_modes:
             host.policy.set_lender_exec_mode(name, "ask")  # a new lender starts at "ask every time"
             host.events.notify()
+        token = host.tokens.issue(name)
         return {"code": make_invite(f"http://{host.config.public_bind}", token, name)}
 
     @r.post("/api/invites/{name}/reissue")

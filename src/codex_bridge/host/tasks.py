@@ -22,14 +22,14 @@ from .paths import ToolError
 ACTIVE_STATES = ("queued", "running", "agent_offline", "awaiting_lender")  # awaiting_lender: the lender has not approved yet
 NO_THRESHOLDS: dict = {}  # the borrower sets no limit of its own: only the lender's `limits` count
 REQUEST_TIMEOUT = 30.0
-NOT_CONNECTED = "知人側の agent が接続されていません。知人の PC で codex-bridge の「貸す側」が動いているか確かめてください。"
-BUSY = "作業中のタスクがあります: {}（終わるのを待つか cancel_task で止めてください）"
+NOT_CONNECTED = "貸す人が接続されていません。貸す人の PC で codex-bridge が起動し、「貸す」タブに招待コードを入れているか確かめてください。"
+BUSY = "作業中の依頼があります: {}（終わるのを待つか、取り消してください）"
 QUOTA = "使用量の上限のため受け付けません。再開可能: {}"
 # A continuation can only go to the lender whose Codex holds the session (design §3.3).
 RETRY_FRESH = "続きとしては送れないので、前回の報告を添えて新しく依頼してください。"
-NOT_READY = "「{}」の agent は接続したばかりで、まだ準備ができていません。数秒待ってからやり直してください。"
-AWAITING = ("{} は、Codex を貸している人の承認待ちです。承認されるまで追加の指示は送れません"
-            "（待つか cancel_task で止めてください）。")
+NOT_READY = "貸す人「{}」は接続したばかりで、まだ準備ができていません。数秒待ってからやり直してください。"
+AWAITING = ("{} は、貸す人の承認待ちです。承認されるまで追加の指示は送れません"
+            "（待つか、取り消してください）。")
 PROGRESS_MAX = 20_000  # characters of the half-written message that are kept
 SPOILT ="記録が壊れていたため、このタスクがどう終わったかは分かりません。"
 
@@ -223,7 +223,7 @@ class TaskManager:
                 self._save(rec)
         for owner, fut in self._pending.values():
             if owner == lender.name and not fut.done():
-                fut.set_exception(ToolError("知人側の agent との接続が切れました"))
+                fut.set_exception(ToolError("貸す人との接続が切れました"))
         self._changed()
 
     def _connected(self) -> list[Lender]:
@@ -237,8 +237,8 @@ class TaskManager:
         if name is not None:
             lender = self._lenders.get(name)
             if lender is None or not lender.connected or not self._invited(name):
-                raise ToolError(f"「{name}」の agent が接続されていません。"
-                                "その人の PC で codex-bridge の「貸す側」が動いているか確かめてください。")
+                raise ToolError(f"貸す人「{name}」が接続されていません。"
+                                "その人の PC で codex-bridge が起動し、「貸す」タブに招待コードを入れているか確かめてください。")
             return lender
         online = self._connected()
         if not online:
@@ -396,7 +396,7 @@ class TaskManager:
                 if m.get("ok"):
                     fut.set_result(m.get("data"))
                 else:
-                    fut.set_exception(ToolError(m.get("error") or "agent でエラーが起きました"))
+                    fut.set_exception(ToolError(m.get("error") or "貸す人の PC でエラーが起きました"))
 
     def _reconcile(self, lender: Lender, agent_task_id: str | None) -> None:
         """After (re)connect: keep the task this lender's agent still runs, fail the ones it lost
@@ -411,13 +411,19 @@ class TaskManager:
             else:
                 rec.state = "failed"
                 rec.guessed = True  # until the agent says how the task really ended (see task_state)
-                rec.report = rec.report or ("知人側の agent が再起動したため、このタスクは中断されました。"
-                                             "続けるなら send_task の continue_task_id を使ってください。")
+                rec.report = rec.report or ("貸す人の codex-bridge が起動し直したため、この依頼は中断されました。"
+                                             "続けるなら、この依頼の続きとして送ってください。")
             rec.state_before_offline = None
             self._save(rec)
 
     def log_visibility_for(self, name: str) -> str:
         return self.settings["lender_log_visibility"].get(name, self.settings["log_visibility"])
+
+    def drop_lender_settings(self, name: str) -> None:
+        if name in self.settings["lender_log_visibility"]:
+            del self.settings["lender_log_visibility"][name]
+            self._save_settings()
+        self._changed()
 
     def _settings_msg(self, lender: str) -> dict:
         # thresholds stay in the message (empty) so that a v0.2 agent, which reads the key, keeps working
@@ -512,7 +518,7 @@ class TaskManager:
                                 f"「{lender}」には続きを送れません。{RETRY_FRESH}")
             target = self._lenders.get(prev.lender)
             if target is None or not target.connected or not self._invited(prev.lender):
-                raise ToolError(f"このタスクの会話を持つ「{prev.lender}」の agent が接続されていません。{RETRY_FRESH}")
+                raise ToolError(f"この依頼の会話を持つ貸す人「{prev.lender}」が接続されていません。{RETRY_FRESH}")
         self._ready(target)
         reason = lender_accepts(target, model, effort)
         if reason:
@@ -573,7 +579,7 @@ class TaskManager:
     async def followup(self, task_id: str, text: str) -> None:
         rec = self._get(task_id)
         if rec.state not in ACTIVE_STATES:
-            raise ToolError(f"このタスクは作業中ではありません（{rec.state}）。続けるなら send_task の continue_task_id を使ってください")
+            raise ToolError(f"この依頼は作業中ではありません（{rec.state}）。続けるなら、この依頼の続きとして送ってください")
         if rec.state == "awaiting_lender":
             raise ToolError(AWAITING.format(task_id))
         await self._send_for(rec, protocol.msg("task_followup", task_id=task_id, text=text))
@@ -634,7 +640,7 @@ class TaskManager:
             await target.send(protocol.msg(type_, req_id=req_id, **fields))
             return await asyncio.wait_for(fut, REQUEST_TIMEOUT)
         except asyncio.TimeoutError:
-            raise ToolError("agent から返事がありませんでした") from None
+            raise ToolError("貸す人の PC から返事がありませんでした") from None
         finally:
             self._pending.pop(req_id, None)
 

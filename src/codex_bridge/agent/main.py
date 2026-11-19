@@ -245,8 +245,11 @@ class AgentConnections:
             raise RuntimeError("作業中・承認待ちの接続先は変更できません")
 
     async def replace_invite(self, id, code):
+        parse_invite(code)  # a bad code must not start a Codex download
         async with self.slot.lock:
             self._require_idle(id)
+            if self.before_add is not None:
+                await self.before_add()  # retry Codex setup if startup failed
             connection = self.store.replace_invite(id, code)
             await self._stop_connection(id)
             runner, client = self.runners[id], self.clients[id]
@@ -445,9 +448,11 @@ class AgentRole:
             try:
                 codex = await asyncio.to_thread(resolve_codex, self.home)
             except Exception as e:
-                raise RuntimeError(f"Codex をダウンロードできませんでした: {e}") from e
+                self.error = f"Codex をダウンロードできませんでした: {e}"
+                raise RuntimeError(self.error) from e
             if codex is None:
-                raise RuntimeError("Codex が見つからないため、貸す人の接続を始められません")
+                self.error = "Codex が見つからないため、貸す人の接続を始められません"
+                raise RuntimeError(self.error)
             cmd = codex_command(codex)
             for runner in self.runtime.runners.values():
                 runner.app.codex_cmd = list(cmd)  # connections saved before Codex was known

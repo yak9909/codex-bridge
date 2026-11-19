@@ -70,7 +70,8 @@ def run_setup(config_path: Path, *, then_start: bool = False, from_app: bool = F
         st.write_host_config(config_path, share_root=None, data_dir=root / "data", ip=ip)
     elif st.update_public_bind(config_path, ip):
         _say("Tailscale の IP が変わっていたので、設定を更新しました。招待コードは発行し直してください。")
-    _say("共有フォルダ（Codex に触らせるフォルダ）は、起動したあとの管理画面で選びます。")
+    _say("共有フォルダ（Codex に触らせるフォルダ）は、画面の「使う」タブで選びます。" if from_app else
+         "共有フォルダ（Codex に触らせるフォルダ）は、起動したあとの管理画面で選びます。")
 
     from .main import ensure_config
     ensure_config(config_path)
@@ -78,7 +79,8 @@ def run_setup(config_path: Path, *, then_start: bool = False, from_app: bool = F
     policy = cfg.data_dir / "policy.yaml"
     _say(f"権限の規則: {policy}")
     _say("  最初は「全部読むだけ・コマンドは許可リストのみ・削除は確認待ち」です。")
-    _say("  書かせてよいフォルダや、見せないフォルダは、管理画面の「権限の規則」でも変えられます。")
+    _say("  書かせてよいフォルダや、見せないフォルダは、「使う」タブの「共有フォルダ」で変えられます。" if from_app else
+         "  書かせてよいフォルダや、見せないフォルダは、管理画面の「権限の規則」でも変えられます。")
     if _yes("今、権限の規則をメモ帳で開きますか？", default=False):
         subprocess.Popen(["notepad.exe", str(policy)])
 
@@ -101,7 +103,7 @@ def run_setup(config_path: Path, *, then_start: bool = False, from_app: bool = F
         n += 1
         _say(f"  {n}. start.bat（または exe をダブルクリックして「使う側」）で codex-bridge を起動する（管理画面が開きます）")
     n += 1
-    _say(f"  {n}. 管理画面で共有フォルダを選ぶ")
+    _say(f"  {n}. 「使う」タブで共有フォルダを選ぶ" if from_app else f"  {n}. 管理画面で共有フォルダを選ぶ")
     n += 1
     _say(f"  {n}. install-mcp.bat を実行して、Claude Code / Codex から codex-bridge を使えるようにする")
     n += 1
@@ -112,11 +114,12 @@ def run_setup(config_path: Path, *, then_start: bool = False, from_app: bool = F
         _say(f"  {n}. 管理画面の「招待コード」を発行し、同じ zip と一緒に知人に渡す（知人は exe をダブルクリックして「貸す側」）")
     n += 1
     who = "貸す人" if from_app else "知人"
-    _say(f"  {n}. Tailscale の管理画面でこの PC を{who}と共有する（この画面を開きます）")
+    screen = "画面" if from_app else "管理画面"
+    _say(f"  {n}. Tailscale の{screen}でこの PC を{who}と共有する（この画面を開きます）")
     _say(f"     → この PC の行の「…」→「Share...」→ リンクをコピーして{who}に送る")
-    if then_start:
+    if then_start and not from_app:
         _say("次回からは、start.bat か、exe をダブルクリックして「使う側」を選ぶと起動できます。")
-    if _yes("Tailscale の管理画面を開きますか？"):
+    if _yes(f"Tailscale の{screen}を開きますか？"):
         webbrowser.open("https://login.tailscale.com/admin/machines")
     if from_app:
         input("Enter キーを押すと閉じます。")  # the exit code 0 tells the app to start

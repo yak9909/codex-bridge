@@ -50,3 +50,29 @@ def test_bad_line_skipped(tmp_path):
     path.write_text('not json\n{"t": 1.0, "side": "use", "level": "info", "text": "ok"}\n[1]\n', encoding="utf-8")
     log = AppLog(path)
     assert [e["text"] for e in log.entries()] == ["ok"]
+
+
+def test_add_after_log_folder_is_deleted_does_not_recreate_it(tmp_path):
+    log = AppLog(tmp_path / "logs" / "app.jsonl")
+    log.add("use", "info", "起動しました")
+    log.path.unlink()
+    log.path.parent.rmdir()
+    log.add("use", "info", "使う側を止めました")
+    assert not log.path.parent.exists()
+
+
+def test_add_swallows_write_errors(tmp_path, monkeypatch):
+    log = AppLog(tmp_path / "app.jsonl")
+
+    class Unwritable:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def write(self, line):
+            raise OSError("disk full")
+
+    monkeypatch.setattr("builtins.open", lambda *args, **kwargs: Unwritable())
+    log.add("lend", "error", "終了処理中です")

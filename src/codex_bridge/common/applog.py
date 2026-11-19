@@ -29,8 +29,11 @@ class AppLog:
     def add(self, side: Literal["use", "lend"], level: Literal["info", "warn", "error"], text: str) -> None:
         line = json.dumps({"t": time.time(), "side": side, "level": level, "text": text}, ensure_ascii=False)
         with self._lock:
-            with open(self.path, "a", encoding="utf-8", newline="\n") as f:
-                f.write(line + "\n")
+            try:
+                with open(self.path, "a", encoding="utf-8", newline="\n") as f:
+                    f.write(line + "\n")
+            except OSError:
+                pass  # Logging must not interrupt shutdown after the data folder has moved.
 
     def entries(self, side: str | None = None, min_level: str | None = None, q: str | None = None,
                 limit: int = 1000) -> list[dict]:

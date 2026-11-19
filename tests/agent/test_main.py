@@ -87,6 +87,63 @@ async def test_no_runner_starts_while_codex_is_missing(tmp_path, monkeypatch):
     assert "Codex" in role.applog.entries(side="lend")[-1]["text"]
 
 
+@pytest.mark.parametrize("operation", ["replace", "add"])
+@pytest.mark.parametrize("download_error", [False, True])
+async def test_invite_actions_retry_codex_setup_after_startup_failure(tmp_path, monkeypatch, operation, download_error):
+    import httpx
+    from codex_bridge.agent.connections import ConnectionStore
+    from codex_bridge.common.invite import make_invite
+    from fake_helpers import Fake
+
+    code = make_invite("http://host.invalid", "old-token", "貸す人")
+    original = ConnectionStore(tmp_path).add(code)
+    attempts, activated = [], []
+
+    def resolve(home):
+        attempts.append(home)
+        if len(attempts) == 1 and download_error:
+            raise OSError("オフラインです")
+        return None if len(attempts) == 1 else tmp_path / "codex.exe"
+
+    def fake_app(*args, **kwargs):
+        root = tmp_path / f"fake-{len(list(tmp_path.glob('fake-*')))}"
+        root.mkdir()
+        app = Fake(root).app
+        app.codex_cmd = list(args[0])
+        return app
+
+    async def activate(id):
+        activated.append(id)
+
+    monkeypatch.setattr(agent_main, "resolve_codex", resolve)
+    monkeypatch.setattr(agent_main, "codex_version", lambda cmd: "fake")
+    monkeypatch.setattr(agent_main, "user_mcp_names", lambda: [])
+    monkeypatch.setattr(agent_main, "AppServer", fake_app)
+    role, _ = make_role(tmp_path)
+    monkeypatch.setattr(role.runtime, "_activate", activate)
+    monkeypatch.setattr(role.runtime, "_ensure_usage_probe", lambda: None)
+    try:
+        await role.start()
+        assert role.error and not role.runtime.started and not activated
+        transport = httpx.ASGITransport(app=role.ui_app(), client=("127.0.0.1", 1))
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8766") as web:
+            url = f"/api/connections/{original.id}/invite" if operation == "replace" else "/api/connections"
+            method = "PUT" if operation == "replace" else "POST"
+            bad = await web.request(method, url, json={"code": "bad"}, headers={"X-Codex-Bridge": "1"})
+            assert bad.status_code == 400 and len(attempts) == 1
+            new_url = "http://host.invalid" if operation == "replace" else "http://other.invalid"
+            new_code = make_invite(new_url, "new-token", "貸す人")
+            response = await web.request(method, url, json={"code": new_code}, headers={"X-Codex-Bridge": "1"})
+            assert response.status_code == (200 if operation == "replace" else 201), response.text
+        assert len(attempts) == 2 and role.runtime.started and role.error is None
+        assert set(activated) == set(role.runtime.runners)
+        assert all(r.app.codex_cmd == role.cmd for r in role.runtime.runners.values())
+        if operation == "replace":
+            assert role.runtime.store.list()[0].invite.token == "new-token"
+    finally:
+        await role.stop()
+
+
 async def test_login_guide_keeps_event_loop_responsive(tmp_path, monkeypatch):
     from codex_bridge.agent.settings import defaults
     from codex_bridge.common.invite import Invite

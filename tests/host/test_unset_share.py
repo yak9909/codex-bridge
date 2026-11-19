@@ -16,7 +16,7 @@ from codex_bridge.host.paths import ToolError
 from conftest import RG_PATH
 from mcp_helpers import running
 
-MESSAGE = "共有フォルダがまだ設定されていません。管理画面で選んでください。"
+MESSAGE = "共有フォルダがまだ設定されていません。「使う」タブで選んでください。"
 H = {"X-Codex-Bridge": "1"}
 MCP_H = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
 

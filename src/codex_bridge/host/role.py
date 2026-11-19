@@ -56,8 +56,13 @@ class HostRole:
         self._servers: list[uvicorn.Server] = []
         self._tasks: list[asyncio.Task] = []
         self._stopping = False
+        self._lock = asyncio.Lock()
 
     async def start(self) -> None:
+        async with self._lock:
+            await self._start_locked()
+
+    async def _start_locked(self) -> None:
         if self.running:
             return
         await self._teardown()  # leftovers of a server that died by itself
@@ -136,10 +141,10 @@ class HostRole:
         for task in self._tasks:
             task.add_done_callback(self._ended)
         for _ in range(int(START_TIMEOUT / 0.05)):
-            if all(server.started for server in self._servers):
-                return
             if any(task.done() for task in self._tasks):
                 break
+            if all(server.started for server in self._servers):
+                return
             await asyncio.sleep(0.05)
         failure = next((t.exception() for t in self._tasks if t.done() and not t.cancelled() and t.exception()), None)
         raise HostStartError(f"サーバーを始められませんでした: {failure}" if failure else "サーバーを始められませんでした")
@@ -171,11 +176,12 @@ class HostRole:
         self.host = None
 
     async def stop(self) -> None:
-        was_running = self.running
-        self.running = False
-        await self._teardown()
-        if was_running:
-            self.applog.add("use", "info", "使う側を止めました")
+        async with self._lock:
+            was_running = self.running
+            self.running = False
+            await self._teardown()
+            if was_running:
+                self.applog.add("use", "info", "使う側を止めました")
 
     def counts(self) -> tuple[int, int, int]:
         """(lenders connected, lenders invited, approvals waiting) for the tray."""

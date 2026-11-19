@@ -473,7 +473,33 @@ async def test_restarted_agent_without_task_fails_orphan(mgr, agent):
     agent2 = FakeAgent(mgr)
     await agent2.push("hello", agent_version="x", codex_version="x", auth_mode="chatgpt", current_task_id=None)
     assert mgr.status(tid)["state"] == "failed"
+    assert mgr.result(tid)["report"] == (
+        "貸す人の codex-bridge が起動し直したため、この依頼は中断されました。"
+        "続けるなら、この依頼の続きとして送ってください。")
     assert await mgr.start("b")
+
+
+async def test_task_errors_use_screen_words(mgr):
+    from codex_bridge.host.tasks import NOT_CONNECTED, BUSY, AWAITING, NOT_READY
+
+    with pytest.raises(ToolError) as missing:
+        await mgr.start("依頼")
+    assert str(missing.value) == NOT_CONNECTED and "「貸す」タブ" in str(missing.value)
+    with pytest.raises(ToolError) as named:
+        await mgr.sessions_list(lender="alice")
+    assert "貸す人「alice」" in str(named.value)
+    for text in (str(missing.value), str(named.value), BUSY, AWAITING, NOT_READY):
+        for word in ("知人", "管理画面", "cancel_task", "send_task", "agent", "貸す側"):
+            assert word not in text
+
+
+async def test_disconnect_error_uses_lender_words(mgr, agent):
+    request = asyncio.create_task(mgr.sessions_list())
+    while not mgr._pending:
+        await asyncio.sleep(0)
+    mgr.detach(agent.link)
+    with pytest.raises(ToolError, match="^貸す人との接続が切れました$"):
+        await request
 
 
 async def test_reconnected_agent_with_task_restores_state(mgr, agent):
@@ -855,7 +881,7 @@ async def test_the_host_s_guess_stays_when_the_agent_never_says_more_and_survive
     mgr.detach(agent.link)
     agent2 = FakeAgent(mgr)
     await agent2.push("hello", agent_version="0.1.0", codex_version="x", auth_mode="chatgpt", current_task_id=None)
-    assert "再起動" in mgr.result(tid)["report"]
+    assert "起動し直した" in mgr.result(tid)["report"]
     mgr2 = TaskManager(tmp_path / "data", touched_fn=lambda t: [])  # the guess is still a guess after a restart
     a3 = FakeAgent(mgr2)
     await a3.push("task_state", seq=9, task_id=tid, state="completed", report="done after all")

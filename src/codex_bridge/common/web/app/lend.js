@@ -3,7 +3,7 @@ import { get, send, onChange, showError, clearError, esc, ago } from "/app/stati
 import { icon, meter, busyInside, ACTIVE, LOG_LABEL } from "/app/static/common.js";
 import { listHtml, headHtml, timelineHtml } from "/app/static/use-tasks.js";
 import { connectionHead, settingsHtml, modelSummary, preSummary } from "/app/static/lend-cards.js";
-import { pcHtml } from "/app/static/lend-pages.js";
+import { pcHtml, setupErrorHtml } from "/app/static/lend-pages.js";
 
 const S = { open: new Set(), cards: new Map(), selected: null, filter: "", tab: "tasks", invite: false, code: "", pc: { edit: null, workdir: "", path: "", message: "" } };
 const keyFor = (t) => JSON.stringify([t.connection_id, t.task_id]);
@@ -23,6 +23,7 @@ const fromHtml = (html) => {
 };
 const SHELL = `<div class="shell lend-shell">
   <aside class="pane side" aria-label="使用量と依頼主">
+    <div data-slot="setup-error"></div>
     <div class="block"><h2>使用量</h2><div class="meters" data-slot="meters"></div><div class="limits" data-slot="limits"></div></div>
     <div class="pane-head"><h2>依頼主</h2><span class="count" data-slot="count">0</span><span class="cap">作業は同時に 1 つ</span><span class="spacer"></span><button class="secondary sm" data-act="invite-open">${icon("plug")}追加</button></div>
     <div data-slot="invite"></div><div class="pane-body scroll" data-slot="connections"></div>
@@ -39,7 +40,7 @@ export function renderLend(root) {
   const shell = fromHtml(SHELL);
   root.replaceChildren(shell);
   const q = (slot) => shell.querySelector(`[data-slot="${slot}"]`);
-  const el = Object.fromEntries(["meters", "limits", "count", "invite", "connections", "pending", "filter", "items", "head", "log"].map((k) => [k, q(k)]));
+  const el = Object.fromEntries(["meters", "limits", "count", "invite", "connections", "pending", "filter", "items", "head", "log", "setup-error"].map((k) => [k, q(k)]));
   el.pc = shell.querySelector('[data-panel="pc"]');
   const view = { connections: [], tasks: [], settings: new Map(), pending: null, shared: null, overview: {}, logFor: null, pendingKey: null };
   let alive = true, reading = false, again = false, revision = 0, writing = 0;
@@ -144,8 +145,9 @@ export function renderLend(root) {
   async function cycle() {
     if (writing) return;
     const rev = revision;
-    const [overview, connections, tasks, shared, pending] = await Promise.all([
+    const [overview, connections, tasks, shared, pending, appState] = await Promise.all([
       get("/lend/api/overview"), get("/lend/api/connections"), get("/lend/api/tasks"), get("/lend/api/settings"), get("/lend/api/pending"),
+      get("/app/api/state"),
     ]);
     const settings = await Promise.all(connections.filter((c) => S.open.has(c.id)).map(async (c) => [c.id, await get(`/lend/api/connections/${encodeURIComponent(c.id)}/settings`)]));
     if (!alive || rev !== revision) { again = alive; return; }
@@ -159,6 +161,7 @@ export function renderLend(root) {
     if (selected) result = await get(`/lend/api/tasks/${encodeURIComponent(selected.task_id)}?connection_id=${encodeURIComponent(selected.connection_id)}`);
     if (!alive || rev !== revision) { again = alive; return; }
     drawLimits(); drawCards(); drawInvite(); drawPending(pending); drawTabs(); drawTasks(result);
+    patch(el["setup-error"], setupErrorHtml(appState.lend.error));
     patch(el.pc, pcHtml(shared, overview, S.pc), true);
     clearError("lend-read");
   }

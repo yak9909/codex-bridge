@@ -225,6 +225,46 @@ async def test_invite_issue_and_revoke(admin, host):
     assert host.tokens.hashes() == set()
 
 
+@pytest.mark.parametrize("connected", [False, True])
+async def test_revoked_lender_leaves_list_even_before_disconnect(admin, host, connected):
+    link = await join(host, "alice")
+    host.tokens.issue("bob")
+    tid = await host.mgr.start("残す依頼", lender="alice")
+    if not connected:
+        host.mgr.detach(link)
+    assert {r["name"] for r in (await admin.get("/admin/api/lenders")).json()} == {"alice", "bob"}
+    assert (await admin.delete("/admin/api/invites/alice", headers=H)).status_code == 200
+    rows = (await admin.get("/admin/api/lenders")).json()
+    assert [r["name"] for r in rows] == ["bob"]
+    assert host.mgr.result(tid)["lender"] == "alice"
+
+
+async def test_invite_policy_is_written_before_token_is_issued(admin, host, monkeypatch):
+    host.policy.update(exec_mode="all")
+    issue = host.tokens.issue
+
+    def checked_issue(name):
+        assert host.policy.current().exec_mode_for(name) == "ask"
+        return issue(name)
+
+    monkeypatch.setattr(host.tokens, "issue", checked_issue)
+    r = await admin.post("/admin/api/invites", json={"name": "alice"}, headers=H)
+    assert r.status_code == 200 and host.tokens.match(parse_invite(r.json()["code"]).token) == "alice"
+
+
+async def test_failed_invite_policy_write_does_not_issue_token(admin, host, monkeypatch):
+    host.policy.update(exec_mode="all")
+
+    def fail(*args):
+        raise OSError("policy write failed")
+
+    monkeypatch.setattr(host.policy, "set_lender_exec_mode", fail)
+    with pytest.raises(OSError, match="policy write failed"):
+        await admin.post("/admin/api/invites", json={"name": "alice"}, headers=H)
+    assert host.tokens.list() == []
+    assert host.policy.current().lender_exec_modes == {}
+
+
 async def test_pause(admin, host):
     await admin.post("/admin/api/pause", json={"paused": True}, headers=H)
     assert host.policy.current().paused is True
@@ -857,8 +897,11 @@ async def test_revoke_clears_lender_mode(admin, host, via):
     host.tokens.issue("alice")
     host.tokens.issue("bob")
     host.policy.update(lender_exec_modes={"alice": "off", "bob": "all"})
+    await host.mgr.set_log_visibility("all", "alice")
+    await host.mgr.set_log_visibility("files", "bob")
     host.tokens.issue("alice")  # rotating an invite keeps the override
     assert host.policy.current().lender_exec_modes == {"alice": "off", "bob": "all"}
+    assert host.mgr.settings["lender_log_visibility"] == {"alice": "all", "bob": "files"}
     if via == "web":
         assert (await admin.delete("/admin/api/invites/alice", headers=H)).status_code == 200
     elif via == "mcp":
@@ -867,8 +910,11 @@ async def test_revoke_clears_lender_mode(admin, host, via):
     else:
         host.tokens.revoke("alice")
     assert host.policy.current().lender_exec_modes == {"bob": "all"}
+    assert host.mgr.settings["lender_log_visibility"] == {"bob": "files"}
+    assert json.loads(host.mgr.settings_path.read_text(encoding="utf-8"))["lender_log_visibility"] == {"bob": "files"}
     host.tokens.issue("alice")
     assert host.policy.current().exec_mode_for("alice") == host.policy.current().exec_mode
+    assert host.mgr.log_visibility_for("alice") == host.mgr.settings["log_visibility"]
 
 
 async def test_policy_form_save_keeps_lender_exec_modes(admin, host):

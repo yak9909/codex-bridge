@@ -16,7 +16,7 @@ class ToolError(Exception):
 
 
 PAUSED_MSG = "停止中です（管理者が一時停止しています）"
-UNSET_SHARE_MSG = "共有フォルダがまだ設定されていません。管理画面で選んでください。"
+UNSET_SHARE_MSG = "共有フォルダがまだ設定されていません。「使う」タブで選んでください。"
 
 
 def not_found(rel: str) -> ToolError:

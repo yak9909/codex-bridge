@@ -145,3 +145,22 @@ for (const side of ["use", "lend"]) {
   assert.ok(log.includes(side === "lend" ? "あなたの許可を待っています" : "相手の許可を待っています"));
 }
 ''')
+
+
+def test_lender_setup_warning_is_escaped_and_shows_recovery_actions(run_app_js):
+    run_app_js('''
+import assert from "node:assert/strict";
+import { setupErrorHtml } from "./lend-pages.js";
+const html = setupErrorHtml('Codex <script>bad</script> & "offline"');
+assert.ok(html.includes('class="note-warn"') && html.includes('role="alert"'));
+assert.ok(html.includes('&lt;script&gt;bad&lt;/script&gt; &amp; &quot;offline&quot;'));
+assert.ok(!html.includes('<script>'));
+assert.ok(html.includes('招待コードを入れ直す') && html.includes('依頼主を追加'));
+assert.equal(setupErrorHtml(null), '');
+''')
+
+
+def test_lender_tab_reads_setup_error_from_resident_state():
+    text = (APP / "lend.js").read_text(encoding="utf-8")
+    assert 'get("/app/api/state")' in text
+    assert 'setupErrorHtml(appState.lend.error)' in text

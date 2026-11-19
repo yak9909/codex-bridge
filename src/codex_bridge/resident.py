@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 import uvicorn
+import yaml
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -21,6 +22,7 @@ from starlette.routing import Route
 
 from .common.applog import AppLog
 from .host.config import load_host_config
+from .host.policy import PolicyStore
 from .host.role import HostStartError, bind_socket
 from .host.web.app import APP_PAGE, _guard, admin_router
 
@@ -142,7 +144,7 @@ def create_resident_app(state: "Resident") -> FastAPI:
     async def get_state():
         return {"use": {"configured": state.config_path.exists(), "running": state.host_role.running,
                         "error": state.use_error()},
-                "lend": {"connections": state.agent.counts()[1]}, "paused": state.paused}
+                "lend": {"connections": state.agent.counts()[1], "error": state.agent.error}, "paused": state.paused}
 
     @app.post("/app/api/pause")
     async def pause(body: dict):
@@ -284,6 +286,7 @@ class Resident:
         self._seen_approvals: set[str] = set()
         self.retry_interval = 10.0
         self._retry: asyncio.Task | None = None
+        self._watched_host = None
 
     # -- what the screen and the tray read
     @property
@@ -293,10 +296,22 @@ class Resident:
     def use_error(self) -> str | None:
         return self.host_role.error or self.setup_error
 
+    def _host_policy(self) -> PolicyStore | None:
+        host = self.host_role.host
+        if host is not None:
+            return host.policy
+        if self.config_path.exists():
+            try:
+                cfg = load_host_config(self.config_path)
+                return PolicyStore(cfg.data_dir / "policy.yaml")
+            except (OSError, yaml.YAMLError, ValueError, TypeError, AttributeError):
+                pass  # HostRole.start reports configuration problems; lending can still start.
+        return None
+
     @property
     def paused(self) -> bool:
-        host = self.host_role.host if self.host_role.running else None
-        return bool(self.agent.paused or (host is not None and host.policy.current().paused))
+        policy = self._host_policy()
+        return bool(self.agent.paused or (policy is not None and policy.current().paused))
 
     def status_line(self) -> str:
         lenders, invited, host_waiting = self.host_role.counts()
@@ -305,9 +320,11 @@ class Resident:
                 f"・承認待ち {host_waiting + lender_waiting}")
 
     async def set_paused(self, paused: bool) -> None:
-        host = self.host_role.host if self.host_role.running else None
+        policy = self._host_policy()
+        if policy is not None:
+            policy.update(paused=paused)
+        host = self.host_role.host
         if host is not None:
-            host.policy.update(paused=paused)
             host.events.notify()
         await self.agent.set_paused(paused)
         if self.tray is not None:
@@ -368,11 +385,11 @@ class Resident:
 
     async def start_host(self) -> None:
         """Start the borrower's side. A failure is kept for the screen (host_role.error), the app goes on,
-        and the start is tried again every retry_interval seconds until the host runs or the app quits."""
-        if not await self._try_start_host():
-            if self._retry is None or self._retry.done():
-                self._retry = asyncio.create_task(self._retry_host())
-                self._background.append(self._retry)
+        and a stopped host is tried again every retry_interval seconds until the app quits."""
+        await self._try_start_host()
+        if self._retry is None or self._retry.done():
+            self._retry = asyncio.create_task(self._retry_host())
+            self._background.append(self._retry)
 
     async def _try_start_host(self) -> bool:
         try:
@@ -384,16 +401,19 @@ class Resident:
             self.applog.add("use", "error", self.host_role.error)
             return False
         host = self.host_role.host
-        if host is not None:
+        if host is not None and host is not self._watched_host:
+            if self.agent.paused != host.policy.current().paused:
+                await self.set_paused(self.paused)
+            self._watched_host = host
             host.approvals.on_change.append(self._approvals_changed)
             self._background.append(asyncio.create_task(self._watch_shutdown(host)))
         return True
 
     async def _retry_host(self) -> None:
-        while not self.host_role.running:
+        while True:
             await asyncio.sleep(self.retry_interval)
-            if self.host_role.running or await self._try_start_host():
-                return
+            if not self.host_role.running:
+                await self._try_start_host()
 
     def _approvals_changed(self) -> None:
         host = self.host_role.host
@@ -429,6 +449,9 @@ class Resident:
         self.tray = self.tray_factory(self)
         self.tray.run_detached()
         try:
+            policy = self._host_policy()
+            if policy is not None:
+                await self.agent.set_paused(policy.current().paused)
             await self.agent.start()
             if self.config_path.exists():
                 await self.start_host()

@@ -79,8 +79,12 @@ def build_host(config: HostConfig, config_path: Path | None = None) -> Host:
     mgr = TaskManager(data, touched_fn=snapshots.touched, check_start=paths.check_configured)
     notifier = Notifier(mgr, approvals)
     tokens = TokenStore(data)
-    tokens.on_change.append(lambda name: None if name in {i["name"] for i in tokens.list()}
-                            else policy.drop_lender(name))
+    def invite_changed(name):
+        if name not in {i["name"] for i in tokens.list()}:
+            policy.drop_lender(name)
+            mgr.drop_lender_settings(name)
+
+    tokens.on_change.append(invite_changed)
     mgr.invited_names = lambda: {i["name"] for i in tokens.list()}
 
     def task_id_fn() -> str | None:
