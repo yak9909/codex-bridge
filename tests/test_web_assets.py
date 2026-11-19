@@ -40,6 +40,25 @@ def test_use_js_has_no_inline_handlers_or_scripts():
         assert "<script" not in text and "javascript:" not in text, f"{name}: inline script"
 
 
+def test_invite_codes_use_a_shared_readonly_field_next_to_copy(run_app_js):
+    run_app_js('''
+import assert from "node:assert/strict";
+import { codeFieldHtml } from "./common.js";
+import { lenderParts } from "./use-lenders.js";
+const code = 'cbx1.' + 'a'.repeat(240) + '&"<secret>';
+const html = codeFieldHtml(code);
+assert.match(html, /<div class="row code-row"><input readonly class="code-field"[^>]*><button[^>]*data-act="copy"[^>]*>/);
+assert.ok(html.includes('value="cbx1.' + 'a'.repeat(240) + '&amp;&quot;&lt;secret&gt;"'));
+assert.ok(!html.includes('<secret>') && !html.includes('<code'));
+const parts = lenderParts({name: "scratch", invite_created: 1}, {open: true, code}, new Map());
+assert.ok(parts.set.includes(html));
+''')
+    source = (APP / "use.js").read_text(encoding="utf-8")
+    assert "codeFieldHtml(S.inviteCode)" in source
+    for name, text in use_sources().items():
+        assert not re.search(r'<code[^>]*class="[^"]*ellipsis', text), name
+
+
 def test_use_js_reads_policy_warnings_from_overview():
     sources = "\n".join(use_sources().values())
     for field in ("policy_problem", "policy_error"):

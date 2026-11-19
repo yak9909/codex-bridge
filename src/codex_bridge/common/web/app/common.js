@@ -4,6 +4,11 @@ import { esc, fmtTime, fmtDay } from "/app/static/api.js";
 export const ICONS = "/app/static/icons.svg";
 export const icon = (id, cls = "ic") => `<svg class="${cls}"><use href="${ICONS}#i-${id}"/></svg>`;
 
+export function codeFieldHtml(code) {
+  return `<div class="row code-row"><input readonly class="code-field" value="${esc(code)}" aria-label="招待コード" spellcheck="false">` +
+    `<button class="secondary sm" data-act="copy">${icon("copy")}コピー</button></div>`;
+}
+
 const two = (n) => String(n).padStart(2, "0");
 
 // "15:40 に戻る" for today, "11/19 03:00 に戻る" for another day

@@ -2,7 +2,7 @@
 // Every part is drawn into a container that stays in the page, and a refresh only writes what changed and is not being used
 // (a focused field, an open list), so scroll positions, open cards, the chosen request and typed text survive it.
 import { get, send, onChange, showError, clearError, esc, ago } from "/app/static/api.js";
-import { icon, busyInside, taskTitle, ACTIVE } from "/app/static/common.js";
+import { icon, codeFieldHtml, busyInside, taskTitle, ACTIVE } from "/app/static/common.js";
 import { lenderParts } from "/app/static/use-lenders.js";
 import { listHtml, newHeadHtml, headHtml, timelineHtml, pickerOptions } from "/app/static/use-tasks.js";
 import { emptyHtml, foldersHtml, allowHtml, policyWarningsHtml } from "/app/static/use-pages.js";
@@ -301,9 +301,7 @@ export function renderUse(root) {
       el.invite.innerHTML = "";
       return;
     }
-    const code = S.inviteCode
-      ? `<div class="row"><code class="ellipsis" style="flex:1" title="${esc(S.inviteCode)}">${esc(S.inviteCode)}</code>` +
-        `<button class="secondary sm" data-act="copy" data-code="${esc(S.inviteCode)}">${icon("copy")}コピー</button></div>` : "";
+    const code = S.inviteCode ? codeFieldHtml(S.inviteCode) : "";
     el.invite.innerHTML = `<div class="block"><h2>貸す人を招待</h2><label class="field"><span>名前</span>` +
       `<input data-slot="invite-name" placeholder="例: kimura" value="${esc(S.inviteName)}"></label>` +
       `<div class="row"><button class="sm" data-act="invite-issue">招待コードを発行</button><button class="secondary sm" data-act="invite-close">やめる</button></div>${code}</div>`;
@@ -404,16 +402,15 @@ export function renderUse(root) {
   }
 
   async function copy(button) {
-    const code = button.dataset.code;
+    const field = button.previousElementSibling;
     try {
-      await navigator.clipboard.writeText(code);
+      await navigator.clipboard.writeText(field.value);
+      clearError("use-copy");
     } catch (e) {
-      const t = document.createElement("textarea");
-      t.value = code;
-      document.body.append(t);
-      t.select();
-      document.execCommand("copy");
-      t.remove();
+      field.focus();
+      field.select();
+      showError("コピーできませんでした。選択された文字を Ctrl+C でコピーしてください", "use-copy");
+      return;
     }
     const before = button.innerHTML;
     button.textContent = "コピーしました";
@@ -542,6 +539,10 @@ export function renderUse(root) {
   }
 
   // ---- changes of a control ----
+  function selectCode(ev) {
+    if (ev.target.matches("input.code-field")) ev.target.select();
+  }
+
   async function onChange_(ev) {
     const t = ev.target;
     const act = t.dataset.act;
@@ -652,6 +653,8 @@ export function renderUse(root) {
   root.addEventListener("click", onClick);
   shell.addEventListener("change", onChange_);
   shell.addEventListener("focusout", onFocusOut);
+  shell.addEventListener("focusin", selectCode);
+  shell.addEventListener("click", selectCode);
   shell.addEventListener("input", onInput);
   shell.addEventListener("keydown", onKey);
   el.form.addEventListener("submit", onSubmit);
@@ -670,6 +673,6 @@ export function renderUse(root) {
     root.removeEventListener("click", onClick);
     document.removeEventListener("click", closeLists);
     document.removeEventListener("keydown", closeLists);
-    ["use-read", "use-write", "use-send", "use-setup"].forEach(clearError);
+    ["use-read", "use-write", "use-send", "use-setup", "use-copy"].forEach(clearError);
   };
 }

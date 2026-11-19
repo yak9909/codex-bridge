@@ -1,6 +1,6 @@
 // The lender cards of the use tab: header, usage meters, and (open) the settings rows.
 import { esc, fmtDay } from "/app/static/api.js";
-import { icon, monthDay, taskTitle, meter, row, toggle, logCombo as sharedLogCombo, OVER_LIMIT, CHEV } from "/app/static/common.js";
+import { icon, codeFieldHtml, monthDay, taskTitle, meter, row, toggle, logCombo as sharedLogCombo, OVER_LIMIT, CHEV } from "/app/static/common.js";
 
 const EXEC_MODES = [["off", "実行しない"], ["allowlist", "許可リストだけ自動"], ["ask", "毎回承認"], ["all", "すべて自動"]];
 
@@ -59,10 +59,7 @@ function inviteRow(l, ui) {
     body = `<button class="secondary sm" data-act="reissue" data-name="${name}">発行し直す</button>` +
       `<button class="danger sm" data-act="revoke-ask" data-name="${name}">取り消す</button>`;
   }
-  const code = ui.code
-    ? `<div class="ctl"><code class="ellipsis" style="flex:1" title="${esc(ui.code)}">${esc(ui.code)}</code>` +
-      `<button class="secondary sm" data-act="copy" data-code="${esc(ui.code)}">${icon("copy")}コピー</button></div>`
-    : "";
+  const code = ui.code ? codeFieldHtml(ui.code) : "";
   return `<div class="set"><span class="lbl">招待コード<span class="cap">${cap}</span></span><div class="ctl">${body}</div>${code}</div>`;
 }
 
