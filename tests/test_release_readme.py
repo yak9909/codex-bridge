@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+from string import Formatter
 
 import codex_bridge
 import pytest
@@ -20,13 +21,40 @@ def test_readme_has_only_printable_text(mod):
 
 
 def test_readme_formats(mod):
-    assert "v0.3.0" in mod.README.format(ver="0.3.0")
+    fields = [field for _, field, _, _ in Formatter().parse(mod.README) if field is not None]
+    assert fields == ["ver"]
+    rendered = mod.README.format(ver="0.3.0")
+    assert "v0.3.0" in rendered
+    assert "docs\\friend-guide.md" in rendered
+    assert "docs\\operation-guide.md" in rendered
     assert "/hooks" in mod.README
 
 
 def test_version_is_030(mod):
     assert codex_bridge.__version__ == "0.3.0"
     assert mod.VERSION == "0.3.0"
+
+
+@pytest.mark.parametrize("path", ["README.md", "docs/friend-guide.md", "docs/operation-guide.md", None])
+def test_guides_describe_the_resident_screen(mod, path):
+    root = Path(__file__).resolve().parents[1]
+    text = (root / path).read_text(encoding="utf-8") if path else mod.README
+    for content in ("タスクトレイ", "左クリック", "画面を開く", "http://127.0.0.1:8766/",
+                    "「使う」", "「貸す」", "「ログ」", "つなぐ", "カード"):
+        assert content in text, (path, content)
+    for obsolete in ("知人", "使わせる側", "「貸す側」を選", "「使う側」を選", "設定を保存", "保存して反映"):
+        assert obsolete not in text, (path, obsolete)
+
+
+@pytest.mark.parametrize("path", ["README.md", "docs/operation-guide.md", None])
+def test_borrower_guides_keep_setup_and_console_instructions(mod, path):
+    root = Path(__file__).resolve().parents[1]
+    text = (root / path).read_text(encoding="utf-8") if path else mod.README
+    for content in ("準備を始める", "招待コードを発行", "毎回承認", "http://127.0.0.1:8770",
+                    "install-mcp.bat", "start.bat", "stop.bat", "host setup"):
+        assert content in text, (path, content)
+    for obsolete in ("set_thresholds", "全体と同じ", "こちらのしきい値"):
+        assert obsolete not in text, (path, obsolete)
 
 
 def test_notice_limits_and_status_guidance():

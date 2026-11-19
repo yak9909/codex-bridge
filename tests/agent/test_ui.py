@@ -78,12 +78,14 @@ async def env(tmp_path):
                               sent=sent, changed=changed, moved=moved, pauses=pauses, root=tmp_path)
 
 
-async def test_page_and_shared_assets(env):
-    for path, content in [("/", "Codex を貸している人"), ("/static/app.js", "UI.taskDetail"),
-                          ("/admin/common/ui.js", "function meter"), ("/admin/common/ui.css", ".topbar")]:
+async def test_api_only_has_no_page_or_static_mounts(env):
+    assert all(route.path.startswith("/api/") for route in env.app.routes)
+    for path in ("/", "/static/index.html", "/static/app.js", "/static/settings.js",
+                 "/admin/common/ui.js", "/admin/common/app/index.html"):
         response = await env.http.get(path)
-        assert response.status_code == 200 and content in response.text
+        assert response.status_code == 404
         assert response.headers["cache-control"] == "no-store"
+    assert (await env.http.get("/api/overview")).status_code == 200
     assert (await env.http.get("/api/data-location")).status_code == 404
     assert (await env.http.put("/api/data-location", json={"path": "D:/x"}, headers=WRITE)).status_code == 404
 

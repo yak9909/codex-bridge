@@ -336,6 +336,27 @@ async def test_resident_serves_page_and_static(web):
     assert (await web.get("/app/static/index.html")).status_code == 200
 
 
+@pytest.mark.parametrize("running", [False, True])
+async def test_resident_does_not_expose_old_page_mounts(tmp_path, running):
+    from codex_bridge.agent.ui import create_ui_app
+
+    agent = FakeAgent()
+    agent.ui_app = lambda: create_ui_app(None, None, None, versions={}, data_root=tmp_path)
+    role = FakeHostRole(host=make_host(tmp_path))
+    role.running = running
+    state = make_resident(tmp_path, agent=agent, host_role=role)
+    async with client_for(create_resident_app(state)) as web:
+        for path in ("/admin/static/index.html", "/admin/common/ui.js", "/admin/common/app/index.html",
+                     "/lend/", "/lend/static/app.js", "/lend/admin/common/ui.js"):
+            assert (await web.get(path)).status_code == 404, path
+        assert (await web.get("/")).status_code == 200
+        assert (await web.get("/lend/api/connections")).json() == []
+    async with client_for(create_local_app(role.host, page_url=PAGE), "http://127.0.0.1:8770") as local:
+        assert (await local.get("/admin/")).headers["location"] == PAGE
+        for path in ("/admin/static/index.html", "/admin/common/ui.js", "/app/static/app.js"):
+            assert (await local.get(path)).status_code == 404, path
+
+
 # ---- the page shell ------------------------------------------------------------
 async def test_page_served_on_8766(web):
     r = await web.get("/")

@@ -360,7 +360,8 @@ def test_build_makes_one_zip(tmp_path, monkeypatch):
         readme = archive.read("codex-bridge-v0.2.0/はじめにお読みください.txt")
     assert readme.startswith(b"\xef\xbb\xbf") and b"\r\n" not in readme
     text = readme.decode("utf-8-sig")
-    assert "知人（貸す側）の方へ" in text and "依頼主（使う側）の方へ" in text
+    assert "貸す人の方へ" in text and "依頼主の方へ" in text
+    assert "http://127.0.0.1:8766/" in text and "タスクトレイ" in text
     assert "friend-kit" not in text and "v0.2.0" in text
     assert "docs\\friend-guide.md" in text and "docs\\operation-guide.md" in text
     assert "\x0c" not in text

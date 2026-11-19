@@ -163,38 +163,32 @@ async def test_admin_page_served(admin):
 
 
 async def test_admin_page_has_model_and_exec_controls(admin):
-    page = (await admin.get("/admin/static/index.html")).text
-    assert 'id="req-model"' in page
-    assert 'id="req-effort"' in page
-    assert "<th>事前承認</th>" not in page
-    assert "<th>続きの依頼</th>" not in page
-    source = Path(__file__).resolve().parents[2] / "src/codex_bridge/host/web/static/app.js"
-    js = source.read_text(encoding="utf-8")
-    assert "data-exec" in js and "/exec-mode" in js
-    assert 'colspan="7"' in js
-    assert "事前承認 " in js
-    assert "model-list" in js
-    assert "個（既定:" in js
-    models = js.split("  const models =", 1)[1].split("  const execModes =", 1)[0]
-    assert '.join("<br>")' not in models
+    page = (await admin.get("/admin/")).text
+    assert "/app/static/app.js" in page
+    tasks = await admin.get("/app/static/use-tasks.js")
+    assert tasks.status_code == 200
+    assert 'aria-label="モデル"' in tasks.text and 'aria-label="推論の強さ"' in tasks.text
+    lenders = await admin.get("/app/static/use-lenders.js")
+    assert lenders.status_code == 200 and 'data-act="exec-mode"' in lenders.text
+    assert "毎回承認" in lenders.text
 
 
 async def test_invite_copy_feedback_is_served(admin):
-    r = await admin.get("/admin/static/app.js")
+    r = await admin.get("/app/static/use.js")
     assert r.status_code == 200
     assert "コピーしました" in r.text
 
 
-async def test_shared_ui_parts_are_served_next_to_the_admin_page(admin, public):
-    for name in ("ui.js", "ui.css", "demo.html"):
-        assert (await admin.get(f"/admin/common/{name}")).status_code == 200, name
-    js = (await admin.get("/admin/common/ui.js")).text
-    for part in ("meter", "stateBadge", "approvals", "taskList", "taskDetail", "choiceCards"):
-        assert part in js
-    assert "awaiting_lender" in js and "rejected_by_lender" in js
-    page = (await admin.get("/admin/static/index.html")).text
-    assert "/admin/common/ui.js" in page and "/admin/common/ui.css" in page
-    assert (await public.get("/admin/common/ui.js")).status_code == 404
+async def test_app_assets_are_local_only_and_old_mounts_are_gone(admin, public):
+    page = (await admin.get("/admin/")).text
+    for name in ("ui.js", "ui.css", "app.js"):
+        path = f"/app/static/{name}"
+        assert path in page
+        assert (await admin.get(path)).status_code == 200
+        assert (await public.get(path)).status_code == 404
+    for prefix in ("/admin/static", "/admin/common"):
+        for name in ("index.html", "app.js", "ui.js", "ui.css", "app/index.html"):
+            assert (await admin.get(f"{prefix}/{name}")).status_code == 404
 
 
 async def test_mutation_requires_custom_header(admin):
@@ -483,107 +477,6 @@ def test_folder_write_probe_cleans_up_after_close_error(tmp_path, monkeypatch):
     monkeypatch.setattr("codex_bridge.host.share.os.close", failed_close)
     assert not folder_is_writable(tmp_path)
     assert list(tmp_path.iterdir()) == []
-
-
-async def test_policy_problem_and_write_warning_banners(admin):
-    page = (await admin.get("/admin/static/index.html")).text
-    assert 'class="banner" id="policy-problem" role="alert" hidden' in page
-    assert 'class="banner warn" id="folder-warning" role="status" hidden' in page
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("Node.js is required to exercise the admin JavaScript without a browser")
-    script = r'''
-const fs = require("node:fs"), vm = require("node:vm"), assert = require("node:assert/strict");
-const elements = new Map(), calls = [];
-let confirmed = false, warning = "";
-const element = (id) => {
-  if (!elements.has(id)) elements.set(id, {hidden: true, textContent: "", innerHTML: "", addEventListener() {}});
-  return elements.get(id);
-};
-const context = vm.createContext({
-  document: {getElementById: element, querySelectorAll: () => []},
-  localStorage: {getItem: () => null},
-  UI: {esc: (s) => String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}[c]))},
-  confirm: () => confirmed,
-  fetch: async (url, options) => { calls.push([url, JSON.parse(options.body)]); return {ok:true, json: async () => ({warning})}; },
-  console, setTimeout, clearTimeout,
-});
-vm.runInContext(fs.readFileSync(process.argv[2], "utf8").split("// ---- start ")[0], context);
-vm.runInContext(`
-  permForm = {folders: []}; collectForm = () => permForm; permSaved = JSON.stringify(permForm);
-  loadPermissions = async () => {}; refreshTop = async () => {};
-`, context);
-(async () => {
-  const problems = [{folder:'C:/work/<img src=x onerror="oops">', reason:'contains_data_dir'},
-                    {folder:'D:/other', reason:'contains_data_dir'}];
-  context.problems = problems;
-  vm.runInContext("renderPolicyProblems(problems)", context);
-  const banner = element("policy-problem");
-  assert.equal(banner.hidden, false);
-  assert.ok(banner.innerHTML.includes("共有フォルダの設定に、codex-bridge 自身のデータ（設定と記録）を含むフォルダがあります: "));
-  assert.ok(banner.innerHTML.includes("。このままでは安全のため一部の操作ができないことがあります。"));
-  assert.equal((banner.innerHTML.match(/このフォルダを共有から外す/g) || []).length, 2);
-  assert.ok(!banner.innerHTML.includes("<img"));
-  const click = {target:{closest: () => ({dataset:{removeFolder:problems[1].folder}})}};
-  await banner.onclick(click);
-  assert.equal(calls.length, 0);
-  confirmed = true;
-  await banner.onclick(click);
-  assert.equal(calls[0][0], "/admin/api/folders/remove");
-  assert.equal(calls[0][1].path, problems[1].folder);
-  vm.runInContext("renderPolicyProblems([])", context);
-  assert.equal(banner.hidden, true);
-  assert.equal(banner.innerHTML, "");
-  warning = "このフォルダは、今のユーザーの権限では書き込めません。Codex が書こうとしても Windows に断られます。";
-  await vm.runInContext('folderOp("add", {path:"D:/other", level:"write"})', context);
-  assert.equal(element("folder-warning").hidden, false);
-  assert.equal(element("folder-warning").textContent, warning);
-  assert.equal(element("fd-msg").textContent, warning + ": D:/other");
-  warning = "";
-  await vm.runInContext('folderOp("add", {path:"D:/safe", level:"write"})', context);
-  assert.equal(element("folder-warning").hidden, true);
-  assert.equal(element("fd-msg").textContent, "");
-})().catch((e) => { console.error(e); process.exitCode = 1; });
-'''
-    source = Path(__file__).resolve().parents[2] / "src/codex_bridge/host/web/static/app.js"
-    result = subprocess.run([node, "-", str(source)], input=script, text=True, encoding="utf-8",
-                            capture_output=True, timeout=20)
-    assert result.returncode == 0, result.stderr
-
-
-def test_task_detail_requester_label_preserves_host_default_and_escaping():
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("Node.js is required to exercise the shared task detail without a browser")
-    script = r'''
-const fs = require("node:fs"), vm = require("node:vm"), assert = require("node:assert/strict");
-const element = () => {
-  const parts = new Map();
-  return {classList: {add() {}, toggle() {}}, innerHTML: "", textContent: "", scrollHeight: 0, clientHeight: 0,
-    setAttribute() {}, querySelectorAll: () => [],
-    querySelector(selector) {
-      if (!parts.has(selector)) parts.set(selector, element());
-      return parts.get(selector);
-    }};
-};
-const context = vm.createContext({});
-vm.runInContext(fs.readFileSync(process.argv[2], "utf8") + "; globalThis.sharedUI = UI;", context);
-const el = element(), task = {task_id:"t", state:"completed", lender:'<img src=x>', prompt:'<script>remote</script>', events:[]};
-const sum = () => el.querySelector('[data-td="sum"]').innerHTML;
-context.sharedUI.taskDetail(el, task, {showLender:true});
-assert.ok(sum().includes("<b>担当</b>"));
-assert.ok(sum().includes("&lt;img src=x&gt;"));
-context.sharedUI.taskDetail(el, task, {showLender:true, lenderLabel:"依頼主"});
-assert.ok(sum().includes("<b>依頼主</b>"));
-assert.ok(!sum().includes("<b>担当</b>"));
-assert.equal(el.querySelector('[data-td="prompt"]').textContent, task.prompt);
-context.sharedUI.taskDetail(el, task, {showLender:true, lenderLabel:"<script>label</script>"});
-assert.ok(!sum().includes("<script>"));
-'''
-    source = Path(__file__).resolve().parents[2] / "src/codex_bridge/common/web/ui.js"
-    result = subprocess.run([node, "-", str(source)], input=script, text=True, encoding="utf-8",
-                            capture_output=True, timeout=20)
-    assert result.returncode == 0, result.stderr
 
 
 def test_first_run_writes_sample_configs(tmp_path):
@@ -992,8 +885,11 @@ async def test_policy_form_save_keeps_lender_exec_modes(admin, host):
     assert host.policy.current().lender_exec_modes == {"alice": "ask", "bob": "all"}
 
 
-async def test_collect_form_removes_lender_exec_modes(admin):
-    js = (await admin.get("/admin/static/app.js")).text
-    collect = js.split("function collectForm() {", 1)[1].split("const isDirty", 1)[0]
-    assert "delete form.lender_exec_modes;" in collect
-    assert "return form;" in collect
+async def test_shared_allowlist_page_has_no_global_lender_settings(admin):
+    response = await admin.get("/app/static/use-pages.js")
+    assert response.status_code == 200
+    allow = response.text.split("export function allowHtml(form) {", 1)[1]
+    assert 'data-act="allow-text"' in allow
+    assert 'data-act="allow-confirm"' in allow
+    for setting in ("exec-mode", "delete-approval", "log-files", "log-result", "threshold"):
+        assert f'data-act="{setting}"' not in allow

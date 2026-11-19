@@ -3,9 +3,6 @@
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
 datas = [
-    ("src/codex_bridge/host/web/static", "codex_bridge/host/web/static"),
-    ("src/codex_bridge/agent/static", "codex_bridge/agent/static"),
-    ("src/codex_bridge/common/web", "codex_bridge/common/web"),
     ("src/codex_bridge/common/web/app", "codex_bridge/common/web/app"),
     ("src/codex_bridge/assets/codex-bridge.ico", "codex_bridge/assets"),
 ]

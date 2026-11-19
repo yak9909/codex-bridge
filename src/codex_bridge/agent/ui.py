@@ -1,4 +1,4 @@
-"""The lender's local screen. Only the loopback listener in main.py serves this app."""
+"""The lender's local API, mounted at /lend by the resident app."""
 
 from __future__ import annotations
 
@@ -11,17 +11,13 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictFloat, StrictStr
 
 from ..common.protocol import EFFORT_ORDER
 from .appserver import AppServerError
 from .settings import FEATURE_INFO, SettingsStore
 from .ui_tasks import task_view
-
-STATIC = Path(__file__).parent / "static"
-COMMON = Path(__file__).parents[1] / "common" / "web"
 
 
 class Decision(BaseModel):
@@ -151,10 +147,6 @@ def create_ui_app(runner, settings: SettingsStore, client, *, versions: dict, da
         response.headers["Content-Security-Policy"] = ("default-src 'self'; script-src 'self'; "
                                                        "style-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
         return response
-
-    @app.get("/")
-    async def index():
-        return FileResponse(STATIC / "index.html")
 
     @app.get("/api/overview")
     async def overview():
@@ -317,6 +309,4 @@ def create_ui_app(runner, settings: SettingsStore, client, *, versions: dict, da
                 await client.drop()
         return {"paused": connections.paused if connections else client.paused}
 
-    app.mount("/admin/common", StaticFiles(directory=COMMON), name="common")
-    app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app

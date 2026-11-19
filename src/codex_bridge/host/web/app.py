@@ -24,9 +24,7 @@ from ..share import (ShareBusy, add_shared_folder, change_share_root, pick_folde
                      remove_shared_folder, set_main_shared_folder)
 from .. import share as share_ops
 
-STATIC = Path(__file__).parent / "static"
-COMMON = Path(__file__).parents[2] / "common" / "web"  # UI parts shared with the lender's page
-APP_PAGE = COMMON / "app"  # the one-screen page (resident app; also /admin/ in the console way)
+APP_PAGE = Path(__file__).parents[2] / "common" / "web" / "app"
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 
@@ -379,5 +377,3 @@ def admin_router(host, page_url: str | None = None) -> APIRouter:
 def mount_static(app: FastAPI, page: bool = False) -> None:
     if page:  # console way: the page's files come from here, there is no resident app
         app.mount("/app/static", StaticFiles(directory=APP_PAGE), name="app-static")
-    app.mount("/admin/static", StaticFiles(directory=STATIC), name="static")
-    app.mount("/admin/common", StaticFiles(directory=COMMON), name="common")
