@@ -445,6 +445,24 @@ async def test_undo_task(env, share):
     assert not (share.root / "out/u.txt").exists()
 
 
+async def test_undo_task_reports_removed_share(env, share):
+    from codex_bridge.host.policy_form import remove_folder
+    from codex_bridge.host.tasks import TaskRecord
+
+    mgr, local, _ = env
+    mgr.tasks["t5"] = TaskRecord(task_id="t5", prompt="p", created=0, state="completed")
+    share.add_folder(share.outside, "write")
+    share.task("t5")
+    target = share.outside / "new.txt"
+    share.write.write_file(target.as_posix(), "changed")
+    remove_folder(share.policy, share.outside.as_posix())
+
+    result = await call(local, "undo_task", {"task_id": "t5"})
+    assert result["isError"]
+    assert result["content"][0]["text"] == f"共有を外したフォルダのファイルは元に戻せません: {target}"
+    assert target.read_text(encoding="utf-8") == "changed"
+
+
 async def test_undo_unknown_or_unsafe_task_id_refused(env, share):
     # Review C3
     mgr, local, _ = env

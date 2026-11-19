@@ -589,6 +589,39 @@ async def test_folder_add_remove_main_api(admin, host, tmp_path):
     assert (await admin.post("/admin/api/folders/add", json={"path": str(tmp_path), "level": "read"}, headers=H)).status_code == 400
 
 
+async def test_folder_api_during_task(admin, host, tmp_path):
+    from codex_bridge.host.tasks import TaskRecord
+
+    host.mgr.tasks["t1"] = TaskRecord(task_id="t1", prompt="p", created=0, state="running")
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    body = {"path": str(extra)}
+    assert (await admin.post("/admin/api/folders/add", json=body, headers=H)).status_code == 200
+    response = await admin.post("/admin/api/folders/main", json=body, headers=H)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "作業中はメインのフォルダを切り替えられません。終わってから切り替えてください"
+    assert (await admin.post("/admin/api/folders/remove", json=body, headers=H)).status_code == 200
+
+
+async def test_undo_api_reports_removed_share(admin, host, tmp_path):
+    from codex_bridge.host.share import add_shared_folder, remove_shared_folder
+    from codex_bridge.host.tasks import TaskRecord
+
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    add_shared_folder(host, str(extra), "write")
+    target = extra / "changed.txt"
+    host.snapshots.before_change("t1", target.as_posix(), target)
+    target.write_text("changed", encoding="utf-8")
+    host.mgr.tasks["t1"] = TaskRecord(task_id="t1", prompt="p", created=0, state="completed")
+    remove_shared_folder(host, str(extra))
+
+    response = await admin.post("/admin/api/tasks/t1/undo", headers=H)
+    assert response.status_code == 400
+    assert response.json()["detail"] == f"共有を外したフォルダのファイルは元に戻せません: {target}"
+    assert target.read_text(encoding="utf-8") == "changed"
+
+
 async def test_change_share_root_rejects_bad_paths(admin, host, tmp_path):
     assert (await admin.put("/admin/api/share-root", json={"path": str(tmp_path / "nope")}, headers=H)).status_code == 400
     # the data folder must stay outside the share

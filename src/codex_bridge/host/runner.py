@@ -14,7 +14,7 @@ from typing import Callable
 from ..common.audit import AuditLog
 from .approvals import Approvals
 from .paths import UNSET_SHARE_MSG, SafePaths, ToolError, not_found
-from .policy import OUTPUTS_TOP, PolicyStore, glob_to_regex, normalize_rel
+from .policy import OUTPUTS_TOP, Policy, PolicyStore, glob_to_regex, normalize_rel
 from .snapshots import Snapshots
 
 FORBIDDEN_CHARS = set("&|;<>^\r\n`")
@@ -177,12 +177,21 @@ class CommandRunner:
             self.audit.write("command", job_id=job.id, command=job.command, cwd=job.cwd, status=job.status,
                              exit_code=job.exit_code, changed_files=job.changed_files, task_id=job.task_id)
 
-    def _write_area_state(self) -> dict[str, tuple[int, int]]:
-        """(mtime, size) of every writable file in every shared folder."""
+    def _write_area_state(self, roots: list[Path] | None = None,
+                          policy: Policy | None = None,
+                          display: Callable[[str], str] | None = None) -> dict[str, tuple[int, int]]:
+        """(mtime, size) of writable files under the selected roots."""
         state: dict[str, tuple[int, int]] = {}
-        display = self.paths.display_formatter()
-        for root in self.paths.root_paths():
-            for _, entry in self.paths.walk(root, "write"):
+        if roots is None:
+            roots = self.paths.root_paths()
+        if display is None:
+            display = self.paths.display_formatter()
+        walked: list[Path] = []
+        for root in sorted(roots, key=lambda path: len(path.parts)):
+            if any(root.is_relative_to(parent) for parent in walked):
+                continue
+            walked.append(root)
+            for _, entry in self.paths.walk(root, "write", policy=policy):
                 try:
                     st = entry.stat()
                 except OSError:
@@ -191,11 +200,16 @@ class CommandRunner:
         return state
 
     async def _execute(self, job: Job, real_cwd: Path, timeout: int) -> None:
-        limits = self.policy.current().limits
-        before = await asyncio.to_thread(self._write_area_state)
-        root = self.paths.root  # read once: the main folder can vanish while a command starts
+        policy = self.policy.current()
+        limits = policy.limits
+        roots = [Path(folder["path"]) for folder in self.paths.roots()]
+        display = self.paths.display_formatter()
+        root = self.paths.root
         if root is None:
             raise ToolError(UNSET_SHARE_MSG)
+        before = await asyncio.to_thread(self._write_area_state, roots, policy, display)
+        # The original working directory may have been unshared during approval or scanning.
+        self.paths.resolve(real_cwd.as_posix(), "read")
         out_dir = root / OUTPUTS_TOP / "outputs"
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"{secrets.token_hex(16)}.stdout.txt"
@@ -242,6 +256,12 @@ class CommandRunner:
             job.stdout = decode_output(bytes(head))
             out_path.unlink(missing_ok=True)
         job.stderr = decode_output(bytes(err))
-        after = await asyncio.to_thread(self._write_area_state)
-        job.changed_files = sorted(k for k, v in after.items() if before.get(k) != v) + \
-            sorted(f"{k}（削除）" for k in before if k not in after)
+        active_roots = [folder for folder in roots if self.paths.level_of(folder) not in (None, "hidden")]
+        after = await asyncio.to_thread(self._write_area_state, active_roots, policy, display)
+
+        def still_writable(name: str) -> bool:
+            path = root / name
+            return self.paths.level_of(path) == self.paths.level_of(path.resolve()) == "write"
+
+        job.changed_files = sorted(k for k, v in after.items() if before.get(k) != v and still_writable(k)) + \
+            sorted(f"{k}（削除）" for k in before if k not in after and still_writable(k))

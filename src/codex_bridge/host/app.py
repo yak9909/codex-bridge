@@ -74,7 +74,7 @@ def build_host(config: HostConfig, config_path: Path | None = None) -> Host:
     paths = SafePaths(config.share_root, policy,
                       install_dir=config.install_dir or (config_path.parent if config_path else None),
                       protected=(config.rg_path, *((config_path,) if config_path else ())))
-    snapshots = Snapshots(data)
+    snapshots = Snapshots(data, paths)
     approvals = Approvals(policy)
     mgr = TaskManager(data, touched_fn=snapshots.touched, check_start=paths.check_configured)
     notifier = Notifier(mgr, approvals)

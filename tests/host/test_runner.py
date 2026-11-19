@@ -152,6 +152,31 @@ async def test_changed_files_reported(share):
     assert r["changed_files"] == ["out/made.txt"]
 
 
+@pytest.mark.parametrize("nested", [False, True])
+async def test_changed_files_ignore_shares_added_or_removed_during_command(share, monkeypatch, nested):
+    from codex_bridge.host.policy_form import remove_folder
+
+    share.set_policy(exec_mode="all")
+    added = share.root / "docs" if nested else share.outside
+    (added / "existing.txt").write_text("existing", encoding="utf-8")
+    removed = share.root.parent / "removed"
+    removed.mkdir()
+    (removed / "existing.txt").write_text("existing", encoding="utf-8")
+    share.add_folder(removed, "write")
+    start_process = asyncio.create_subprocess_shell
+
+    async def change_shares(*args, **kwargs):
+        proc = await start_process(*args, **kwargs)
+        share.add_folder(added, "write")
+        remove_folder(share.policy, removed.as_posix())
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", change_shares)
+    result = await share.runner.run_command(f"{PY} -c \"open('out/made.txt','w').write('m')\"")
+    assert result["status"] == "done", result
+    assert result["changed_files"] == ["out/made.txt"]
+
+
 async def test_changed_files_skip_hidden(share):
     share.set_policy(exec_mode="all")
     r = await share.runner.run_command(f"{PY} -c \"open('raw/secret/s.txt','w').write('m')\"")

@@ -401,20 +401,21 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
         return {"path": str(p), "main": str(root) if root else None}
 
     @tool("共有フォルダを追加します。path はフルパス（例: D:/tools/lib）、level は read（読むだけ）か write（書ける）。"
-          "利用者に頼まれたときだけ使ってください。")
+          "作業中でも追加できます。利用者に頼まれたときだけ使ってください。")
     async def add_shared_folder(path: str, level: str = "read") -> CallToolResult:
         return await run(lambda: _folder_call("add", path, level))
 
-    @tool("共有フォルダを一覧から外します（path はフルパス）。利用者に頼まれたときだけ使ってください。")
+    @tool("共有フォルダを一覧から外します（path はフルパス）。作業中でも外せます。利用者に頼まれたときだけ使ってください。")
     async def remove_shared_folder(path: str) -> CallToolResult:
         return await run(lambda: _folder_call("remove", path))
 
-    @tool("メインのフォルダ（相対パスの起点）を変えます。path は登録済みの共有フォルダのフルパス。")
+    @tool("メインのフォルダ（相対パスの起点）を変えます。path は登録済みの共有フォルダのフルパス。"
+          "作業中はメインのフォルダを切り替えられません。")
     async def set_main_folder(path: str) -> CallToolResult:
         return await run(lambda: _folder_call("main", path))
 
     @tool("（旧名）このフォルダを書ける共有フォルダにしてメインにします。path はフルパス。"
-          "作業中のタスクがあるときは変えられません。利用者に頼まれたときだけ使ってください。")
+          "作業中はメインのフォルダを切り替えられません。利用者に頼まれたときだけ使ってください。")
     async def set_share_root(path: str) -> CallToolResult:
         async def f():
             r = await _folder_call("share_root", path)
