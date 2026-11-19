@@ -888,7 +888,7 @@ async def test_policy_form_save_keeps_lender_exec_modes(admin, host):
 async def test_shared_allowlist_page_has_no_global_lender_settings(admin):
     response = await admin.get("/app/static/use-pages.js")
     assert response.status_code == 200
-    allow = response.text.split("export function allowHtml(form) {", 1)[1]
+    allow = response.text.split("export function allowHtml(form) {", 1)[1].split("export function", 1)[0]
     assert 'data-act="allow-text"' in allow
     assert 'data-act="allow-confirm"' in allow
     for setting in ("exec-mode", "delete-approval", "log-files", "log-result", "threshold"):

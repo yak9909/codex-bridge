@@ -49,3 +49,14 @@ export function allowHtml(form) {
     `<label class="switch"><input type="checkbox" data-act="allow-confirm"${ex.confirm_modified_scripts ? " checked" : ""}><span class="track"></span><span>作業中に書き換えたスクリプトは承認待ちにする</span></label>` +
     `<p class="note-warn">${icon("triangle-alert")}<span>実行したプログラムは、共有フォルダの外も読めます</span></p>`;
 }
+
+export function policyWarningsHtml(overview) {
+  const problems = Array.isArray(overview.policy_problem) ? overview.policy_problem : [];
+  let html = problems.map((p) => `<div class="note-warn" role="alert">${icon("triangle-alert")}<div class="field">` +
+    `<p>共有フォルダの設定に、codex-bridge 自身のデータ（設定と記録）を含むフォルダがあります: ${esc(p.folder)}。このままでは安全のため一部の操作ができないことがあります。</p>` +
+    `<div class="row"><button type="button" class="secondary sm" data-act="folder-remove" data-path="${esc(p.folder)}">このフォルダを共有から外す</button></div></div></div>`).join("");
+  if (overview.policy_error) {
+    html += `<p class="note-warn" role="alert">${icon("triangle-alert")}<span>policy.yaml を読めません（前の設定のまま動いています）: ${esc(overview.policy_error)}</span></p>`;
+  }
+  return html ? `<div class="block">${html}</div>` : "";
+}

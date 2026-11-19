@@ -1,4 +1,5 @@
 import importlib.util
+import re
 from pathlib import Path
 from string import Formatter
 
@@ -57,13 +58,24 @@ def test_borrower_guides_keep_setup_and_console_instructions(mod, path):
         assert obsolete not in text, (path, obsolete)
 
 
+def test_guides_keep_the_windows_data_path_and_sign_in_shortcut(mod):
+    root = Path(__file__).resolve().parents[1]
+    paths = ["README.md", "docs/friend-guide.md", "docs/operation-guide.md"]
+    texts = [(root / path).read_text(encoding="utf-8") for path in paths]
+    for text in [*texts, mod.README]:
+        assert not re.search(r"%LOCALAPPDATA%(?![\\/])", text)
+    for text in texts[:2]:
+        assert r"%LOCALAPPDATA%\codex-bridge-agent" in text
+    assert "shell:startup" in texts[1] and "引数は要りません" in texts[1]
+
+
 def test_notice_limits_and_status_guidance():
     root = Path(__file__).resolve().parents[1]
     guide = (root / "docs/operation-guide.md").read_text(encoding="utf-8")
     assert "Claude Code では、次に codex-bridge のどれかの道具を呼んだとき" in guide
     assert "Codex では、次のターンの終わり" in guide
     assert "24 時間より前の依頼" in guide
-    assert "get_result か管理画面" in guide
+    assert "get_result か「使う」タブ" in guide
     assert "同じ PC の Claude Code の会話を 2 つ" in guide
     assert "タスク ID をフックが読み取れなかった依頼" in guide
     assert "ふつうは知らせで足ります。知らせが届かない環境のときだけ wait_sec で待ちます。" in (

@@ -5,7 +5,7 @@ import { get, send, onChange, showError, clearError, esc, ago } from "/app/stati
 import { icon, busyInside, taskTitle, ACTIVE } from "/app/static/common.js";
 import { lenderParts } from "/app/static/use-lenders.js";
 import { listHtml, newHeadHtml, headHtml, timelineHtml, pickerOptions } from "/app/static/use-tasks.js";
-import { emptyHtml, foldersHtml, allowHtml } from "/app/static/use-pages.js";
+import { emptyHtml, foldersHtml, allowHtml, policyWarningsHtml } from "/app/static/use-pages.js";
 
 // what the user has chosen; it outlives the tab being left and entered again
 const S = {
@@ -42,7 +42,10 @@ const SHELL = `
       <div class="pane-body scroll" data-slot="lenders"></div>
     </aside>
     <div class="work">
-      <div class="alerts" data-slot="approvals" aria-label="承認待ち" hidden></div>
+      <div data-slot="notices" hidden>
+        <div data-slot="policy-warnings" aria-label="設定の警告"></div>
+        <div class="alerts" data-slot="approvals" aria-label="承認待ち" hidden></div>
+      </div>
       <div class="surface">
         <nav class="tablist" role="tablist">${TABS.map(([k, t]) => `<button class="tab" role="tab" data-tab="${k}" aria-selected="false">${t}</button>`).join("")}</nav>
         <div class="lv" data-panel="tasks">
@@ -71,9 +74,9 @@ export function renderUse(root) {
     count: q("count"), invite: q("invite"), lenders: q("lenders"), approvals: q("approvals"), items: q("items"),
     dhead: q("dhead"), dlog: q("dlog"), text: q("text"), bar: q("bar"), form: shell.querySelector("form.composer"),
     folders: shell.querySelector('[data-panel="folders"]'), allow: shell.querySelector('[data-panel="allow"]'),
-    tasks: shell.querySelector('[data-panel="tasks"]'),
+    tasks: shell.querySelector('[data-panel="tasks"]'), notices: q("notices"), warnings: q("policy-warnings"),
   };
-  const cache = { approvals: null, items: null, dhead: null, dlog: null, bar: null, folders: null, allow: null, empty: null };
+  const cache = { warnings: null, approvals: null, items: null, dhead: null, dlog: null, bar: null, folders: null, allow: null, empty: null };
   const view = { mode: null, sel: null, selKey: undefined, lenders: [], tasks: [], logFor: null };
   let alive = true;
   let busy = false;
@@ -164,6 +167,22 @@ export function renderUse(root) {
     }
   }
 
+  function syncNotices() {
+    const visible = !!cache.warnings || !el.approvals.hidden;
+    el.notices.hidden = !visible;
+    shell.querySelector(".work").classList.toggle("no-alerts", !visible);
+  }
+
+  function drawPolicyWarnings(overview) {
+    const html = policyWarningsHtml(overview);
+    // Preserve the focused removal button while the same warning is refreshed.
+    if (html !== cache.warnings) {
+      cache.warnings = html;
+      el.warnings.innerHTML = html;
+    }
+    syncNotices();
+  }
+
   function drawApprovals(list) {
     const byTask = new Map(view.tasks.map((t) => [t.task_id, t]));
     const now = Date.now() / 1000;
@@ -177,7 +196,7 @@ export function renderUse(root) {
         `<button class="danger sm" data-act="approve" data-id="${esc(a.id)}" data-yes="0">拒否</button></span></div>`;
     }).join("");
     el.approvals.hidden = !list.length;
-    shell.querySelector(".work").classList.toggle("no-alerts", !list.length);
+    syncNotices();
     if (html !== cache.approvals) {
       cache.approvals = html;
       el.approvals.innerHTML = html;
@@ -311,6 +330,7 @@ export function renderUse(root) {
       return;
     }
     setMode("shell");
+    drawPolicyWarnings(overview);
     let lenders, approvals, tasks;
     try {
       [lenders, approvals, tasks] = await Promise.all([

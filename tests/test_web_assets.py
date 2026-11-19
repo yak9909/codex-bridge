@@ -40,6 +40,12 @@ def test_use_js_has_no_inline_handlers_or_scripts():
         assert "<script" not in text and "javascript:" not in text, f"{name}: inline script"
 
 
+def test_use_js_reads_policy_warnings_from_overview():
+    sources = "\n".join(use_sources().values())
+    for field in ("policy_problem", "policy_error"):
+        assert re.search(rf"\boverview\.{field}\b", sources), f"the use tab does not read {field}"
+
+
 def test_lend_js_exports_renderLend():
     assert re.search(r"export\s+(async\s+)?function\s+renderLend\s*\(", (APP / "lend.js").read_text(encoding="utf-8"))
 
@@ -99,6 +105,26 @@ const error = emptyHtml(warning);
 assert.ok(error.includes("&lt;script&gt;bad&lt;/script&gt;"));
 assert.ok(error.includes("準備を始める"));
 assert.ok(!emptyHtml(null).includes('class="note-warn"'));
+''')
+
+
+def test_policy_warnings_keep_wording_and_escape_folder_and_error(run_app_js):
+    run_app_js('''
+import assert from "node:assert/strict";
+import { policyWarningsHtml } from "./use-pages.js";
+const folder = 'D:/work/<img src=x onerror="bad">';
+const html = policyWarningsHtml({policy_problem: [
+  {folder, reason: "contains_data_dir"}, {folder: "D:/other", reason: "contains_data_dir"}
+], policy_error: '<script>bad</script> & "error"'});
+assert.ok(html.includes("共有フォルダの設定に、codex-bridge 自身のデータ（設定と記録）を含むフォルダがあります: "));
+assert.ok(html.includes("。このままでは安全のため一部の操作ができないことがあります。"));
+assert.equal((html.match(/このフォルダを共有から外す/g) || []).length, 2);
+assert.ok(html.includes('data-act="folder-remove"'));
+assert.ok(html.includes('data-path="D:/work/&lt;img src=x onerror=&quot;bad&quot;&gt;"'));
+assert.ok(html.includes("policy.yaml を読めません（前の設定のまま動いています）: &lt;script&gt;bad&lt;/script&gt; &amp; &quot;error&quot;"));
+assert.ok(!html.includes("<img") && !html.includes("<script>"));
+assert.equal(policyWarningsHtml({policy_problem: [], policy_error: null}), "");
+assert.equal(policyWarningsHtml({}), "");
 ''')
 
 
