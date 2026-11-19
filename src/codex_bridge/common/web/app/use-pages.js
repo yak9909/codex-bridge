@@ -4,7 +4,8 @@ import { icon } from "/app/static/use-util.js";
 
 const LEVELS = [["write", "書ける"], ["read", "読むだけ"], ["hidden", "見せない"]];
 
-export function emptyHtml(error) {
+export function emptyHtml(error, starting = false) {
+  if (starting && !error) return '<div class="pane"><div class="empty-pane"><p>使う側を起動しています…</p></div></div>';
   return `<div class="pane"><div class="empty-pane"><p>この PC で Codex を借りるには、最初に準備が要ります。</p>` +
     `${error ? `<p class="note-warn">${icon("triangle-alert")}<span>${esc(error)}</span></p>` : ""}` +
     `<button data-act="setup">準備を始める</button></div></div>`;

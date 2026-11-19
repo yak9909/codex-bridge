@@ -288,3 +288,10 @@ table.grid .indent { padding-left: var(--s4); }
 .surface > [hidden] { display: none; }
 .empty-pane { display: grid; gap: var(--s3); justify-items: start; align-content: start; }
 .tl-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Keep the hidden toggle inputs inside their scroll pane's containing block. */
+.switch { position: relative; }
+.alert > .cap { display: flex; align-items: center; min-width: 0; max-width: 240px; white-space: nowrap; }
+.alert > .cap > span:last-child { flex: none; }
+.composer-bar { flex-wrap: wrap; }
+.composer-bar > button { margin-left: auto; }
+@media (min-width: 721px) { .alert { grid-template-columns: auto minmax(0, 1fr) minmax(0, auto) auto; } }

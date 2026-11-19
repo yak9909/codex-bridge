@@ -29,7 +29,7 @@ export function elapsed(seconds) {
 
 export function taskTitle(task) {
   const line = String(task.prompt || "").split("\n")[0].trim();
-  return `${task.task_id} ${line}`.trim();
+  return line;
 }
 
 export function onOff(on) {

@@ -2,7 +2,7 @@
 // Every part is drawn into a container that stays in the page, and a refresh only writes what changed and is not being used
 // (a focused field, an open list), so scroll positions, open cards, the chosen request and typed text survive it.
 import { get, send, onChange, showError, clearError, esc, ago } from "/app/static/api.js";
-import { icon, busyInside, ACTIVE } from "/app/static/use-util.js";
+import { icon, busyInside, taskTitle, ACTIVE } from "/app/static/use-util.js";
 import { lenderParts } from "/app/static/use-lenders.js";
 import { listHtml, newHeadHtml, headHtml, timelineHtml, pickerOptions } from "/app/static/use-tasks.js";
 import { emptyHtml, foldersHtml, allowHtml } from "/app/static/use-pages.js";
@@ -86,10 +86,9 @@ export function renderUse(root) {
     root.replaceChildren(mode === "shell" ? shell : emptyEl);
   }
 
-  function keepFocus(oldNode, newNode) {
-    const a = document.activeElement;
+  function keepFocus(oldNode, newNode, a = document.activeElement) {
     if (!a || !oldNode.contains(a)) return;
-    const sel = ["data-act", "data-name", "data-path", "data-id"].filter((k) => a.hasAttribute(k)).map((k) => `[${k}="${CSS.escape(a.getAttribute(k))}"]`).join("");
+    const sel = ["data-act", "data-name", "data-path", "data-id", "data-pick"].filter((k) => a.hasAttribute(k)).map((k) => `[${k}="${CSS.escape(a.getAttribute(k))}"]`).join("");
     const target = sel ? newNode.querySelector(sel) || (newNode.matches(sel) ? newNode : null) : null;
     if (target) target.focus();
   }
@@ -109,8 +108,9 @@ export function renderUse(root) {
       }
       const node = fromHtml(html);
       if (old) {
+        const active = document.activeElement;
         old.replaceWith(node);
-        keepFocus(old, node);
+        keepFocus(old, node, active);
       }
       card._els[slot] = node;
     }
@@ -147,9 +147,11 @@ export function renderUse(root) {
     const now = Date.now() / 1000;
     const html = list.map((a) => {
       const t = byTask.get(a.task_id);
-      const cap = [a.task_id, t && t.lender, ago(now - (a.age_sec || 0))].filter(Boolean).join("・");
+      const title = t ? taskTitle(t) : "";
+      const meta = [t && t.lender, ago(now - (a.age_sec || 0))].filter(Boolean).join("・");
+      const cap = `${title ? `<span class="ellipsis">${esc(title)}</span>・` : ""}<span>${esc(meta)}</span>`;
       return `<div class="alert"><span class="lz warn">${a.kind === "command" ? "コマンド実行" : "削除"}</span><code>${esc(a.summary)}</code>` +
-        `<span class="cap">${esc(cap)}</span><span class="decide"><button class="sm" data-act="approve" data-id="${esc(a.id)}" data-yes="1">許可</button>` +
+        `<span class="cap">${cap}</span><span class="decide"><button class="sm" data-act="approve" data-id="${esc(a.id)}" data-yes="1">許可</button>` +
         `<button class="danger sm" data-act="approve" data-id="${esc(a.id)}" data-yes="0">拒否</button></span></div>`;
     }).join("");
     el.approvals.hidden = !list.length;
@@ -176,7 +178,7 @@ export function renderUse(root) {
     el.items.scrollTop = top;
   }
 
-  function drawComposer() {
+  function drawComposer(force = false) {
     const key = S.selected;
     if (view.selKey !== key) {
       if (view.selKey !== undefined) S.drafts.set(view.selKey, el.text.value);
@@ -188,7 +190,7 @@ export function renderUse(root) {
     el.text.rows = isNew ? 4 : 2;
     el.text.placeholder = isNew
       ? "例: analysis/report.md を読み、要点を 5 行で analysis/summary.md に書いてください。"
-      : `追加の指示（${key} の続き）`;
+      : "追加の指示";
     let html;
     if (isNew) {
       const picked = pickerOptions(view.lenders, S.pick);
@@ -197,9 +199,15 @@ export function renderUse(root) {
     } else {
       html = `<span class="spacer"></span><button class="sm" type="submit">${icon("send")}送る</button>`;
     }
-    if (html !== cache.bar && !busyInside(el.bar)) {
+    if (html !== cache.bar && (force || !busyInside(el.bar))) {
+      const old = el.bar;
+      const active = document.activeElement;
+      const bar = old.cloneNode(false);
+      bar.innerHTML = html;
       cache.bar = html;
-      el.bar.innerHTML = html;
+      old.replaceWith(bar);
+      el.bar = bar;
+      keepFocus(old, bar, active);
     }
   }
 
@@ -272,7 +280,7 @@ export function renderUse(root) {
     if (!alive) return;
     if (!overview || overview.configured === false || overview.running === false || overview.error) {
       setMode("empty");
-      const html = emptyHtml(overview && overview.error);
+      const html = emptyHtml(overview && overview.error, overview && overview.configured === true && overview.running === false);
       if (html !== cache.empty) {
         cache.empty = html;
         emptyEl.innerHTML = html;
@@ -498,7 +506,7 @@ export function renderUse(root) {
     if (t.dataset.pick) {
       S.pick = { ...S.pick, [t.dataset.pick]: t.value };
       cache.bar = null;
-      drawComposer();
+      drawComposer(true);
       return;
     }
     switch (act) {

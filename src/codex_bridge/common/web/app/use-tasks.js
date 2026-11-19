@@ -3,7 +3,8 @@ import { esc, fmtTime, fmtDay } from "/app/static/api.js";
 import { icon, elapsed, taskTitle, stateLozenge, ACTIVE } from "/app/static/use-util.js";
 
 const EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
-const FILE_TOOLS = /^(fileChange|file_change|apply_patch|patch)$/i;
+const COMMAND_TOOLS = /^(run_command|commandExecution|command_execution)$/i;
+const FILE_TOOLS = /^(read_file|write_file|edit_file|move_path|delete_path|fileChange|file_change|apply_patch|patch)$/i;
 const ENDINGS = {
   completed: ["circle-check-big", "完了しました"],
   failed: ["circle-x", "失敗しました"],
@@ -38,10 +39,11 @@ export function headHtml(r) {
     switched = `<span class="badge" title="${esc(`途中で ${r.rerouted.from} から切り替わりました${why}`)}">${esc(r.rerouted.from)} から切り替え</span>`;
   }
   const span = (r.finished || now) - r.created;
-  return `<div class="d-title"><h2>${esc(taskTitle(r))}</h2>` +
+  const body = String(r.prompt || "").split(/\r?\n/).slice(1).join("\n");
+  return `<div class="d-title"><h2 class="ellipsis">${esc(taskTitle(r))}</h2>` +
     `${active ? `<button class="danger sm" data-act="cancel" data-id="${esc(r.task_id)}">中止</button>` : ""}</div>` +
     `<div class="d-meta">${stateLozenge(r.state)}${r.lender ? `<b>${esc(r.lender)}</b>` : ""}${used ? `<span>${esc(used)}</span>` : ""}${switched}` +
-    `<span>${esc(elapsed(span))}</span></div><p class="d-body">${esc(r.prompt)}</p>`;
+    `<span>${esc(elapsed(span))}</span></div>${body ? `<p class="d-body">${esc(body)}</p>` : ""}`;
 }
 
 function item(cls, iconId, body, ts) {
@@ -50,6 +52,32 @@ function item(cls, iconId, body, ts) {
 }
 
 const code = (text) => (text ? ` <code>${esc(String(text).slice(0, 160))}</code>` : "");
+
+// The runner sends arguments as an object or JSON text; capped/legacy calls may omit them.
+function toolArguments(value) {
+  if (typeof value === "string") {
+    try { value = JSON.parse(value); } catch {
+      // _cap can cut JSON mid-value. Keep only complete fields before the cut.
+      if (value.startsWith("{") && value.endsWith("…")) {
+        for (let end = value.lastIndexOf(","); end > 0; end = value.lastIndexOf(",", end - 1)) {
+          try { return JSON.parse(value.slice(0, end) + "}"); } catch { /* still inside the cut value */ }
+        }
+      }
+      return {};
+    }
+  }
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function filePaths(args) {
+  const paths = [args.path, ...(Array.isArray(args.paths) ? args.paths : []), args.src, args.dst, args.source, args.destination]
+    .filter((p) => typeof p === "string" && p);
+  // apply_patch carries its targets in patch headers, never in a top-level path field.
+  if (typeof args.patch === "string") {
+    for (const m of args.patch.matchAll(/^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm)) paths.push(m[1].trim());
+  }
+  return [...new Set(paths)];
+}
 
 function eventItem(ev, r) {
   const d = ev.data;
@@ -62,8 +90,17 @@ function eventItem(ev, r) {
     case "tool_finished": {
       const tool = d && d.tool ? String(d.tool) : "";
       const failed = d && d.success === false ? "（失敗）" : "";
-      if (FILE_TOOLS.test(tool)) return item("ev", "folder", `ファイルを変更${failed}`, ev.ts);
-      return item("ev", "terminal", `コマンド実行${failed}${code(tool)}`, ev.ts);
+      const args = toolArguments(d && d.arguments);
+      if (COMMAND_TOOLS.test(tool)) {
+        const command = typeof args.command === "string" ? args.command : tool;
+        return item("ev", "terminal", `コマンド実行${failed}${code(command)}`, ev.ts);
+      }
+      if (FILE_TOOLS.test(tool)) {
+        const label = tool.toLowerCase() === "read_file" ? "ファイルを読む" : "ファイルを変更";
+        const paths = filePaths(args);
+        return item("ev", "folder", `${label}${failed}${paths.length ? paths.map(code).join("、") : code(tool)}`, ev.ts);
+      }
+      return item("ev", "settings", `道具を実行${failed}${code(tool)}`, ev.ts);
     }
     case "plan":
       return d && Array.isArray(d.steps) ? item("ev", "list-checks", `計画を更新しました（${d.steps.length} 件）`, ev.ts) : "";
