@@ -39,7 +39,8 @@ export function settingsHtml(c, data, count, ui) {
   const logs = ui.confirm === "logs" ? confirm("clear-logs", "この依頼主の記録を消しますか", "記録を消す") : `<button class="danger sm" data-act="ask-logs" ${attr}>記録を消す</button>`;
   let connect = `<button class="secondary sm" data-act="replace-open" ${attr}>招待コードを入れ直す</button><button class="danger sm" data-act="ask-remove" ${attr}>外す</button>`;
   if (ui.confirm === "remove") connect = confirm("remove", "この依頼主を外しますか", "外す");
-  if (ui.replace) connect = `<label class="field grow"><span>招待コード</span><input data-act="replace-code" ${attr} value="${esc(ui.code)}" autocomplete="off"></label><button class="sm" data-act="replace" ${attr}>つなぐ</button><button class="secondary sm" data-act="replace-cancel" ${attr}>やめる</button>`;
+  // one line: the row heading already says what this is; the field has the small height of the buttons beside it
+  if (ui.replace) connect = `<input class="sm grow" data-act="replace-code" ${attr} value="${esc(ui.code)}" placeholder="新しい招待コード" aria-label="新しい招待コード" autocomplete="off"><button class="sm" data-act="replace" ${attr}>つなぐ</button><button class="secondary sm" data-act="replace-cancel" ${attr}>やめる</button>`;
   return row("使えるモデル", combo(modelSummary(data), search + models, 'data-combo="models"')) +
     row("推論の強さの上限", `<select data-act="effort" ${attr}>${opts}</select>`) +
     row("始める前の許可", combo(preSummary(p), checks, 'data-combo="pre"') + timeout) +
