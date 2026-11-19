@@ -43,7 +43,8 @@ class Pending:
         return self.msg["prompt"] if self.kind == START else self.msg["text"]
 
     def view(self) -> dict:
-        return {"task_id": self.task_id, "prompt": self.prompt, "kind": self.kind, "created": self.created}
+        return {"task_id": self.task_id, "prompt": self.prompt, "kind": self.kind, "created": self.created,
+                "timeout_min": self.timeout_min, "model": self.msg.get("model"), "effort": self.msg.get("effort")}
 
 
 def _why(base: str, reason: str) -> str:
@@ -96,6 +97,7 @@ class PreApproval:
         if p is None:
             return False
         if approve:
+            self.runner._record(p.task_id, "lender_approved", {"kind": p.kind})
             await self._approve(p)
         else:
             await self._reject(p, _why(REFUSED, reason))

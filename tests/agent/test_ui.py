@@ -365,9 +365,8 @@ async def test_clear_only_worklogs_and_pause_uses_runtime_callback(env):
 
 async def test_pending_same_task_new_followup_cannot_use_an_old_screen(env):
     await hold(env)
-    body = {**env.runner.pending_approval, "approve": False}
-    body.pop("prompt")
-    body.pop("kind")
+    body = {"task_id": env.runner.pending_approval["task_id"],
+            "created": env.runner.pending_approval["created"], "approve": False}
     env.runner.approval.pending.created += 1
     assert (await env.http.post("/api/pending", json=body, headers=WRITE)).status_code == 409
     assert env.runner.pending_approval is not None

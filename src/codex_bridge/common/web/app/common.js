@@ -49,8 +49,9 @@ export const STATES = {
 };
 export const ACTIVE = ["queued", "running", "agent_offline", "awaiting_lender"];
 
-export function stateLozenge(state) {
-  const [label, cls] = STATES[state] || [state || "?", "idle"];
+export function stateLozenge(state, side = "use") {
+  const [label, cls] = side === "lend" && state === "awaiting_lender"
+    ? ["あなたの許可待ち", "warn"] : STATES[state] || [state || "?", "idle"];
   return `<span class="lz ${cls}">${esc(label)}</span>`;
 }
 

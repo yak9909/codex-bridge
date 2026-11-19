@@ -7,9 +7,11 @@ import copy
 import pytest
 
 from codex_bridge.agent.control_client import ControlClient
+from codex_bridge.agent.pre_approval import Pending
 from codex_bridge.agent.runner import AgentRunner
 from codex_bridge.agent.sessions import SessionRegistry
 from codex_bridge.agent.usage import QuotaGuard
+from codex_bridge.agent.worklog import WorkLog
 from codex_bridge.common import protocol
 from codex_bridge.common.invite import Invite
 from fake_helpers import Fake
@@ -143,10 +145,42 @@ async def test_a_new_task_is_held_back_and_announced_before_codex_sees_it(env):
     assert env.last_state()["task_id"] == "t1" and env.last_state()["seq"]
     assert env.fake.received("thread/start") is None and env.fake.received("turn/start") is None
     p = env.runner.pending_approval
-    assert set(p) == {"task_id", "prompt", "kind", "created"}
+    assert set(p) == {"task_id", "prompt", "kind", "created", "timeout_min", "model", "effort"}
     assert (p["task_id"], p["prompt"], p["kind"]) == ("t1", "ファイルを直して", "start") and p["created"] > 0
     assert env.runner.cur is None
     assert {"type": "task_prompt", "task_id": "t1", "prompt": "ファイルを直して"} in env.logged  # the lender can read it
+
+
+@pytest.mark.parametrize("kind", ["start", "followup"])
+@pytest.mark.parametrize("timeout_min", [30, None])
+@pytest.mark.parametrize("selection", [{"model": "GPT-6.1-Sol", "effort": "high"}, {}])
+def test_pending_view_carries_captured_timeout_and_optional_model_effort(kind, timeout_min, selection):
+    message = {"task_id": "t1", "prompt" if kind == "start" else "text": "確認して", **selection}
+    pending = Pending(message, kind, 1000.0, None, timeout_min)
+    assert pending.view() == {"task_id": "t1", "prompt": "確認して", "kind": kind, "created": 1000.0,
+                              "timeout_min": timeout_min, "model": selection.get("model"),
+                              "effort": selection.get("effort")}
+
+
+async def test_pending_view_keeps_the_original_timeout_after_settings_change(env):
+    await env.runner.handle({"type": "task_start", "task_id": "t1", "prompt": "確認して",
+                             "model": "GPT-6.1-Sol", "effort": "high"})
+    env.setting(timeout_min=1)
+    pending = env.runner.pending_approval
+    assert pending["timeout_min"] == 30
+    assert (pending["model"], pending["effort"]) == ("GPT-6.1-Sol", "high")
+
+
+@pytest.mark.parametrize("kind", ["start", "followup"])
+async def test_approval_is_recorded_in_the_lender_worklog_only(env, tmp_path, kind):
+    if kind == "followup":
+        await env.running_task()
+    env.runner.worklog = WorkLog(tmp_path / "worklog")
+    await (env.start() if kind == "start" else env.followup())
+    assert await env.runner.decide_pending(True)
+    approvals = [e for e in env.runner.worklog.task_events("t1") if e["kind"] == "lender_approved"]
+    assert len(approvals) == 1 and approvals[0]["data"] == {"kind": kind}
+    assert not any(m.get("kind") == "lender_approved" for m in env.sent)
 
 
 @pytest.mark.parametrize("env", [DONE], indirect=True)

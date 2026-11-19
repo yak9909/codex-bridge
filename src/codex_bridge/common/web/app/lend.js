@@ -7,6 +7,11 @@ import { pcHtml } from "/app/static/lend-pages.js";
 
 const S = { open: new Set(), cards: new Map(), selected: null, filter: "", tab: "tasks", invite: false, code: "", pc: { edit: null, workdir: "", path: "", message: "" } };
 const keyFor = (t) => JSON.stringify([t.connection_id, t.task_id]);
+export function pendingMeta(p, now = Date.now() / 1000) {
+  const remaining = p.timeout_min == null ? null : Math.ceil((p.created + p.timeout_min * 60 - now) / 60);
+  return [p.host_name, p.model, p.effort, ago(p.created), remaining == null ? null : `あと ${remaining} 分で取り消し`]
+    .filter((part) => part != null && part !== "").join("・");
+}
 const cardUi = (id) => {
   if (!S.cards.has(id)) S.cards.set(id, { replace: false, code: "", confirm: null });
   return S.cards.get(id);
@@ -99,11 +104,11 @@ export function renderLend(root) {
   function drawPending(p) {
     const key = p ? JSON.stringify([p.connection_id, p.task_id, p.created]) : null;
     if (key !== view.pendingKey) {
-      const meta = p ? [p.host_name, ago(p.created)].filter(Boolean).join("・") : "";
+      const meta = p ? pendingMeta(p) : "";
       patch(el.pending, p ? `<div class="alert multi"><span class="lz warn">${p.kind === "start" ? "新しい依頼" : "追加の指示"}</span><div class="body"><span class="pending-prompt">${esc(p.prompt)}</span><span class="cap" data-pending-meta>${esc(meta)}</span><input class="sm" data-act="reason" placeholder="拒否する理由（任意）" aria-label="拒否する理由（任意）"></div><span class="decide"><button class="sm" data-act="decide" data-yes="1">許可</button><button class="danger sm" data-act="decide" data-yes="0">拒否</button></span></div>` : "");
       view.pendingKey = key;
     } else if (p) {
-      el.pending.querySelector('[data-pending-meta]').textContent = [p.host_name, ago(p.created)].filter(Boolean).join("・");
+      el.pending.querySelector('[data-pending-meta]').innerHTML = esc(pendingMeta(p));
     }
     view.pending = p;
     el.pending.hidden = !p;
@@ -120,7 +125,7 @@ export function renderLend(root) {
   function drawTasks(result) {
     const options = [["", "すべての依頼主"], ...view.connections.map((c) => [c.id, c.host_name])];
     patch(el.filter, `<select class="sm" data-act="filter" aria-label="依頼主">${options.map(([id, text]) => `<option value="${esc(id)}"${S.filter === id ? " selected" : ""}>${esc(text)}</option>`).join("")}</select>`, true);
-    patch(el.items, listHtml(filtered().map((t) => ({ ...t, lender: t.host_name })), S.selected, keyFor));
+    patch(el.items, listHtml(filtered().map((t) => ({ ...t, lender: t.host_name })), S.selected, keyFor, "lend"));
     // The lender's task projection carries model choices in events rather than top-level fields.
     const models = (result?.events || []).filter((e) => e.kind === "model" && e.data && typeof e.data === "object");
     const latest = models.at(-1)?.data;
@@ -128,10 +133,10 @@ export function renderLend(root) {
     const detail = result ? { ...result, lender: result.host_name,
       actual_model: latest?.model || result.actual_model, actual_effort: latest?.effort || result.actual_effort,
       rerouted: result.rerouted || (rerouted ? { from: rerouted.rerouted_from, reason: rerouted.reason } : null) } : null;
-    patch(el.head, detail ? headHtml(detail, true) : "");
+    patch(el.head, detail ? headHtml(detail, true, "lend") : "");
     const fresh = view.logFor !== S.selected;
     const atEnd = el.log.scrollHeight - el.log.scrollTop - el.log.clientHeight < 24;
-    patch(el.log, result ? timelineHtml(result, result.events, result.progress) : "");
+    patch(el.log, result ? timelineHtml(result, result.events, result.progress, "lend") : "");
     if (fresh || atEnd) el.log.scrollTop = el.log.scrollHeight;
     view.logFor = S.selected;
   }

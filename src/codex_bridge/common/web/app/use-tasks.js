@@ -13,13 +13,13 @@ const ENDINGS = {
   rejected_by_lender: ["circle-x", "相手が断りました"],
 };
 
-export function listHtml(tasks, selected, keyFor = (t) => t.task_id) {
+export function listHtml(tasks, selected, keyFor = (t) => t.task_id, side = "use") {
   const now = Date.now() / 1000;
   return tasks.map((t) => {
     const when = ACTIVE.includes(t.state) ? `<span>${esc(elapsed(now - t.created))}</span>` : `<span>${esc(fmtDay(t.created))}</span>`;
     const who = t.lender ? `<span>${esc(t.lender)}</span>` : "";
     return `<li data-id="${esc(keyFor(t))}" aria-selected="${selected === keyFor(t)}"><span class="t-title">${esc(taskTitle(t))}</span>` +
-      `<span class="t-meta">${stateLozenge(t.state)}${who}${when}</span></li>`;
+      `<span class="t-meta">${stateLozenge(t.state, side)}${who}${when}</span></li>`;
   }).join("");
 }
 
@@ -27,7 +27,7 @@ export function newHeadHtml() {
   return '<div class="d-title"><h2>新しい依頼</h2></div>';
 }
 
-export function headHtml(r, readonly = false) {
+export function headHtml(r, readonly = false, side = "use") {
   const now = Date.now() / 1000;
   const active = ACTIVE.includes(r.state);
   const model = r.actual_model || r.model;
@@ -42,7 +42,7 @@ export function headHtml(r, readonly = false) {
   const body = String(r.prompt || "").split(/\r?\n/).slice(1).join("\n");
   return `<div class="d-title"><h2>${esc(taskTitle(r))}</h2>` +
     `${active && !readonly ? `<button class="danger sm" data-act="cancel" data-id="${esc(r.task_id)}">中止</button>` : ""}</div>` +
-    `<div class="d-meta">${stateLozenge(r.state)}${r.lender ? `<b>${esc(r.lender)}</b>` : ""}${used ? `<span>${esc(used)}</span>` : ""}${switched}` +
+    `<div class="d-meta">${stateLozenge(r.state, side)}${r.lender ? `<b>${esc(r.lender)}</b>` : ""}${used ? `<span>${esc(used)}</span>` : ""}${switched}` +
     `<span>${esc(elapsed(span))}</span></div>${body ? `<p class="d-body">${esc(body)}</p>` : ""}`;
 }
 
@@ -79,12 +79,14 @@ function filePaths(args) {
   return [...new Set(paths)];
 }
 
-function eventItem(ev, r) {
+function eventItem(ev, r, side) {
   const d = ev.data;
   const text = typeof d === "string" ? d : d && typeof d.text === "string" ? d.text : "";
   switch (ev.kind) {
     case "started":
-      return item("ev", "play", `${r.lender ? `${esc(r.lender)} が` : ""}受け付けました`, ev.ts);
+      return item("ev", "play", `${side !== "lend" && r.lender ? `${esc(r.lender)} が` : ""}受け付けました`, ev.ts);
+    case "lender_approved":
+      return side === "lend" ? item("ev", "shield-check", "あなたが許可しました", ev.ts) : "";
     case "agent_message":
       return text ? item("msg", "message-square-text", esc(text), ev.ts) : "";
     case "tool_finished": {
@@ -114,11 +116,11 @@ function eventItem(ev, r) {
   }
 }
 
-export function timelineHtml(r, events, progress) {
-  const items = (events || []).map((ev) => eventItem(ev, r)).filter(Boolean);
+export function timelineHtml(r, events, progress, side = "use") {
+  const items = (events || []).map((ev) => eventItem(ev, r, side)).filter(Boolean);
   if (progress && ACTIVE.includes(r.state)) items.push(item("msg", "message-square-text", esc(progress.slice(-600)), 0));
-  if (r.state === "awaiting_lender") items.push(item("ev", "clock", "相手の許可を待っています", 0));
-  const ending = ENDINGS[r.state];
+  if (r.state === "awaiting_lender") items.push(item("ev", "clock", side === "lend" ? "あなたの許可を待っています" : "相手の許可を待っています", 0));
+  const ending = side === "lend" && r.state === "rejected_by_lender" ? ["circle-x", "あなたが断りました"] : ENDINGS[r.state];
   if (r.report && ending) {
     const last = [...(events || [])].reverse().find((e) => e.kind === "agent_message");
     const lastText = last && last.data && last.data.text;
