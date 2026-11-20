@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
 import hashlib
 import json
 import os
@@ -65,7 +67,8 @@ def parse_release(raw: object, current: str = __version__) -> Release | None:
     if not isinstance(raw, dict) or raw.get("draft") or raw.get("prerelease"):
         return None
     tag = raw.get("tag_name")
-    if not isinstance(tag, str) or not tag.startswith("v") or not version_parts(tag) or version_parts(tag) <= version_parts(current):
+    installed = version_parts(current)
+    if not installed or not isinstance(tag, str) or not tag.startswith("v") or version_parts(tag) <= installed:
         return None
     version = tag[1:]
     name = f"codex-bridge-{tag}.zip"
@@ -152,18 +155,81 @@ def prepare_release(release: Release, data_dir: Path) -> Path:
         raise
 
 
-def mode(path: Path) -> str:
+def _settings(path: Path) -> dict:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return "confirm"
-    return "auto" if value == "auto" else "confirm"
+        return {}
+    return value if isinstance(value, dict) else {"mode": value}
+
+
+def _save_setting(path: Path, key: str, value: str | None) -> None:
+    settings = _settings(path)
+    settings[key] = value
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(settings), encoding="utf-8")
+    tmp.replace(path)
+
+
+def mode(path: Path) -> str:
+    return "auto" if _settings(path).get("mode") == "auto" else "confirm"
 
 
 def save_mode(path: Path, value: str) -> None:
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(value), encoding="utf-8")
-    tmp.replace(path)
+    _save_setting(path, "mode", value)
+
+
+def cancelled_version(path: Path) -> str | None:
+    value = _settings(path).get("cancelled_version")
+    return value if isinstance(value, str) else None
+
+
+def save_cancelled_version(path: Path, value: str | None) -> None:
+    _save_setting(path, "cancelled_version", value)
+
+
+def _check_exe_rename(exe: Path) -> None:
+    if os.name != "nt":
+        return
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                  wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    # Request the access needed for a rename without changing the live executable.
+    handle = kernel.CreateFileW(str(exe), 0x10000, 7, None, 3, 0, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    kernel.CloseHandle(handle)
+
+
+def check_install_folder(exe: Path) -> None:
+    if exe.name.lower() != EXE:
+        raise UpdateError(f"{EXE} の名前で起動してから更新してください")
+    try:
+        with tempfile.TemporaryDirectory(prefix=".codex-bridge-probe-", dir=exe.parent) as directory:
+            probe = Path(directory) / "write"
+            probe.write_bytes(b"")
+            probe.replace(probe.with_name("rename"))
+            _check_exe_rename(exe)
+    except OSError as e:
+        raise UpdateError(f"exe のフォルダに書き込めないため、アップデートできません: {exe.parent}") from e
+
+
+def _alternate_old_path(old: Path) -> Path:
+    return old.with_name(f"{old.name}-{time.time_ns()}")
+
+
+def _free_old_exe(old: Path, *, preserve: bool = False) -> None:
+    if not preserve:
+        try:
+            old.unlink(missing_ok=True)
+            return
+        except OSError:
+            pass
+    if old.exists() or old.is_symlink():
+        old.rename(_alternate_old_path(old))
 
 
 def acknowledge_restart(exe: Path, stage_name: str) -> bool:
@@ -180,7 +246,7 @@ def acknowledge_restart(exe: Path, stage_name: str) -> bool:
 
 
 def _launch(exe: Path, stage: Path) -> None:
-    child = subprocess.Popen([str(exe), RESTART_ARG, stage.name], cwd=exe.parent,
+    child = subprocess.Popen([str(exe), RESTART_ARG, stage.name, str(os.getpid())], cwd=exe.parent,
                              env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     deadline = time.monotonic() + 45
@@ -195,17 +261,21 @@ def _launch(exe: Path, stage: Path) -> None:
     raise UpdateError("新しい exe が起動直後に終了しました")
 
 
-def install_release(exe: Path, package: Path, launch=None) -> None:
+def install_release(exe: Path, package: Path, launch=None, *, before_launch=None) -> None:
     """Stage replacements on the install volume and undo any moves on failure."""
     if exe.name.lower() != EXE:
         raise UpdateError(f"{EXE} の名前で起動してから更新してください")
     base = exe.parent
     old_exe = exe.with_suffix(".exe.old")
-    if old_exe.exists() or old_exe.is_symlink():
-        raise UpdateError("前のアップデートの古い exe が残っています")
+    preserve_old = any(base.glob(INSTALL_STAGE + "*"))
     staging = Path(tempfile.mkdtemp(prefix=INSTALL_STAGE, dir=base))
     keep_backups = False
     try:
+        try:
+            _free_old_exe(old_exe, preserve=preserve_old)
+        except OSError:
+            # A file locked against both operations does not need to be reused as this rollback target.
+            old_exe = _alternate_old_path(old_exe)
         files = []
         for name in PACKAGE_FILES:
             source = package / name
@@ -235,6 +305,8 @@ def install_release(exe: Path, package: Path, launch=None) -> None:
                     changes[dest] = backup
                 prepared.replace(dest)
                 changes.setdefault(dest, None)
+            if before_launch is not None:
+                before_launch()
             if launch is None:
                 _launch(exe, staging)
             else:
@@ -266,8 +338,7 @@ def install_release(exe: Path, package: Path, launch=None) -> None:
 
 def clean_up(exe: Path, data_dir: Path) -> None:
     try:
-        if not any(exe.parent.glob(INSTALL_STAGE + "*")):
-            exe.with_suffix(".exe.old").unlink(missing_ok=True)
+        _free_old_exe(exe.with_suffix(".exe.old"), preserve=any(exe.parent.glob(INSTALL_STAGE + "*")))
     except OSError:
         pass  # The onefile bootloader may still be exiting.
     root = data_dir / "updates"

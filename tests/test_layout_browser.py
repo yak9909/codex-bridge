@@ -78,7 +78,7 @@ class Page:
                 await self.js("window.scrollTo(0, 0)")
             await asyncio.sleep(delay)
             result = await self.call("Page.captureScreenshot", format="png", captureBeyondViewport=False)
-            prefix = "update" if update else "stress"
+            prefix = "update-fix1" if update else "stress"
             (path / f"{prefix}-{side}-{self.width}px-2x.png").write_bytes(base64.b64decode(result["data"]))
 
 
@@ -298,16 +298,25 @@ async def test_extreme_layout(stress_server, chrome, width, height):
         await page.click('.topbar [data-tab=log]')
         await page.wait("document.querySelectorAll('.log-view .ln').length >= 300")
         await check("ログ")
-        for phase, label in [("available", "新しい版があります"), ("waiting", "切り替え待ち"), ("failed", "アップデートに失敗しました")]:
+        for phase, label in [("available", "新しい版があります"), ("waiting", "切り替え待ち"), ("cancelled", "更新をやめました"), ("failed", "アップデートに失敗しました")]:
             await page.js(f"fetch('/_layout/update/{phase}', {{method: 'POST', headers: {{'X-Codex-Bridge': '1'}}}})")
             await page.wait(f"document.querySelector('#update-phase')?.textContent === {json.dumps(label)}")
             assert await page.js("document.querySelector('#update-version').textContent.includes('v0.3.12')")
-            assert await page.js("document.querySelector('#update-install').disabled") is (phase == "waiting")
+            assert await page.js("document.querySelector('#update-install').disabled") is (phase in ("waiting", "cancelled"))
+            assert await page.js("document.querySelector('#update-cancel').hidden") is (phase != "waiting")
+            if phase == "waiting":
+                assert await page.js("""(() => {
+                  const install = document.querySelector('#update-install');
+                  const cancel = document.querySelector('#update-cancel');
+                  return !cancel.disabled && getComputedStyle(install).backgroundColor ===
+                    getComputedStyle(document.body).backgroundColor &&
+                    getComputedStyle(install).backgroundColor !== getComputedStyle(cancel).backgroundColor;
+                })()""")
             assert await page.js("document.querySelector('#update-check').disabled") is (phase == "waiting")
             assert await page.js("""(() => {
               const panel = document.querySelector('.update-panel');
               const bounds = panel.getBoundingClientRect();
-              return [...panel.querySelectorAll('select, button, .update-message:not([hidden])')].every(e => {
+              return [...panel.querySelectorAll('select, button:not([hidden]), .update-message:not([hidden])')].every(e => {
                 const box = e.getBoundingClientRect();
                 return box.left >= bounds.left && box.right <= bounds.right && box.bottom <= bounds.bottom;
               });

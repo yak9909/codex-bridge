@@ -188,3 +188,90 @@ def test_restart_requires_child_acknowledgement(monkeypatch, tmp_path, ready):
             updater.install_release(exe, package)
         assert exe.read_bytes() == b"old exe"
     assert not list(tmp_path.glob(updater.INSTALL_STAGE + "*"))
+
+
+def test_unreadable_installed_version_disables_update():
+    assert updater.parse_release({"tag_name": "v9.0.0"}, "0.3.1.dev0") is None
+
+
+@pytest.mark.parametrize("at_startup", [True, False])
+def test_locked_old_exe_is_renamed(monkeypatch, tmp_path, at_startup):
+    exe = tmp_path / updater.EXE
+    exe.write_bytes(b"current")
+    old = exe.with_suffix(".exe.old")
+    old.write_bytes(b"previous")
+    original_unlink = Path.unlink
+
+    def unlink(path, *args, **kwargs):
+        if path == old:
+            raise PermissionError("mapped by old bootloader")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    if at_startup:
+        updater.clean_up(exe, tmp_path / "data")
+        assert not old.exists()
+    else:
+        package = updater.prepare_release(fake_download(monkeypatch), tmp_path / "data")
+        updater.install_release(exe, package, launch=lambda path: None)
+        assert old.read_bytes() == b"current"
+        assert exe.read_bytes() == b"new codex-bridge.exe"
+    assert [file.read_bytes() for file in tmp_path.glob("codex-bridge.exe.old-*")] == [b"previous"]
+
+
+def test_restart_timeout_restores_install_and_retains_backups_until_failure(monkeypatch, tmp_path):
+    exe = tmp_path / updater.EXE
+    exe.write_bytes(b"current")
+    package = updater.prepare_release(fake_download(monkeypatch), tmp_path / "data")
+    update_clock = iter([0, 46])
+    monkeypatch.setattr(updater, "time", SimpleNamespace(monotonic=lambda: next(update_clock)))
+    calls = []
+
+    def spawn(argv, **kwargs):
+        stage = tmp_path / argv[2]
+        assert stage.is_dir()
+        assert exe.with_suffix(".exe.old").read_bytes() == b"current"
+        return SimpleNamespace(poll=lambda: None, terminate=lambda: calls.append("terminate"),
+                               wait=lambda timeout: calls.append("wait"))
+
+    monkeypatch.setattr(updater.subprocess, "Popen", spawn)
+    with pytest.raises(updater.UpdateError, match="起動を確認できません"):
+        updater.install_release(exe, package)
+    assert calls == ["terminate", "wait"]
+    assert exe.read_bytes() == b"current"
+    assert not list(tmp_path.glob(updater.INSTALL_STAGE + "*"))
+
+
+def test_install_preflight_checks_rename_without_moving_exe(tmp_path, monkeypatch):
+    exe = tmp_path / updater.EXE
+    exe.write_bytes(b"current")
+    updater.check_install_folder(exe)
+
+    def deny(path):
+        assert path == exe
+        raise PermissionError("rename denied")
+
+    monkeypatch.setattr(updater, "_check_exe_rename", deny)
+    with pytest.raises(updater.UpdateError, match="exe のフォルダに書き込めない"):
+        updater.check_install_folder(exe)
+    assert list(tmp_path.iterdir()) == [exe]
+    assert exe.read_bytes() == b"current"
+
+
+def test_install_can_use_unique_backup_if_previous_exe_cannot_be_renamed(tmp_path, monkeypatch):
+    exe = tmp_path / updater.EXE
+    exe.write_bytes(b"current")
+    old = exe.with_suffix(".exe.old")
+    old.write_bytes(b"previous")
+    package = updater.prepare_release(fake_download(monkeypatch), tmp_path / "data")
+
+    def locked(path, *, preserve):
+        assert path == old
+        raise PermissionError("previous exe is locked")
+
+    monkeypatch.setattr(updater, "_free_old_exe", locked)
+    updater.install_release(exe, package, launch=lambda path: None)
+    assert exe.read_bytes() == b"new codex-bridge.exe"
+    assert old.read_bytes() == b"previous"
+    assert [file.read_bytes() for file in tmp_path.glob("codex-bridge.exe.old-*")] == [b"current"]
+

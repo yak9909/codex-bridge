@@ -244,7 +244,7 @@ assert.ok(one.includes("&lt;one&gt;") && two.includes("&lt;two&gt;"));
 
 def test_update_controls_use_external_handlers_and_escape_status():
     text = (APP / "log.js").read_text(encoding="utf-8")
-    for control in ("update-mode", "update-check", "update-install"):
+    for control in ("update-mode", "update-check", "update-install", "update-cancel"):
         assert f'id="{control}"' in text
     assert "message.innerHTML = esc(detail)" in text
     assert re.search(r"""\son[a-z]+\s*=""", text) is None

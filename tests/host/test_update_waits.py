@@ -1,5 +1,8 @@
 """Local and remote update waits use the usual task records and final notifications."""
 
+import asyncio
+import time
+
 import pytest
 
 from codex_bridge.agent.runner import AgentRunner, TaskSlot
@@ -55,7 +58,7 @@ async def test_named_request_stays_with_lender_through_restart(manager):
     alice = Link(manager, "alice")
     await manager.resume_update_waits()
     assert not alice.starts
-    await alice.push("hello", protocol=5, current_task_id=None, agent_version="0.3.2", capabilities={"max_parallel": 3})
+    await alice.push("hello", protocol=5, current_task_id=None, agent_version="0.3.1", capabilities={"max_parallel": 3})
     await manager.resume_update_waits()
     assert [m["task_id"] for m in alice.starts] == [pending, reconnecting]
 
@@ -83,12 +86,7 @@ async def test_lender_refuses_a_task_sent_during_announcement(manager, tmp_path)
     slot.update_waiting = False
     await runner.send_busy_status()
     await manager.resume_update_waits()
-    assert len(alice.starts) == 1  # The old version is still connected.
-    alice.detach()
-    alice = Link(manager, "alice")
-    await alice.push("hello", protocol=5, agent_version="0.3.2")
-    await manager.resume_update_waits()
-    assert [m["task_id"] for m in alice.starts] == [task]
+    assert [m["task_id"] for m in alice.starts] == [task, task]
     assert not bob.starts
 
 
@@ -168,3 +166,84 @@ async def test_update_wait_timeout_notifies_failure(manager, monkeypatch, local,
     assert not alice.starts and not bob.starts
     notice = await notifier.wait(task_id=task, timeout=1)
     assert notice["notices"][0]["state"] == "failed"
+
+
+async def test_offline_drain_grace_is_preserved_across_restart(manager, tmp_path):
+    alice = Link(manager, "alice")
+    await alice.push("hello", protocol=5)
+    task = await manager.start("work", lender="alice")
+    alice.detach()
+    detached = manager.tasks[task].offline_since
+    assert detached is not None and manager.blocks_update()
+    old = time.time() - tasks.UPDATE_WAIT - 1
+    manager.tasks[task].offline_since = old
+    manager._save(manager.tasks[task])
+    restarted = tasks.TaskManager(tmp_path, lambda task_id: [])
+    assert restarted.tasks[task].offline_since == old
+    assert restarted.active_task_ids() == [task]
+    assert not restarted.blocks_update()
+    alice = Link(restarted, "alice")
+    await alice.push("hello", protocol=5, active_task_ids=[task])
+    assert restarted.blocks_update()
+    assert restarted.tasks[task].offline_since is None
+
+
+async def test_legacy_offline_record_uses_stored_record_age(manager, tmp_path):
+    alice = Link(manager, "alice")
+    await alice.push("hello")
+    task = await manager.start("work", lender="alice")
+    alice.detach()
+    record = manager.tasks[task]
+    record.offline_since = None
+    manager._save(record)
+    import os
+    old = time.time() - tasks.UPDATE_WAIT - 1
+    os.utime(manager.dir / f"{task}.json", (old, old))
+    restarted = tasks.TaskManager(tmp_path, lambda task_id: [])
+    assert not restarted.blocks_update()
+
+
+async def test_invalid_waiting_target_is_rejected_before_spooling(manager):
+    manager.invited_names = lambda: {"alice"}
+    manager.update_waiting = lambda: True
+    with pytest.raises(ToolError, match="見つかりません"):
+        await manager.start("unknown", lender="typo")
+    alice = Link(manager, "alice")
+    await alice.push("hello", protocol=5, capabilities={"model_select": True},
+                     models=[{"model": "allowed", "efforts": ["high"]}])
+    with pytest.raises(ToolError, match="指定のモデルと推論の強さ"):
+        await manager.start("unsupported model", lender="alice", model="unavailable")
+    assert not manager.tasks
+
+
+async def test_last_routing_error_survives_restart_and_reports_on_expiry(manager, tmp_path):
+    alice = Link(manager, "alice")
+    await alice.push("hello")
+    manager.update_waiting = lambda: True
+    task = await manager.start("for alice", lender="alice")
+    restarted = tasks.TaskManager(tmp_path, lambda task_id: [])
+    await restarted.resume_update_waits()
+    saved = tasks.TaskManager(tmp_path, lambda task_id: [])
+    saved.tasks[task].local_update_deadline = time.time() - 1
+    await saved.resume_update_waits()
+    assert saved.result(task)["report"] == tasks.NOT_CONNECTED
+
+
+async def test_update_wait_pump_logs_unexpected_exception_and_keeps_running(manager, monkeypatch):
+    logs = []
+    resumed = asyncio.Event()
+
+    async def resume():
+        if not logs:
+            raise ValueError("unexpected wait error")
+        resumed.set()
+
+    manager.log = lambda level, line: logs.append((level, line))
+    monkeypatch.setattr(manager, "resume_update_waits", resume)
+    pump = asyncio.create_task(manager.run_update_waits())
+    try:
+        await asyncio.wait_for(resumed.wait(), 3)
+    finally:
+        pump.cancel()
+        await asyncio.gather(pump, return_exceptions=True)
+    assert logs[0][0] == "error" and "unexpected wait error" in logs[0][1]

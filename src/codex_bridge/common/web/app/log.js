@@ -8,6 +8,7 @@ const PHASES = {
   available: "新しい版があります",
   preparing: "用意しています",
   waiting: "切り替え待ち",
+  cancelled: "更新をやめました",
   failed: "アップデートに失敗しました",
 };
 
@@ -41,6 +42,7 @@ export function renderLog(root) {
           </select>
           <button class="secondary sm" id="update-check">確かめる</button>
           <button class="sm" id="update-install">更新する</button>
+          <button class="secondary sm" id="update-cancel" hidden>更新をやめる</button>
         </div>
         <p class="cap update-message" role="status" hidden></p>
       </section>
@@ -59,6 +61,7 @@ export function renderLog(root) {
   const mode = panel.querySelector("#update-mode");
   const check = panel.querySelector("#update-check");
   const install = panel.querySelector("#update-install");
+  const cancel = panel.querySelector("#update-cancel");
   const version = panel.querySelector("#update-version");
   const phase = panel.querySelector("#update-phase");
   const message = panel.querySelector(".update-message");
@@ -87,7 +90,9 @@ export function renderLog(root) {
     savedMode = update.mode;
     mode.value = savedMode;
     check.disabled = ["checking", "preparing", "waiting"].includes(update.phase);
-    install.disabled = !update.can_install || !update.latest || !["available", "failed"].includes(update.phase);
+    install.disabled = !update.can_install || update.suppressed || !update.latest || !["available", "failed"].includes(update.phase);
+    cancel.hidden = update.phase !== "waiting";
+    cancel.disabled = !update.can_cancel;
   }
 
   async function refreshUpdate() {
@@ -119,6 +124,7 @@ export function renderLog(root) {
   mode.addEventListener("change", () => changeUpdate("mode", { mode: mode.value }));
   check.addEventListener("click", () => changeUpdate("check"));
   install.addEventListener("click", () => changeUpdate("install"));
+  cancel.addEventListener("click", () => changeUpdate("cancel"));
 
   const choice = (name) => root.querySelector(`input[name="${name}"]:checked`).value;
 
