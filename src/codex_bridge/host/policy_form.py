@@ -191,18 +191,20 @@ def folder_removal_form(store: PolicyStore, path: str) -> tuple[dict, bool]:
     """Return the updated form and whether removal takes the current main out of the share."""
     target = _abs(path)
     form = _form(store)
-    before = len(form["folders"])
-    form["folders"] = [f for f in form["folders"] if _key(f["path"]) != _key(target)]
-    if len(form["folders"]) == before:
+    remaining = [f for f in form["folders"] if _key(f["path"]) != _key(target)]
+    if len(remaining) == len(form["folders"]):
         raise ValueError(f"登録されていないフォルダです: {target}")
+    form["folders"] = remaining
     loses_main = False
     if form["main"]:
-        policy = parse_policy(form)
-        level = policy.level_for_abs(policy.main)
-        if level is None:
-            # A main registered via a junction or mapped drive can still match its original spelling.
-            level = policy.level_for_abs(Path(form["main"]))
-        loses_main = level not in ("read", "write")
+        before = store.current()
+        after = parse_policy(form)
+        readable = ("read", "write")
+        # A surviving alias cannot replace access through the resolved main path.
+        loses_main = any(
+            before.level_for_abs(main) in readable and after.level_for_abs(main) not in readable
+            for main in (before.main, Path(form["main"])) if main is not None
+        )
         if loses_main:
             form["main"] = next((f["path"] for f in form["folders"] if f["level"] in ("read", "write")), None)
     return form, loses_main

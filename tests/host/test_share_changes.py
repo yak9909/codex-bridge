@@ -114,6 +114,38 @@ def test_removing_parent_of_main_requires_idle_and_promotes_next_folder(host, ru
 
 
 
+
+@pytest.mark.parametrize("state", ["running", "completed"])
+def test_removing_real_parent_of_main_registered_via_junction(host, running_task, tmp_path, state):
+    next_main = host.paths.root
+    outer = tmp_path / "outer"
+    project = outer / "project"
+    project.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(outer)],
+                   check=True, capture_output=True)
+    running_task.state = "completed"
+    add_shared_folder(host, outer.as_posix(), "write")
+    add_shared_folder(host, alias.as_posix(), "write")
+    set_main_shared_folder(host, (alias / "project").as_posix())
+    assert host.paths.resolve(".", "write") == project.resolve()
+    folders = host.paths.roots()
+
+    running_task.state = state
+    if state == "running":
+        with pytest.raises(ShareBusy, match="メインのフォルダが共有から外れるため"):
+            remove_shared_folder(host, outer.as_posix())
+        assert host.paths.resolve(".", "write") == project.resolve()
+        assert host.paths.roots() == folders
+    else:
+        remove_shared_folder(host, outer.as_posix())
+        assert host.paths.root == host.config.share_root == next_main
+        assert host.paths.resolve(".", "read") == next_main
+        registered = {row["path"] for row in host.paths.roots()}
+        assert outer.as_posix() not in registered
+        assert alias.as_posix() in registered
+
+
 @pytest.mark.parametrize("state", ["running", "completed"])
 @pytest.mark.parametrize("removed", ["parent", "junction"])
 def test_removal_keeps_main_that_is_still_shared(host, running_task, tmp_path, state, removed):
