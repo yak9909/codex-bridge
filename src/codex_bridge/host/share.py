@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import yaml
 
-from .policy_form import _abs, _form, add_folder, main_is_within_folder, remove_folder, set_main_folder
+from .policy_form import _abs, add_folder, folder_removal_form, remove_folder, save_form, set_main_folder
 
 UNWRITABLE_WARNING = "このフォルダは、今のユーザーの権限では書き込めません。Codex が書こうとしても Windows に断られます。"
 
@@ -70,10 +70,11 @@ def add_shared_folder(host, path: str, level: str = "read") -> Path:
 def remove_shared_folder(host, path: str) -> Path:
     p = _guard(host, path, removing=True)
     before = host.paths.root
-    if host.mgr.active_task_ids() and main_is_within_folder(_form(host.policy)["main"], p):
-        raise ShareBusy("作業中はメインのフォルダを外せません。終わってから外してください")
+    form, loses_main = folder_removal_form(host.policy, p.as_posix())
+    if loses_main and host.mgr.active_task_ids():
+        raise ShareBusy("作業中はメインのフォルダを外せません（メインのフォルダが共有から外れるため）。終わってから外してください")
     host.share_warning = None
-    remove_folder(host.policy, p.as_posix())
+    save_form(host.policy, form)
     after = host.paths.root
     if after != before:  # the main folder moved on (or is gone): host.yaml must say the same
         _follow_main(host, after)

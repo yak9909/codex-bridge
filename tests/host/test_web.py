@@ -631,7 +631,7 @@ async def test_main_removal_during_task_reports_busy(admin, host, tmp_path, via)
 
     async with running(host.claude_ep):
         response = await remove(original)
-        message = "作業中はメインのフォルダを外せません。終わってから外してください"
+        message = "作業中はメインのフォルダを外せません（メインのフォルダが共有から外れるため）。終わってから外してください"
         if via == "api":
             assert response.status_code == 409
             assert response.json()["detail"] == message

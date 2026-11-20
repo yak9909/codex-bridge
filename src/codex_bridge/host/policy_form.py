@@ -187,22 +187,29 @@ def add_folder(store: PolicyStore, path: str, level: str) -> dict:
     return set_folder_level(store, target, level)
 
 
-def main_is_within_folder(main: str | None, folder: Path) -> bool:
-    if not main:
-        return False
-    registered = Path(_key(main))
-    return registered.is_relative_to(Path(_key(str(folder)))) or Path(main).resolve().is_relative_to(folder.resolve())
-
-
-def remove_folder(store: PolicyStore, path: str) -> dict:
+def folder_removal_form(store: PolicyStore, path: str) -> tuple[dict, bool]:
+    """Return the updated form and whether removal takes the current main out of the share."""
     target = _abs(path)
     form = _form(store)
     before = len(form["folders"])
     form["folders"] = [f for f in form["folders"] if _key(f["path"]) != _key(target)]
     if len(form["folders"]) == before:
         raise ValueError(f"登録されていないフォルダです: {target}")
-    if main_is_within_folder(form["main"], Path(target)):
-        form["main"] = next((f["path"] for f in form["folders"] if f["level"] in ("read", "write")), None)
+    loses_main = False
+    if form["main"]:
+        policy = parse_policy(form)
+        level = policy.level_for_abs(policy.main)
+        if level is None:
+            # A main registered via a junction or mapped drive can still match its original spelling.
+            level = policy.level_for_abs(Path(form["main"]))
+        loses_main = level not in ("read", "write")
+        if loses_main:
+            form["main"] = next((f["path"] for f in form["folders"] if f["level"] in ("read", "write")), None)
+    return form, loses_main
+
+
+def remove_folder(store: PolicyStore, path: str) -> dict:
+    form, _ = folder_removal_form(store, path)
     save_form(store, form)
     return form
 
