@@ -1,6 +1,16 @@
 // The log tab: side and level filters, search, follow-the-newest, export and open-folder.
 import { get, send, showError, clearError, esc } from "/app/static/api.js";
 
+const PHASES = {
+  idle: "まだ確かめていません",
+  checking: "調べています",
+  current: "新しい版はありません",
+  available: "新しい版があります",
+  preparing: "用意しています",
+  waiting: "切り替え待ち",
+  failed: "アップデートに失敗しました",
+};
+
 const SIDES = { use: "使う", lend: "貸す" };
 const LEVELS = { info: ["情報", ""], warn: ["警告", " warn"], error: ["失敗", " err"] };
 const two = (n) => String(n).padStart(2, "0");
@@ -18,6 +28,22 @@ function line(e) {
 export function renderLog(root) {
   root.innerHTML = `
     <div class="pane">
+      <section class="update-panel" aria-labelledby="update-title" hidden>
+        <div class="update-summary">
+          <strong id="update-title">アップデート</strong>
+          <span class="cap" id="update-version"></span>
+          <span class="lz idle" id="update-phase" role="status"></span>
+        </div>
+        <div class="update-controls">
+          <select id="update-mode" aria-label="アップデートの設定">
+            <option value="confirm">毎回確認する</option>
+            <option value="auto">自動で更新する</option>
+          </select>
+          <button class="secondary sm" id="update-check">確かめる</button>
+          <button class="sm" id="update-install">更新する</button>
+        </div>
+        <p class="cap update-message" role="status" hidden></p>
+      </section>
       <div class="log-tools">
         <span class="seg"><label><input type="radio" name="src" value="" checked>すべて</label><label><input type="radio" name="src" value="use">使う側</label><label><input type="radio" name="src" value="lend">貸す側</label></span>
         <span class="seg"><label><input type="radio" name="lv" value="" checked>すべて</label><label><input type="radio" name="lv" value="warn">警告以上</label></span>
@@ -29,12 +55,70 @@ export function renderLog(root) {
       </div>
       <div class="log-view" role="log"></div>
     </div>`;
+  const panel = root.querySelector(".update-panel");
+  const mode = panel.querySelector("#update-mode");
+  const check = panel.querySelector("#update-check");
+  const install = panel.querySelector("#update-install");
+  const version = panel.querySelector("#update-version");
+  const phase = panel.querySelector("#update-phase");
+  const message = panel.querySelector(".update-message");
   const view = root.querySelector(".log-view");
   const follow = root.querySelector("#log-follow");
   const q = root.querySelector("#log-q");
   let shown = null;
   let busy = false;
   let alive = true;
+
+  let updateRequest = 0;
+  let changingUpdate = false;
+  let savedMode = "confirm";
+
+  function showUpdate(update) {
+    if (!alive || !update) return;
+    panel.hidden = false;
+    const label = PHASES[update.phase] || PHASES.idle;
+    const tone = update.phase === "failed" ? "bad" : update.phase === "waiting" ? "warn" : "idle";
+    version.innerHTML = esc(`この PC v${update.version}${update.latest ? `・新しい版 v${update.latest}` : ""}`);
+    if (phase.textContent !== label) phase.innerHTML = esc(label);
+    phase.className = `lz ${tone}`;
+    const detail = update.message || (update.latest && !update.can_install ? "exe 版で更新できます" : "");
+    if (message.textContent !== detail) message.innerHTML = esc(detail);
+    message.hidden = !detail;
+    savedMode = update.mode;
+    mode.value = savedMode;
+    check.disabled = ["checking", "preparing", "waiting"].includes(update.phase);
+    install.disabled = !update.can_install || !update.latest || !["available", "failed"].includes(update.phase);
+  }
+
+  async function refreshUpdate() {
+    if (changingUpdate) return;
+    const request = ++updateRequest;
+    try {
+      const state = await get("/app/api/state");
+      if (request === updateRequest) showUpdate(state.update);
+    } catch {
+      // The app may be restarting. Keep the last displayed state until it reconnects.
+    }
+  }
+
+  async function changeUpdate(action, body) {
+    if (changingUpdate) return;
+    changingUpdate = true;
+    ++updateRequest;
+    try {
+      showUpdate(await send("POST", `/app/api/update/${action}`, body));
+      clearError("update");
+    } catch (e) {
+      mode.value = savedMode;
+      if (alive) showError(e.message, "update");
+    } finally {
+      changingUpdate = false;
+    }
+  }
+
+  mode.addEventListener("change", () => changeUpdate("mode", { mode: mode.value }));
+  check.addEventListener("click", () => changeUpdate("check"));
+  install.addEventListener("click", () => changeUpdate("install"));
 
   const choice = (name) => root.querySelector(`input[name="${name}"]:checked`).value;
 
@@ -89,12 +173,14 @@ export function renderLog(root) {
   });
 
   refresh();
-  const interval = setInterval(refresh, 2000);
+  refreshUpdate();
+  const interval = setInterval(() => { refresh(); refreshUpdate(); }, 2000);
   return () => {
     alive = false;
     clearInterval(interval);
     clearTimeout(timer);
     clearError("log-read");
     clearError("log-folder");
+    clearError("update");
   };
 }

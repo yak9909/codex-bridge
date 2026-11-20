@@ -8,7 +8,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Iterable
 
-from codex_bridge.common.protocol import EFFORT_ORDER
+from ..common.protocol import EFFORT_ORDER
+from ..updater import UPDATE_WAIT
 
 SendFn = Callable[[dict], Awaitable[None]]
 WINDOWS = ("five_hour", "weekly")
@@ -42,6 +43,10 @@ class Lender:
     current_task_id: str | None = None
     last_assigned: float = 0.0
     since: float | None = None  # when the current (or last) connection was made
+    update_since: float | None = None
+
+    def updating(self, now: float) -> bool:
+        return self.update_since is not None and (self.connected or now - self.update_since < UPDATE_WAIT)
 
 
 def number(v) -> float | None:
@@ -228,7 +233,8 @@ def headroom(lender: Lender, thresholds: dict) -> float | None:
 def pick_lender(lenders: Iterable[Lender], thresholds: dict, now: float | None = None) -> Lender | None:
     """Among connected (hello received), available, not blocked lenders: fewest tasks, then most headroom;
     ties go to the least recently used."""
-    free = [l for l in lenders if l.connected and l.ready and not l.busy_elsewhere and len(l.active_task_ids) < l.max_parallel
+    now = time.time() if now is None else now
+    free = [l for l in lenders if l.connected and l.ready and not l.updating(now) and not l.busy_elsewhere and len(l.active_task_ids) < l.max_parallel
             and blocked_until(l, thresholds, now) is None]
 
     def order(l: Lender) -> tuple[int, float, float]:

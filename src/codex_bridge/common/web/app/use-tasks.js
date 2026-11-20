@@ -43,7 +43,7 @@ export function headHtml(r, readonly = false, side = "use") {
   const span = (r.finished || now) - r.created;
   // the title is one line; the whole request is in its own scrolling region (promptHtml), so no length can push the log away
   return `<div class="d-title"><h2 class="ellipsis" title="${esc(taskTitle(r))}">${esc(taskTitle(r))}</h2>` +
-    `${active && !readonly ? `<button class="danger sm" data-act="cancel" data-id="${esc(r.task_id)}">中止</button>` : ""}</div>` +
+    `${(active || r.state === "update_waiting") && !readonly ? `<button class="danger sm" data-act="cancel" data-id="${esc(r.task_id)}">中止</button>` : ""}</div>` +
     `<div class="d-meta">${stateLozenge(r.state, side)}${r.lender ? `<b>${esc(r.lender)}</b>` : ""}${used ? `<span>${esc(used)}</span>` : ""}${switched}` +
     `<span>${esc(elapsed(span))}</span></div>`;
 }
@@ -157,10 +157,11 @@ export function timelineHtml(r, events, progress, side = "use") {
 
 // ---- the pickers of a new request: 相手 / モデル / 推論, from what the chosen lender offers ----
 export function pickerOptions(lenders, pick) {
-  const ready = lenders.filter((l) => l.connected && l.ready);
-  const asked = ready.filter((l) => l.name === pick.lender);
-  const among = asked.length ? asked : ready;
-  const lender = asked.length ? pick.lender : "";
+  const choices = lenders.filter((l) => (l.connected && l.ready) || l.update_waiting || l.name === pick.lender);
+  if (pick.lender && !choices.some((l) => l.name === pick.lender)) choices.push({ name: pick.lender });
+  const lender = pick.lender || "";
+  const among = lender ? choices.filter((l) => l.name === lender)
+    : choices.filter((l) => l.connected && l.ready && !l.update_waiting);
   const models = new Map();
   for (const l of among) for (const m of l.models || []) if (!models.has(m.model)) models.set(m.model, m);
   const model = models.has(pick.model) ? pick.model : "";
@@ -170,7 +171,7 @@ export function pickerOptions(lenders, pick) {
   const effort = efforts.has(pick.effort) ? pick.effort : "";
   const opts = (rows, value) => rows.map(([v, t]) => `<option value="${esc(v)}"${v === value ? " selected" : ""}>${esc(t)}</option>`).join("");
   const html =
-    `<select class="ghost" data-pick="lender" aria-label="頼む相手">${opts([["", "相手: 自動"], ...ready.map((l) => [l.name, `相手: ${l.name}`])], lender)}</select>` +
+    `<select class="ghost" data-pick="lender" aria-label="頼む相手">${opts([["", "相手: 自動"], ...choices.map((l) => [l.name, `相手: ${l.name}`])], lender)}</select>` +
     `<select class="ghost" data-pick="model" aria-label="モデル">${opts([["", "モデル: 既定"], ...[...models.values()].map((m) => [m.model, `モデル: ${m.name || m.model}`])], model)}</select>` +
     `<select class="ghost" data-pick="effort" aria-label="推論の強さ">${opts([["", "推論: 既定"], ...sorted.map((e) => [e, `推論: ${e}`])], effort)}</select>`;
   return { html, pick: { lender, model, effort } };

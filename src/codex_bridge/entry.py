@@ -7,6 +7,7 @@ from ctypes import wintypes
 import os
 from pathlib import Path
 import sys
+import time
 import webbrowser
 
 _agent_handle: int | None = None
@@ -86,9 +87,16 @@ def release_agent_instance() -> None:
         _agent_handle = None
 
 
-def _run_resident() -> int:
+def _run_resident(*, after_update: bool = False) -> int:
     global _agent_handle
     acquired, handle = acquire_agent_instance()
+    if after_update:
+        deadline = time.monotonic() + 120
+        while not acquired and time.monotonic() < deadline:
+            time.sleep(0.25)
+            acquired, handle = acquire_agent_instance()
+        if not acquired:
+            return 1
     if not acquired:
         from .resident import ui_port
         webbrowser.open(f"http://127.0.0.1:{ui_port()}/")
@@ -96,6 +104,17 @@ def _run_resident() -> int:
     _agent_handle = handle
     try:
         from . import resident
+        if after_update:
+            deadline = time.monotonic() + 15
+            while True:
+                try:
+                    probe = resident.bind_socket("127.0.0.1", resident.ui_port())
+                    probe.close()
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.25)
         resident.main()
     finally:
         release_agent_instance()
@@ -122,6 +141,11 @@ def main(argv: list[str] | None = None) -> int:
         return hook_main(argv[1:])
     if not argv or argv == ["agent"]:
         return _run_resident()
+    if len(argv) == 2 and argv[0] == "--after-update" and getattr(sys, "frozen", False):
+        from .updater import acknowledge_restart
+        if not acknowledge_restart(Path(sys.executable).resolve(), argv[1]):
+            return 1
+        return _run_resident(after_update=True)
     if argv[0] == "host":
         return _run_host(argv[1:])
     attach_console()

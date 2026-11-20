@@ -25,6 +25,10 @@ from codex_bridge.host.app import build_host
 from codex_bridge.host.config import load_host_config
 from codex_bridge.host.main import ensure_config
 from codex_bridge.resident import Resident
+from codex_bridge.updater import Release
+
+UPDATE_RELEASE = Release("0.3.12", "", "0" * 64)
+UPDATE_FAILURE = "アップデートを適用できませんでした: " + "D:/installation/" + "long-folder-name-" * 13 + "/<codex-bridge.exe>"
 
 LONG_LINE = "web のテストが落ちているので直してください。" + "parser の空行と末尾の改行の扱いを調べ、回帰テストを追加してください。" * 60
 MANY_LINES = "\n".join(f"{i + 1}. src/module_{i}/file_{i}.ts の型を確かめ、必要なら直してください。" for i in range(200))
@@ -99,6 +103,10 @@ async def _fill_host(host, now: float) -> None:
     for link in links.values():
         await link.push("usage", five_hour={"used_percent": 45, "resets_at": now + 3600},
                         weekly={"used_percent": 92, "resets_at": now + 86400 * 2}, ts=now)
+    await s.push("lender_status", update_waiting=True)
+    await links[LONG_NAME].push("lender_status", update_waiting=True)
+    host.mgr.detach(links[LONG_NAME].link)
+    await host.mgr.start("アップデートが終わるまで待つ依頼", lender=LONG_NAME)
 
 
 def _lender_side(root: Path, now: float):

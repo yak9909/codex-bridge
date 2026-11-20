@@ -55,6 +55,8 @@ class ControlClient:
         fields = self.hello() if callable(self.hello) else self.hello
         extra = {"current_task_id": self.runner.active_task_id(),
                  "active_task_ids": self.runner.active_task_ids()} if with_task else {}
+        if self.runner.update_waiting():
+            extra["update_waiting"] = True
         await self.send(protocol.msg("hello", **fields, **extra))
 
     async def refresh_hello(self) -> None:

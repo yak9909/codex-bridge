@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -20,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import MutableHeaders
 from starlette.routing import Route
 
+from . import __version__, updater
 from .common.applog import AppLog
 from .host.config import load_host_config
 from .host.policy import PolicyStore
@@ -144,7 +146,33 @@ def create_resident_app(state: "Resident") -> FastAPI:
     async def get_state():
         return {"use": {"configured": state.config_path.exists(), "running": state.host_role.running,
                         "error": state.use_error()},
-                "lend": {"connections": state.agent.counts()[1], "error": state.agent.error}, "paused": state.paused}
+                "lend": {"connections": state.agent.counts()[1], "error": state.agent.error}, "paused": state.paused,
+                "update": state.update_status()}
+
+    @app.post("/app/api/update/check", status_code=202)
+    async def check_update():
+        state.check_update()
+        return state.update_status()
+
+    @app.post("/app/api/update/install", status_code=202)
+    async def install_update():
+        if not state.prepare_update():
+            raise HTTPException(409, "今はアップデートを始められません")
+        return state.update_status()
+
+    @app.post("/app/api/update/mode")
+    async def update_mode(body: dict):
+        mode = body.get("mode")
+        if mode not in ("confirm", "auto"):
+            raise HTTPException(400, "毎回確認するか、自動で更新するかを選んでください")
+        try:
+            updater.save_mode(state.update_settings, mode)
+        except OSError as e:
+            raise HTTPException(500, "アップデートの設定を保存できませんでした") from e
+        state.update_mode = mode
+        if mode == "auto":
+            state.prepare_update()
+        return state.update_status()
 
     @app.post("/app/api/pause")
     async def pause(body: dict):
@@ -155,6 +183,8 @@ def create_resident_app(state: "Resident") -> FastAPI:
 
     @app.post("/app/api/host/setup", status_code=202)
     async def setup():
+        if state.update_waiting:
+            raise HTTPException(409, updater.SWITCH_WAIT)
         if state.host_role.running:
             raise HTTPException(409, "使う側はもう動いています")
         if state.setup_running:
@@ -287,6 +317,98 @@ class Resident:
         self.retry_interval = 10.0
         self._retry: asyncio.Task | None = None
         self._watched_host = None
+        self.update_settings = self.config_path.with_name("update-settings.json")
+        self.update_data = self.config_path.parent / "data"
+        self.update_mode = updater.mode(self.update_settings)
+        self.update_exe: Path | None = Path(sys.executable).resolve() if getattr(sys, "frozen", False) else None
+        self.update_release: updater.Release | None = None
+        self.update_phase = "idle"
+        self.update_message = ""
+        self._update_job: asyncio.Task | None = None
+        self._installing: asyncio.Task | None = None
+        self.host_role.update_waiting = lambda: self.update_waiting
+
+    @property
+    def update_waiting(self) -> bool:
+        return self.update_phase == "waiting"
+
+    def update_status(self) -> dict:
+        return {"version": __version__, "latest": self.update_release.version if self.update_release else None,
+                "phase": self.update_phase, "message": self.update_message, "mode": self.update_mode,
+                "can_install": self.update_exe is not None}
+
+    def check_update(self) -> None:
+        if self._update_job is None or self._update_job.done():
+            self.update_phase, self.update_message = "checking", ""
+            self._update_job = asyncio.create_task(self._check_update())
+
+    async def _check_update(self) -> None:
+        previous = self.update_release
+        self.update_release = None
+        try:
+            self.update_release = await asyncio.to_thread(updater.check_release)
+        except updater.UpdateError as e:
+            self.update_phase, self.update_message = "failed", str(e)
+            return
+        except Exception:
+            self.update_phase, self.update_message = "failed", "アップデートを確かめられませんでした"
+            return
+        if self.update_release is None:
+            self.update_phase, self.update_message = "current", ""
+            return
+        self.update_phase = "available"
+        if self.update_mode == "auto" and self.update_exe is not None:
+            self.update_phase = "preparing"
+            await self._prepare_update(self.update_release, self.update_exe)
+        elif self.update_release != previous:
+            self.notify("codex-bridge", f"新しい版 v{self.update_release.version} があります")
+
+    def prepare_update(self) -> bool:
+        if (self.update_phase not in ("available", "failed") or not self.update_release or self.update_exe is None
+                or (self._update_job is not None and not self._update_job.done())):
+            return False
+        self.update_phase, self.update_message = "preparing", ""
+        self._update_job = asyncio.create_task(self._prepare_update(self.update_release, self.update_exe))
+        return True
+
+    def _update_busy(self) -> bool:
+        runtime = getattr(self.agent, "runtime", None)
+        host = self.host_role.host
+        return (self.setup_running or bool(runtime and (runtime.moving or runtime.slot.count))
+                or bool(host and host.mgr.active_task_ids()))
+
+    async def _announce_update(self) -> None:
+        runtime = getattr(self.agent, "runtime", None)
+        if runtime is not None:
+            runtime.slot.update_waiting = self.update_waiting
+            await runtime.slot.announce()
+
+    async def _prepare_update(self, release: updater.Release, exe: Path) -> None:
+        package = None
+        try:
+            package = await asyncio.to_thread(updater.prepare_release, release, self.update_data)
+            self.update_phase = "waiting"
+            await self._announce_update()
+            while self._update_busy():
+                await asyncio.sleep(0.25)
+            self._installing = asyncio.create_task(asyncio.to_thread(updater.install_release, exe, package))
+            await asyncio.shield(self._installing)
+        except Exception as e:
+            self.update_phase = "failed"
+            self.update_message = (str(e) if isinstance(e, updater.UpdateError)
+                                   else f"アップデートを適用できませんでした: {e}")
+            self.applog.add("use", "error", self.update_message)
+            await self._announce_update()
+        else:
+            self.request_quit()
+        finally:
+            if package is not None and self.update_phase == "failed":
+                shutil.rmtree(package.parent, ignore_errors=True)
+
+    async def _periodic_update(self) -> None:
+        while True:
+            self.check_update()
+            await asyncio.sleep(updater.CHECK_INTERVAL)
 
     # -- what the screen and the tray read
     @property
@@ -317,7 +439,8 @@ class Resident:
         lenders, invited, host_waiting = self.host_role.counts()
         borrowers, connections, lender_waiting = self.agent.counts()
         return (f"貸す人 {lenders}/{invited}・依頼主 {borrowers}/{connections}"
-                f"・承認待ち {host_waiting + lender_waiting}")
+                f"・承認待ち {host_waiting + lender_waiting}"
+                + (f"・{updater.SWITCH_WAIT}" if self.update_waiting else ""))
 
     async def set_paused(self, paused: bool) -> None:
         policy = self._host_policy()
@@ -435,11 +558,11 @@ class Resident:
                 self.tray.refresh()
 
     # -- run
-    def run(self) -> bool:
+    def run(self, *, check_updates: bool = False) -> bool:
         """Runs until quit. True: the data was moved, the exe must start again."""
-        return asyncio.run(self._run())
+        return asyncio.run(self._run(check_updates=check_updates))
 
-    async def _run(self) -> bool:
+    async def _run(self, *, check_updates: bool = False) -> bool:
         self.loop = asyncio.get_running_loop()
         self.stop_event = asyncio.Event()
         self.agent.on_moved = lambda: self.loop.call_later(1.0, self.stop_event.set)
@@ -456,6 +579,8 @@ class Resident:
             if self.config_path.exists():
                 await self.start_host()
             self._background.append(asyncio.create_task(self._refresh_tray()))
+            if check_updates:
+                self._background.append(asyncio.create_task(self._periodic_update()))
             await self.stop_event.wait()
         finally:
             await self._shutdown(server, serving)
@@ -463,6 +588,10 @@ class Resident:
 
     async def _shutdown(self, server, serving: asyncio.Task) -> None:
         try:
+            if self._installing is not None:
+                await asyncio.gather(self._installing, return_exceptions=True)
+            if self._update_job is not None:
+                self._background.append(self._update_job)
             for task in self._background:
                 task.cancel()
             await asyncio.gather(*self._background, return_exceptions=True)
@@ -500,7 +629,10 @@ def main() -> None:
         host_role = HostRole(host_config_path(), applog, page_url=f"http://127.0.0.1:{port}/")
         resident.append(Resident(applog=applog, agent=agent, host_role=host_role,
                                  config_path=host_config_path(), port=port))
-        return resident[0].run()
+        app = resident[0]
+        if app.update_exe is not None:
+            updater.clean_up(app.update_exe, app.update_data)
+        return app.run(check_updates=True)
 
     if run_guarded(run, home):
         start_again()

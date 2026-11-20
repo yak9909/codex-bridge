@@ -247,6 +247,7 @@ select.ro, input.ro { pointer-events: none; appearance: none; }
 /* composer (assistant-ui-composer.md:127): text field, toolbar under it, send on the right. The field keeps its own frame and the
    toolbar sits 8 below it, so the send button never reads as part of the text (spec 0.4) */
 .composer { display: grid; gap: var(--s2); padding: var(--s3) var(--s4) var(--s4); border-top: 1px solid var(--line); }
+.composer[hidden] { display: none; }
 .composer textarea { resize: none; display: block; }
 .composer-bar { display: flex; align-items: center; gap: var(--s2); }
 select.ghost { height: var(--ctl-sm); font-size: var(--fs-cap); border-color: transparent; background: var(--ground); }
@@ -265,6 +266,11 @@ table.grid .indent { padding-left: var(--s4); }
 .note-warn { display: flex; gap: var(--s2); align-items: flex-start; color: var(--warn); font-size: var(--fs-cap); line-height: 16px; }
 
 /* log tab */
+.update-panel { display: flex; align-items: center; gap: var(--s2) var(--s4); flex-wrap: wrap; padding: var(--s2) var(--s4); border-bottom: 1px solid var(--edge); }
+.update-panel[hidden] { display: none; }
+.update-summary, .update-controls { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; min-width: 0; }
+.update-summary { flex: 1 1 auto; overflow-wrap: anywhere; }
+.update-message { flex-basis: 100%; margin: 0; overflow-wrap: anywhere; color: var(--bad); max-height: 25vh; overflow: auto; }
 .log-tools { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; padding: var(--s2) var(--s4); border-bottom: 1px solid var(--edge); }
 .log-view { flex: 1; min-height: 0; overflow: auto; padding: var(--s2) var(--s4); font-family: var(--mono); font-size: var(--fs-cap); line-height: 20px; }
 .ln { display: grid; grid-template-columns: 9.5em 3em 3em minmax(0, 1fr); gap: var(--s3); }

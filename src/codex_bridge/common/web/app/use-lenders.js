@@ -5,6 +5,7 @@ import { icon, codeFieldHtml, monthDay, taskTitle, meter, row, toggle, logCombo 
 export const EXEC_MODES = [["off", "実行しない"], ["allowlist", "許可リストだけ自動"], ["ask", "毎回承認"], ["all", "すべて自動"]];
 
 function stateOf(l) {
+  if (l.update_waiting) return [l.connected ? "切り替え待ち" : "再起動中", "warn"];
   if (l.connected && l.current_task_id) return ["作業中", "ok"];
   if (l.connected && l.ready) return ["待機中", "idle"];
   if (l.connected) return ["準備中", "warn"];
@@ -29,7 +30,7 @@ function head(l, ui, tasks) {
   if (l.capabilities && l.capabilities.model_select === false) warns.push("古い版: モデルを選べません");
   const badges = warns.map((w) => `<span class="badge warn">${esc(w)}</span>`).join("");
   return `<button class="ent-head" data-act="toggle" data-name="${esc(l.name)}" aria-expanded="${ui.open}">` +
-    `<span class="ent-line"><span class="ent-name">${esc(l.name)}</span><span class="lz ${cls}">${label}</span>${badges}</span>` +
+    `<span class="ent-line"><span class="ent-name">${esc(l.name)}</span><span class="lz ${cls}">${esc(label)}</span>${badges}</span>` +
     `${caption(l, tasks)}${icon("chevron-right", "ic chev")}</button>`;
 }
 

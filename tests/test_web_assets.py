@@ -240,3 +240,16 @@ assert.ok(one.includes("&lt;one&gt;") && two.includes("&lt;two&gt;"));
     assert 'data-act="parallel"' in source and 'length: 8' in source
     assert 'max_parallel: Number(input.value)' in source
     assert 'item.querySelector' in source and 'created: p.created' in source
+
+
+def test_update_controls_use_external_handlers_and_escape_status():
+    text = (APP / "log.js").read_text(encoding="utf-8")
+    for control in ("update-mode", "update-check", "update-install"):
+        assert f'id="{control}"' in text
+    assert "message.innerHTML = esc(detail)" in text
+    assert re.search(r"""\son[a-z]+\s*=""", text) is None
+    assert "<script" not in text
+    cards = (APP / "use-lenders.js").read_text(encoding="utf-8")
+    assert 'l.connected ? "切り替え待ち" : "再起動中"' in cards
+    assert "${esc(label)}</span>" in cards
+

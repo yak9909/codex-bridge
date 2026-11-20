@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 from ..common import protocol
+from ..updater import SWITCH_WAIT
 from .appserver import AppServer, AppServerError
 from .models import ModelRefused, choose
 from .pre_approval import CANCELLED, FOLLOWUP, START, WAITING, PreApproval
@@ -58,6 +59,7 @@ class TaskSlot:
         self.last_usage = None
         self.moving = False
         self.blocked_runners = set()
+        self.update_waiting = False
 
     @property
     def count(self) -> int:
@@ -204,9 +206,14 @@ class AgentRunner:
             for p in self.approval.pendings.values()) or any(
             task != except_task and thread == thread_id for task, thread in self._reservations.items())
 
+    def update_waiting(self) -> bool:
+        return bool(self.slot and self.slot.update_waiting)
+
     async def send_busy_status(self) -> None:
-        if self.slot:
-            await self._safe_send(protocol.msg("lender_status", busy_elsewhere=self.slot.count >= self.slot.max_parallel))
+        if self.slot or self.update_waiting():
+            await self._safe_send(protocol.msg(
+                "lender_status", busy_elsewhere=bool(self.slot and self.slot.count >= self.slot.max_parallel),
+                update_waiting=self.update_waiting()))
 
     async def send_models(self) -> None:
         await self._safe_send(protocol.msg("lender_models", **models_fields(self.settings, self.catalog)))
@@ -228,6 +235,8 @@ class AgentRunner:
 
     async def _reserve_slot(self, m: dict) -> str | None:
         def reserve():
+            if self.update_waiting():
+                return SWITCH_WAIT
             if self._closing:
                 return "アプリの終了処理中のため、今は依頼を受け付けません。"
             if self.slot and (self.slot.moving or self in self.slot.blocked_runners):
@@ -367,7 +376,8 @@ class AgentRunner:
             await self._send_seq("event", task_id=cur.task_id, kind=kind, data=data)
 
     async def _state(self, state: str, report: str | None = None, resume_at: int | None = None,
-                     task_id: str | None = None, thread_id: str | None = None, cur: Current | None = None) -> None:
+                     task_id: str | None = None, thread_id: str | None = None, cur: Current | None = None,
+                     update_waiting: bool = False) -> None:
         cur = cur or (self.currents.get(task_id) if task_id else self.cur)
         task_id = task_id or (cur.task_id if cur else None)
         if state in protocol.FINAL_STATES and task_id is not None:
@@ -380,7 +390,7 @@ class AgentRunner:
         self._record(task_id, "state", {"state": state, "report": report, "resume_at": resume_at})
         await self._send_seq("task_state", task_id=task_id, state=state,
                              thread_id=thread_id or (cur.thread_id if cur else None), report=report,
-                             resume_at=resume_at)
+                             resume_at=resume_at, **({"update_waiting": True} if update_waiting else {}))
 
     async def _reply(self, req_id: str, ok: bool, data=None, error: str | None = None) -> None:
         await self._safe_send(protocol.msg("reply", req_id=req_id, ok=ok, data=data, error=error))
@@ -441,6 +451,9 @@ class AgentRunner:
         async with self._lock:
             if m["task_id"] in self.active_task_ids():
                 return
+            if self.update_waiting():
+                await self._state("rejected_by_lender", report=SWITCH_WAIT, task_id=m["task_id"], update_waiting=True)
+                return
             cont = m.get("continue_thread_id")
             if cont in self._deleting_threads:
                 await self._state("rejected_by_lender", report=SESSION_DELETING, task_id=m["task_id"])
@@ -454,7 +467,8 @@ class AgentRunner:
                 return
             refusal = await self._reserve_slot(m)
             if refusal:
-                await self._state("rejected_by_lender", report=refusal, task_id=m["task_id"])
+                await self._state("rejected_by_lender", report=refusal, task_id=m["task_id"],
+                                  update_waiting=refusal == SWITCH_WAIT)
                 return
             if self.approval.applies(START):
                 await self.approval.hold(m, START)

@@ -13,6 +13,7 @@ from typing import Callable, Iterable
 
 from ..common import protocol
 from ..common.protocol import FINAL_STATES, LOG_VISIBILITY, TASK_STATES
+from ..updater import SWITCH_WAIT, UPDATE_WAIT, version_parts
 from .lenders import (Lender, SendFn, as_protocol, as_text, blocked_until, lender_accepts, moment,
                       normalize_capabilities, normalize_effort, normalize_lender_view, normalize_limits,
                       normalize_models,
@@ -23,6 +24,8 @@ from .policy import EXEC_MODES, Policy, command_patterns
 ACTIVE_STATES = ("queued", "running", "agent_offline", "awaiting_lender")  # awaiting_lender: the lender has not approved yet
 NO_THRESHOLDS: dict = {}  # the borrower sets no limit of its own: only the lender's `limits` count
 REQUEST_TIMEOUT = 30.0
+LOCAL_UPDATE_TIMEOUT = "この PC のアップデートが終わらないため、依頼を送れませんでした"
+REMOTE_UPDATE_TIMEOUT = "{} さんのアプリのアップデートが終わらないため、依頼を送れませんでした"
 NOT_CONNECTED = "貸す人が接続されていません。貸す人の PC で codex-bridge が起動し、「貸す」タブに招待コードを入れているか確かめてください。"
 BUSY = "同時に受ける依頼の上限（{} 件）に達しています"
 QUOTA = "使用量の上限のため受け付けません。再開可能: {}"
@@ -66,6 +69,9 @@ class TaskRecord:
     exec_mode: str | None = None
     deny: list[str] = field(default_factory=list)
     ask: list[str] = field(default_factory=list)
+    local_update_deadline: float | None = None
+    remote_update_deadline: float | None = None
+    remote_update_from: str | None = None
 
 
 def _known_state(v) -> str | None:
@@ -90,6 +96,10 @@ def _record(raw) -> TaskRecord | None:
     if not isinstance(raw, dict) or not as_text(raw.get("task_id")):
         return None
     state = _known_state(raw.get("state"))
+    local_deadline = number(raw.get("local_update_deadline"))
+    remote_deadline = number(raw.get("remote_update_deadline"))
+    if state == "update_waiting" and local_deadline is None and remote_deadline is None:
+        state = None
     rerouted = raw.get("rerouted")
     rerouted = ({"from": rerouted["from"], "reason": as_text(rerouted.get("reason"))}
                 if isinstance(rerouted, dict) and isinstance(rerouted.get("from"), str) else None)
@@ -105,7 +115,9 @@ def _record(raw) -> TaskRecord | None:
         actual_model=as_text(raw.get("actual_model")), actual_effort=as_text(raw.get("actual_effort")),
         rerouted=rerouted, notified_final=raw.get("notified_final") is True,
         exec_mode=raw.get("exec_mode") if raw.get("exec_mode") in EXEC_MODES else None,
-        deny=_stored_patterns(raw.get("deny")), ask=_stored_patterns(raw.get("ask")))
+        deny=_stored_patterns(raw.get("deny")), ask=_stored_patterns(raw.get("ask")),
+        local_update_deadline=local_deadline, remote_update_deadline=remote_deadline,
+        remote_update_from=as_text(raw.get("remote_update_from")))
 
 
 def _read_events(path: Path) -> list[dict]:
@@ -131,6 +143,8 @@ class TaskManager:
                  policy_fn: Callable[[], Policy] = Policy) -> None:
         self.check_start = check_start
         self.policy_fn = policy_fn
+        self.update_waiting: Callable[[], bool] = lambda: False
+        self._wait_for_restart: set[str] = set()
         self.dir = Path(data_dir) / "tasks"
         self.dir.mkdir(parents=True, exist_ok=True)
         self.settings_path = Path(data_dir) / "settings.json"
@@ -166,7 +180,7 @@ class TaskManager:
                 rec = None
             if rec is None:
                 continue  # not readable (cut off while being written, ...): left on disk, not listed
-            if rec.state in FINAL_STATES:
+            if rec.state in FINAL_STATES and rec.local_update_deadline is None and rec.remote_update_deadline is None:
                 rec.notified_final = True
             if rec.state in ACTIVE_STATES:
                 if rec.state == "awaiting_lender":  # a pending approval is still pending when the agent comes back
@@ -242,6 +256,8 @@ class TaskManager:
         lender = self._links.pop(link_id, None)
         if lender is None:
             return
+        if lender.update_since is not None:
+            lender.update_since = time.time()
         lender.send, lender.connected, lender.ready = None, False, False
         self._say("warn", f"{lender.name} との接続が切れました")
         for rec in self.tasks.values():
@@ -310,7 +326,7 @@ class TaskManager:
         def row(l: Lender) -> dict:
             return {**self._info(l), "limits": l.limits, "lender_view": l.view, "usage": self._usage_of(l),
                     "active_task_ids": list(l.active_task_ids), "current_task_id": l.current_task_id, "last_assigned": l.last_assigned,
-                    "busy_elsewhere": l.busy_elsewhere}
+                    "busy_elsewhere": l.busy_elsewhere, "update_waiting": l.updating(time.time())}
         never = [{**row(Lender(name=n, active_task_ids=self.active_task_ids(n), current_task_id=self.current_task_id(n))), "capabilities": None}
                  for n in dict.fromkeys(invited) if n not in self._lenders]
         return [row(l) for l in self._lenders.values()] + never
@@ -351,6 +367,7 @@ class TaskManager:
                 self._reconcile(lender, [v for v in m["active_task_ids"] if isinstance(v, str)])
             elif "current_task_id" in m:
                 self._reconcile(lender, [m["current_task_id"]] if isinstance(m["current_task_id"], str) else [])
+            lender.update_since = time.time() if m.get("update_waiting") is True else None
             lender.ready = True
             await lender.send(self._settings_msg(lender.name))
             self._changed()
@@ -363,8 +380,12 @@ class TaskManager:
             lender.view = normalize_lender_view(m.get("lender_view"))
             self._changed()
         elif t == "lender_status":
-            if isinstance(m.get("busy_elsewhere"), bool):
-                lender.busy_elsewhere = m["busy_elsewhere"]
+            busy, updating = m.get("busy_elsewhere"), m.get("update_waiting")
+            if isinstance(busy, bool):
+                lender.busy_elsewhere = busy
+            if isinstance(updating, bool):
+                lender.update_since = time.time() if updating else None
+            if isinstance(busy, bool) or isinstance(updating, bool):
                 self._changed()
         elif t == "usage":
             # numbers from the other PC are checked here, so that nothing computed from them later can fail
@@ -402,6 +423,14 @@ class TaskManager:
             state = _known_state(m.get("state"))
             if rec is None or state is None:  # a state this host does not know is not a state: nothing changes
                 return
+            if state == "update_waiting" or rec.state == "update_waiting":
+                return  # Local waits are controlled by the host, never by task state messages.
+            if (m.get("update_waiting") is True and state == "rejected_by_lender"
+                    and (rec.state == "queued" or rec.state_before_offline == "queued")):
+                now = time.time()
+                lender.update_since = now
+                self._wait_for_lender(rec, lender, now)
+                return
             if rec.state in FINAL_STATES and state != rec.state and rec.report != SPOILT and not (
                     rec.guessed and state in FINAL_STATES):
                 return  # over is over (a message sent again after a reconnect must not bring a task back);
@@ -412,6 +441,8 @@ class TaskManager:
             rec.guessed = False
             rec.lender = lender.name
             rec.state = state
+            rec.remote_update_deadline = None
+            rec.remote_update_from = None
             rec.state_before_offline = None
             if state in FINAL_STATES:
                 self._progress.pop(rec.task_id, None)
@@ -581,6 +612,31 @@ class TaskManager:
         self._require_free(target, now, advice=RETRY_FRESH)
         return target
 
+    def _choose_target(self, rec: TaskRecord, now: float) -> Lender:
+        lender, model, effort = rec.lender, rec.model, rec.effort
+        if lender is not None and (target := self._lenders.get(lender)) and self._invited(lender):
+            if target.updating(now):
+                return target
+        if not self._connected():
+            raise ToolError(NOT_CONNECTED)
+        if rec.continue_task_id:
+            return self._continue_target(self._get(rec.continue_task_id), lender, now, model=model, effort=effort)
+        if lender is not None:
+            target = self._ready(self._resolve(lender))
+            if reason := lender_accepts(target, model, effort):
+                raise ToolError(reason)
+            self._require_free(target, now)
+            return target
+        online = [l for l in self._connected() if not l.updating(now)]
+        if not online:
+            raise ToolError(SWITCH_WAIT)
+        among = [l for l in online if lender_accepts(l, model, effort) is None]
+        if not among:
+            reasons = [lender_accepts(l, model, effort) for l in online]
+            raise ToolError("指定のモデル（" + (model or "既定") + "）と推論の強さ（" + (effort or "既定")
+                            + "）を使わせている人が、接続中の中にいません。" + " ".join(reasons))
+        return self._pick(now, among)
+
     async def start(self, prompt: str, continue_task_id: str | None = None, lender: str | None = None, *,
                     model: str | None = None, effort: str | None = None,
                     origin: str | None = None, session: str | None = None,
@@ -588,50 +644,119 @@ class TaskManager:
                     ask: list[str] | None = None) -> str:
         if self.check_start:
             self.check_start()
-        if not self._connected():
-            raise ToolError(NOT_CONNECTED)
         now = time.time()
         thread_id = None
         if continue_task_id:
             prev = self._get(continue_task_id)
             if model is None and effort is None:
                 model, effort = prev.model, prev.effort
-            target = self._continue_target(prev, lender, now, model=model, effort=effort)
+            if prev.lender is not None and lender not in (None, prev.lender):
+                raise ToolError(f"このタスクの会話は「{prev.lender}」の Codex にあるため、"
+                                f"「{lender}」には続きを送れません。{RETRY_FRESH}")
+            lender = prev.lender or lender
             thread_id = prev.thread_id
             exec_mode = prev.exec_mode if exec_mode is None else exec_mode
             deny = prev.deny if deny is None else deny
             ask = prev.ask if ask is None else ask
-        elif lender is not None:
-            target = self._ready(self._resolve(lender))
-            reason = lender_accepts(target, model, effort)
-            if reason:
-                raise ToolError(reason)
-            self._require_free(target, now)
-        elif model is not None or effort is not None:
-            online = self._connected()
-            among = [l for l in online if lender_accepts(l, model, effort) is None]
-            if not among:
-                reasons = [lender_accepts(l, model, effort) for l in online]
-                raise ToolError("指定のモデル（" + (model or "既定") + "）と推論の強さ（" + (effort or "既定")
-                                + "）を使わせている人が、接続中の中にいません。" + " ".join(reasons))
-            target = self._pick(now, among)
-        else:
-            target = self._pick(now)
         try:
             exec_fields = _exec_fields(exec_mode, deny, ask)
         except ValueError as e:
             raise ToolError(str(e)) from e
         task_id = time.strftime("t%Y%m%d-%H%M%S") + f"-{next(self._task_ids)}"
+        while task_id in self.tasks:
+            task_id = time.strftime("t%Y%m%d-%H%M%S") + f"-{next(self._task_ids)}"
         rec = TaskRecord(task_id=task_id, prompt=prompt, created=now, continue_task_id=continue_task_id,
-                         lender=target.name, origin=origin, session=session, model=model, effort=effort,
+                         lender=lender, origin=origin, session=session, model=model, effort=effort,
                          thread_id=thread_id, **exec_fields)
-        self._events[task_id] = []
-        target.last_assigned = now
-        self._save(rec)  # also marks the lender as working
-        spec = {k: v for k, v in (("model", model), ("effort", effort)) if v is not None}
-        await target.send(protocol.msg("task_start", task_id=task_id, prompt=prompt, continue_thread_id=thread_id, **spec))
-        self._say("info", f"{task_id} を {target.name} に送りました")
+        if self.update_waiting():
+            rec.state = "update_waiting"
+            rec.local_update_deadline = now + UPDATE_WAIT
+            self._save(rec)
+            self._wait_for_restart.add(task_id)
+            return task_id
+        target = self._choose_target(rec, now)
+        if target.updating(now):
+            self._wait_for_lender(rec, target, now)
+        else:
+            self._events[task_id] = []
+            await self._dispatch_start(rec, target, now)
         return task_id
+
+    def _wait_for_lender(self, rec: TaskRecord, target: Lender, now: float) -> None:
+        rec.lender = target.name
+        rec.state = "update_waiting"
+        rec.state_before_offline = None
+        rec.remote_update_deadline = rec.remote_update_deadline or now + UPDATE_WAIT
+        rec.remote_update_from = target.agent_version or rec.remote_update_from
+        self._save(rec)
+
+    async def _dispatch_start(self, rec: TaskRecord, target: Lender, now: float) -> None:
+        rec.lender, rec.state = target.name, "queued"
+        rec.local_update_deadline = None
+        target.last_assigned = now
+        self._save(rec)
+        spec = {k: v for k, v in (("model", rec.model), ("effort", rec.effort)) if v is not None}
+        await target.send(protocol.msg("task_start", task_id=rec.task_id, prompt=rec.prompt,
+                                       continue_thread_id=rec.thread_id, **spec))
+        self._say("info", f"{rec.task_id} を {target.name} に送りました")
+
+    def _finish_wait(self, rec: TaskRecord, reason: str, state: str = "failed") -> None:
+        self._wait_for_restart.discard(rec.task_id)
+        rec.state, rec.report = state, reason
+        self._save(rec)
+        self._say("error" if state == "failed" else "info", f"{rec.task_id}: {reason}")
+
+    async def run_update_waits(self) -> None:
+        while True:
+            try:
+                await self.resume_update_waits()
+            except OSError as e:
+                self._say("error", f"アップデート待ちの依頼を処理できませんでした: {e}")
+            await asyncio.sleep(0.5)
+
+    async def resume_update_waits(self) -> None:
+        for rec in list(self.tasks.values()):
+            if rec.state != "update_waiting":
+                continue
+            now = time.time()
+            if rec.local_update_deadline is not None:
+                if now >= rec.local_update_deadline:
+                    self._finish_wait(rec, LOCAL_UPDATE_TIMEOUT)
+                    continue
+                if rec.task_id in self._wait_for_restart:
+                    continue
+            if rec.remote_update_deadline is not None:
+                if now >= rec.remote_update_deadline:
+                    self._finish_wait(rec, REMOTE_UPDATE_TIMEOUT.format(rec.lender))
+                    continue
+                target = self._lenders.get(rec.lender)
+                if (target is None or not target.connected or not target.ready or target.updating(now)
+                        or target.busy_elsewhere or len(target.active_task_ids) >= target.max_parallel
+                        or blocked_until(target, NO_THRESHOLDS, now)):
+                    continue
+                before = version_parts(rec.remote_update_from)
+                if before and version_parts(target.agent_version) <= before:
+                    continue
+            if self.update_waiting():
+                continue
+            try:
+                if self.check_start:
+                    self.check_start()
+                target = self._choose_target(rec, now)
+            except ToolError as e:
+                if rec.local_update_deadline is None:
+                    self._finish_wait(rec, str(e))
+                continue
+            if target.updating(now):
+                rec.remote_update_deadline = rec.local_update_deadline or rec.remote_update_deadline
+                rec.local_update_deadline = None
+                self._wait_for_lender(rec, target, now)
+                continue
+            try:
+                await self._dispatch_start(rec, target, now)
+            except Exception:
+                if rec.state in ("queued", "agent_offline"):
+                    self._finish_wait(rec, "貸す人との接続が切れたため、依頼を送れませんでした")
 
     def exec_settings(self, task_id: str) -> dict:
         rec = self._get(task_id)
@@ -667,6 +792,9 @@ class TaskManager:
 
     async def cancel(self, task_id: str) -> None:
         rec = self._get(task_id)
+        if rec.state == "update_waiting":
+            self._finish_wait(rec, "アップデート待ちの依頼を取り消しました", "cancelled")
+            return
         if rec.state not in ACTIVE_STATES:
             raise ToolError(f"このタスクは作業中ではありません（{rec.state}）")
         await self._send_for(rec, protocol.msg("task_cancel", task_id=task_id))
@@ -689,6 +817,7 @@ class TaskManager:
             "origin": rec.origin, "model": rec.model, "effort": rec.effort,
             "actual_model": rec.actual_model, "actual_effort": rec.actual_effort, "rerouted": rec.rerouted,
             **self.exec_settings(task_id),
+            **({"message": "アップデート待ち"} if rec.state == "update_waiting" else {}),
             "resume_at": iso_local(rec.resume_at), "recent_events": self.events(task_id)[-15:],
             # the agent of this task's own lender; None for a v0.1 record, which names no lender
             "agent": self.agent_info(rec.lender) if rec.lender is not None else None,

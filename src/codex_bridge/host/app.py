@@ -141,7 +141,12 @@ def create_local_app(host: Host, page_url: str | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app):
         async with host.claude_ep.run():
-            yield
+            waiting = asyncio.create_task(host.mgr.run_update_waits())
+            try:
+                yield
+            finally:
+                waiting.cancel()
+                await asyncio.gather(waiting, return_exceptions=True)
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.include_router(admin_router(host, page_url=page_url))

@@ -161,6 +161,7 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
           "（その人が未接続・受付数の上限・使い捨てのセッションのときや、その会話が作業中のときはエラーになります）。"
           "model と effort で、使うモデルと推論の強さを指定できます（省くと、その人の Codex の既定）。"
           "exec_mode・deny・ask で依頼のコマンドの指定を追加できます。続きの依頼では省いた項目を引き継ぎます。"
+          "アップデート待ちでも task_id はすぐ返ります。その後の確認には get_status を使えます。"
           "task_id、担当（lender）、モデルと推論の強さ、コマンドの指定と実際に効くモードを返します。")
     async def send_task(prompt: str, continue_task_id: str | None = None,
                         lender: str | None = None, model: str | None = None,
@@ -173,6 +174,7 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
                                       exec_mode=exec_mode, deny=deny, ask=ask)
             rec = mgr.tasks[task_id]
             return {"task_id": task_id, "lender": rec.lender, "model": rec.model, "effort": rec.effort,
+                    **({"state": rec.state} if rec.state == "update_waiting" else {}),
                     **mgr.exec_settings(task_id), "note": NOTIFY_NOTE}
         return await run(f)
 

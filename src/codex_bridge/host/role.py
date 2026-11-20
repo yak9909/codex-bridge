@@ -58,6 +58,8 @@ class HostRole:
         self._stopping = False
         self._lock = asyncio.Lock()
 
+    update_waiting = staticmethod(lambda: False)
+
     async def start(self) -> None:
         async with self._lock:
             await self._start_locked()
@@ -113,6 +115,7 @@ class HostRole:
         except Exception as e:
             raise HostStartError(f"使う側を始められませんでした: {type(e).__name__}: {e}") from e
         self.host = host
+        host.mgr.update_waiting = self.update_waiting
         host.mgr.log = lambda level, text: self.applog.add("use", level, text)
         host.approvals.log = host.mgr.log
         public = uvicorn.Server(uvicorn.Config(create_public_app(host), host=pub_host, port=pub_port,

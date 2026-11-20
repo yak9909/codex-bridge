@@ -14,8 +14,9 @@ import pytest
 import yaml
 from fastapi import FastAPI
 
-from codex_bridge import resident
+from codex_bridge import resident, updater
 from codex_bridge.agent import main as agent_main
+from codex_bridge.agent.runner import TaskSlot
 from codex_bridge.common.applog import AppLog
 from codex_bridge.common.invite import make_invite
 from codex_bridge.host.app import build_host, create_local_app
@@ -437,7 +438,7 @@ async def test_state_counts(tmp_path):
     async with client_for(create_resident_app(res)) as web:
         assert (await web.get("/app/api/state")).json() == {
             "use": {"configured": True, "running": False, "error": None},
-            "lend": {"connections": 4, "error": None}, "paused": False}
+            "lend": {"connections": 4, "error": None}, "paused": False, "update": res.update_status()}
     res.host_role.running = True
     assert res.status_line() == "貸す人 1/2・依頼主 3/4・承認待ち 7"
 
@@ -945,3 +946,84 @@ async def test_pause_state_and_tray_use_either_side_and_resume_both(tmp_path, ho
 async def test_state_exposes_lender_setup_error(web, res):
     res.agent.error = "Codex をダウンロードできませんでした: オフラインです"
     assert (await web.get("/app/api/state")).json()["lend"]["error"] == res.agent.error
+
+
+async def test_source_app_checks_and_notifies_without_preparing(tmp_path, res, web, monkeypatch):
+    calls = []
+    release = updater.Release("9.0.0", "fake", "0" * 64)
+    monkeypatch.setattr(updater, "check_release", lambda: release)
+    monkeypatch.setattr(updater, "prepare_release", lambda *args: calls.append(args))
+    res.update_exe = None
+    res.tray = FakeTray()
+    assert res.update_mode == "confirm"
+    assert (await web.post("/app/api/update/check")).status_code == 403
+    assert (await web.post("/app/api/update/mode", headers=H, json={"mode": "auto"})).status_code == 200
+    assert make_resident(tmp_path).update_mode == "auto"
+    response = await web.post("/app/api/update/check", headers=H)
+    assert response.status_code == 202 and response.json()["phase"] == "checking"
+    await res._update_job
+    assert res.update_status()["phase"] == "available"
+    assert res.update_status()["latest"] == "9.0.0"
+    assert len(res.tray.notices) == 1
+    assert (await web.post("/app/api/update/install", headers=H)).status_code == 409
+    assert not calls
+
+
+@pytest.mark.parametrize("automatic", [True, False])
+async def test_switch_waits_for_work_on_both_sides_and_keeps_approvals(tmp_path, monkeypatch, automatic):
+    host = make_host(tmp_path)
+    role = FakeHostRole(host)
+    role.running = True
+    agent = FakeAgent()
+    slot = TaskSlot()
+    busy = SimpleNamespace(active_task_ids=lambda: ["lend work"])
+    slot.runners.append(busy)
+
+    async def announce():
+        pass
+
+    slot.announce = announce
+    agent.runtime = SimpleNamespace(slot=slot, moving=False)
+    app = make_resident(tmp_path, host_role=role, agent=agent)
+    app.loop = asyncio.get_running_loop()
+    app.stop_event = asyncio.Event()
+    host.mgr.update_waiting = role.update_waiting
+    app.update_exe = tmp_path / updater.EXE
+    app.update_mode = "auto" if automatic else "confirm"
+    newest = updater.Release("9.0.0", "fake", "0" * 64)
+    package = tmp_path / "data" / "updates" / "download" / newest.folder
+    installs = []
+    monkeypatch.setattr(updater, "check_release", lambda: newest)
+    monkeypatch.setattr(updater, "prepare_release", lambda *args: package)
+    monkeypatch.setattr(updater, "install_release", lambda *args: installs.append(args))
+    host.mgr.check_start = None
+
+    async def send(message):
+        pass
+
+    host.tokens.issue("alice")
+    link = host.mgr.attach("alice", send)
+    await host.mgr.on_agent_message(link, {"type": "hello", "protocol": 4})
+    working = await host.mgr.start("still working", lender="alice")
+    approval = host.approvals.request("command", "echo approved", working)
+    async with client_for(create_resident_app(app)) as http:
+        await http.post("/app/api/update/check", headers=H)
+        if not automatic:
+            await app._update_job
+            assert app.update_phase == "available" and not installs
+            assert (await http.post("/app/api/update/install", headers=H)).status_code == 202
+        async with asyncio.timeout(3):
+            while not slot.update_waiting:
+                await asyncio.sleep(0.01)
+        assert app.update_waiting
+        idle_task = await host.mgr.start("after restart", lender="alice")
+        assert host.mgr.status(idle_task)["state"] == "update_waiting"
+        assert (await http.post(f"/admin/api/approvals/{approval.id}", headers=H, json={"approve": True})).status_code == 200
+        slot.runners.remove(busy)
+        await asyncio.sleep(0.3)
+        assert not installs
+        await host.mgr.on_agent_message(link, {"type": "task_state", "task_id": working, "state": "completed"})
+        await asyncio.wait_for(app._update_job, 3)
+        await asyncio.wait_for(app.stop_event.wait(), 3)
+    assert installs == [(app.update_exe, package)]
+

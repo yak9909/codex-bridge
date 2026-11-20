@@ -139,6 +139,7 @@ async function refresh() {
     try {
       const s = await get("/app/api/state");
       setPause(!!s.paused);
+      setCount("log", s.update?.phase === "available" || s.update?.phase === "waiting" ? "更新" : 0);
       clearError("state");
     } catch (e) {
       showError("この画面の本体につながりません", "state");

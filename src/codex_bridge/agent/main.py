@@ -338,6 +338,8 @@ class AgentConnections:
     async def move_data(self, new):
         async with self._changes:
             async with self.slot.lock:
+                if self.slot.update_waiting:
+                    raise ValueError("アップデートの切り替え待ちは保存場所を変えられません")
                 if self.slot.count or any(r._session_operations for r in self.runners.values()):
                     raise ValueError("作業中・承認待ちは保存場所を変えられません")
                 self.moving = self.slot.moving = True

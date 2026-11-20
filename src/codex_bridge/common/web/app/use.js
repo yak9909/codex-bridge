@@ -241,6 +241,7 @@ export function renderUse(root) {
 
   function drawDetail(result) {
     const isNew = S.selected === "new";
+    el.form.hidden = !isNew && result?.state === "update_waiting";
     const head = isNew ? newHeadHtml() : result ? headHtml(result) : "";
     if (head !== cache.dhead) {
       cache.dhead = head;
@@ -641,7 +642,7 @@ export function renderUse(root) {
   async function onSubmit(ev) {
     ev.preventDefault();
     const text = el.text.value.trim();
-    if (!text) return;
+    if (!text || el.form.hidden) return;
     const key = S.selected;
     const button = el.form.querySelector("button[type=submit]");
     if (button) button.disabled = true;

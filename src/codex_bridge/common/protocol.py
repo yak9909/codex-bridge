@@ -41,7 +41,7 @@ AGENT_TO_HOST = {"hello", "event", "usage", "task_state", "reply", "lender_statu
 TYPES = HOST_TO_AGENT | AGENT_TO_HOST
 
 TASK_STATES = ("queued", "running", "completed", "suspended_quota", "failed", "cancelled", "agent_offline",
-               "awaiting_lender", "rejected_by_lender")
+               "awaiting_lender", "rejected_by_lender", "update_waiting")
 FINAL_STATES = ("completed", "suspended_quota", "failed", "cancelled", "rejected_by_lender")
 LOG_VISIBILITY = ("summary", "files", "all")
 EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
