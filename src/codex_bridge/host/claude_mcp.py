@@ -422,7 +422,7 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
             return {"share_root": r["path"]}
         return await run(f)
 
-    @tool("全体の状態（共有フォルダ・実行モード・一時停止・承認待ちの数・使用量・agent の接続）を返します。"
+    @tool("全体の状態（共有フォルダ・実行モード・一時停止・作業中の依頼一覧 active_task_ids・承認待ちの数・使用量・agent の接続）を返します。"
           "agent は最後に接続した 1 人の情報です。Codex を貸している人ごとの状態は list_lenders で見てください。")
     async def get_overview() -> CallToolResult:
         async def f():
@@ -432,7 +432,7 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
                     "paused": p.paused, "exec_mode": p.exec_mode, "policy_error": policy.last_error,
                     "lender_exec_modes": p.lender_exec_modes,
                     "policy_problem": policy.problems(),
-                    "current_task": mgr.current_task_id(), "pending_approvals": len(approvals.pending()),
+                    "current_task": mgr.current_task_id(), "active_task_ids": mgr.active_task_ids(), "pending_approvals": len(approvals.pending()),
                     "usage": mgr.usage()}
         return await run(f)
 

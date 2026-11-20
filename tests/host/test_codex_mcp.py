@@ -492,8 +492,12 @@ async def test_one_remaining_task_keeps_legacy_fallback(parallel, thread):
     await e.host.mgr.on_agent_message(e.link["alice"], {
         "type": "task_state", "task_id": e.ids[1], "state": "completed"})
     res = await thread_call(e, thread, "write_file", {"path": "out/fallback.txt", "content": "x"})
-    assert not res.get("isError")
-    assert e.host.snapshots.touched(e.ids[0]) == ["out/fallback.txt"]
+    if thread is None:
+        assert not res.get("isError")
+        assert e.host.snapshots.touched(e.ids[0]) == ["out/fallback.txt"]
+    else:
+        assert res["isError"] and "どの依頼" in res["content"][0]["text"]
+        assert not e.host.snapshots.touched(e.ids[0])
 
 
 async def test_parallel_delete_approvals_keep_their_thread_even_after_task_completion(parallel):
@@ -532,3 +536,32 @@ async def test_parallel_command_approvals_and_results_do_not_mix(parallel):
     assert wrong["isError"] and "ジョブが見つかりません" in wrong["content"][0]["text"]
     own = await thread_call(e, "thread-one", "get_command_result", {"job_id": jobs[0]["job_id"]})
     assert json.loads(own["content"][0]["text"])["stdout"].strip() == "0"
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("write_file", {"path": "out/late.txt", "content": "late"}),
+    ("delete_path", {"path": "out/late.txt"}),
+    ("run_command", {"command": "echo late"}),
+])
+async def test_cancelled_thread_cannot_mutate_the_remaining_tasks_files(parallel, tool, args):
+    e = parallel
+    target = e.root / "out/late.txt"
+    target.write_text("original", encoding="utf-8")
+    await e.host.mgr.cancel(e.ids[0])
+    await e.host.mgr.on_agent_message(e.link["alice"], {
+        "type": "task_state", "task_id": e.ids[0], "state": "cancelled", "thread_id": "thread-one"})
+    assert e.host.mgr.active_task_ids("alice") == [e.ids[1]]
+    result = await thread_call(e, "thread-one", tool, args)
+    assert result["isError"] and "どの依頼" in result["content"][0]["text"]
+    assert target.read_text(encoding="utf-8") == "original"
+    assert not e.host.snapshots.touched(e.ids[1]) and not e.host.snapshots.touched(None)
+    assert not e.host.approvals.pending() and not e.host.services.runner.jobs
+
+
+async def test_single_task_without_a_known_thread_keeps_startup_fallback(two):
+    task = two.task["alice"]
+    assert two.host.mgr.tasks[task].thread_id is None
+    result = await thread_call(two, "new-thread-not-announced-yet", "write_file",
+                               {"path": "out/startup.txt", "content": "x"})
+    assert not result.get("isError")
+    assert two.host.snapshots.touched(task) == ["out/startup.txt"]

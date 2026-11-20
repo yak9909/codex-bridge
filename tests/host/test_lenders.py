@@ -27,7 +27,7 @@ async def test_busy_elsewhere_lender_is_skipped_by_auto_routing(mgr):
 async def test_named_busy_elsewhere_lender_gets_busy_answer(mgr):
     alice = await FakeAgent.join(mgr, "alice")
     await alice.push("lender_status", busy_elsewhere=True)
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("one", lender="alice")
     assert not alice.all("task_start")
     await alice.push("lender_status", busy_elsewhere="false")
@@ -323,7 +323,7 @@ async def test_two_lenders_work_in_parallel(mgr):
     assert mgr.tasks[t1].lender == "alice" and mgr.tasks[t2].lender == "bob"
     assert mgr.current_task_id("alice") == t1 and mgr.current_task_id("bob") == t2
     assert mgr.current_task_id() in (t1, t2)
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("three")
 
     await mgr.followup(t2, "more")
@@ -346,7 +346,7 @@ async def test_explicit_lender_is_used(mgr):
     await bob.push("usage", **usage(five_hour=50))
     tid = await mgr.start("one", lender="bob")
     assert bob.last("task_start")["task_id"] == tid and not alice.all("task_start")
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("two", lender="bob")
     with pytest.raises(ToolError, match="接続されていません"):
         await mgr.start("two", lender="carol")
@@ -665,7 +665,7 @@ async def test_automatic_routing_skips_a_lender_before_its_hello(mgr):
     await bob.push("usage", **usage(five_hour=70))
     tid = await mgr.start("one")
     assert mgr.tasks[tid].lender == "bob" and not alice.all("task_start")
-    with pytest.raises(ToolError, match="作業中"):  # bob works; alice still cannot be chosen
+    with pytest.raises(ToolError, match="上限"):  # bob works; alice still cannot be chosen
         await mgr.start("two")
 
 
@@ -685,3 +685,14 @@ async def test_continuation_waits_for_the_hello_of_a_new_connection(mgr):
     with pytest.raises(ToolError, match=RETRY_ADVICE):
         await mgr.start("more", continue_task_id=t1)
     assert not again.all("task_start") and len(mgr.tasks) == 1
+
+
+async def test_named_lender_at_its_own_capacity_reports_the_capacity(mgr):
+    alice = await FakeAgent.join(mgr, "alice")
+    await alice.push("hello", protocol=5, capabilities={"max_parallel": 2})
+    ids = [await mgr.start("first", lender="alice"), await mgr.start("second", lender="alice")]
+    await alice.push("lender_status", busy_elsewhere=True)
+    with pytest.raises(ToolError) as error:
+        await mgr.start("third", lender="alice")
+    assert str(error.value) == "同時に受ける依頼の上限（2 件）に達しています"
+    assert "ほかの依頼主" not in str(error.value) and mgr.active_task_ids("alice") == ids

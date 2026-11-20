@@ -434,3 +434,21 @@ async def test_multiple_pending_decisions_and_overview_counts(env):
         assert (await env.http.post("/api/pending", json=body, headers=WRITE)).status_code == 200
     assert set(env.runner.currents) == {"one"} and not env.runner.pending_approvals
     assert (await env.http.get("/api/pending")).json() == []
+
+
+@pytest.mark.parametrize("created", [1234, 1234.0])
+@pytest.mark.parametrize("approve", [False, True])
+async def test_pending_decision_accepts_integer_and_float_creation_times(env, created, approve):
+    await hold(env)
+    env.runner.approval.pendings["t1"].created = 1234.0
+    response = await env.http.post("/api/pending", headers=WRITE,
+                                   json={"task_id": "t1", "created": created, "approve": approve})
+    assert response.status_code == 200 and not env.runner.pending_approvals
+
+
+@pytest.mark.parametrize("created", [True, False, "1234", None])
+async def test_pending_decision_still_rejects_non_numeric_creation_times(env, created):
+    await hold(env)
+    response = await env.http.post("/api/pending", headers=WRITE,
+                                   json={"task_id": "t1", "created": created, "approve": True})
+    assert response.status_code == 422 and env.runner.pending_approvals

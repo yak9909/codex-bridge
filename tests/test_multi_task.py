@@ -101,7 +101,7 @@ async def test_host_and_lender_run_two_tasks_and_refuse_above_capacity(linked):
     row = e.mgr.lenders()[0]
     assert row["active_task_ids"] == [one, two] and row["current_task_id"] == one and row["max_parallel"] == 2
     assert e.runner.app.next_thread == 2
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await e.mgr.start("three", lender="alice")
     await begin(e.runner, "over-capacity")
     assert e.sent[-1]["state"] == "rejected_by_lender" and "上限" in e.sent[-1]["report"]
@@ -223,7 +223,7 @@ async def test_older_lender_still_has_capacity_one(tmp_path, version, capabiliti
     await mgr.on_agent_message(link, {"type": "hello", "protocol": version, "capabilities": capabilities})
     await mgr.start("one")
     assert mgr.lenders()[0]["max_parallel"] == 1
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("two")
 
 

@@ -107,12 +107,12 @@ class PreApproval:
             if p is None or (created is not None and created != p.created):
                 return False
             self.pendings.pop(task_id)
-            if approve:
-                self.runner._record(p.task_id, "lender_approved", {"kind": p.kind})
-                await self._approve(p)
-            else:
-                await self._reject(p, _why(REFUSED, reason))
-            return True
+        if approve:
+            self.runner._record(p.task_id, "lender_approved", {"kind": p.kind})
+            await self._approve(p)
+        else:
+            await self._reject(p, _why(REFUSED, reason))
+        return True
 
     async def expire(self) -> None:
         async with self.runner._lock:
@@ -143,7 +143,7 @@ class PreApproval:
         r = self.runner
         if p.kind == START:
             await r._state("rejected_by_lender", report=report, task_id=p.task_id)
-            await r._release_slot()
+            await r._release_slot(p.task_id)
         elif (cur := r.currents.get(p.task_id)) is not None:
             await r._event("status", cur=cur, text=f"追加の指示は渡しませんでした（{report}）")
             await r._state("running", cur=cur)

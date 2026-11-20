@@ -332,3 +332,73 @@ def test_failed_migration_leaves_original_untouched(tmp_path, monkeypatch):
         ConnectionStore(tmp_path)
     assert (tmp_path / "invite.bin").read_bytes() == original
     assert not (tmp_path / "connections").exists()
+
+
+async def test_prepare_does_not_restart_an_idle_appserver_for_deferred_settings(multi):
+    runtime = multi.runtime
+    runner = runtime.runners[multi.a.id]
+    await runner.prepare()
+    app = runner.app
+    process = app.proc
+    old_features = dict(app.features)
+    runner.settings["features"]["goals"] = not old_features["goals"]
+    await runner.prepare()
+    assert app.proc is process and app.features == old_features
+    await runner.handle(start("needs-new-features"))
+    assert app.proc is not process and app.features == runner.settings["features"]
+
+
+async def test_data_move_blocks_new_admission_without_holding_the_pc_lock(multi, monkeypatch):
+    from codex_bridge.agent import main
+
+    runtime = multi.runtime
+    entered, resume = asyncio.Event(), asyncio.Event()
+    original = runtime._stop_connection
+
+    async def stop(id):
+        entered.set()
+        await resume.wait()
+        await original(id)
+
+    monkeypatch.setattr(runtime, "_stop_connection", stop)
+    monkeypatch.setattr(main, "move_data_root", lambda *a, **k: [])
+    moving = asyncio.create_task(runtime.move_data(multi.home / "new"))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+
+        async def inspect():
+            async with runtime.slot.lock:
+                assert runtime.slot.moving and runtime.slot.count == 0
+
+        await asyncio.wait_for(inspect(), 0.5)
+        # Admission is blocked by the moving flag, not by a long-held PC lock.
+        r = runtime.runners[multi.b.id]
+        refusal = await asyncio.wait_for(r._reserve_slot(start("during-move")), 0.5)
+        assert "変更中" in refusal and not r._reservations
+    finally:
+        resume.set()
+        await asyncio.wait_for(moving, 2)
+
+
+async def test_prepare_does_not_restart_a_task_waiting_for_thread_start(multi, monkeypatch):
+    r = multi.runtime.runners[multi.a.id]
+    entered, resume = asyncio.Event(), asyncio.Event()
+    original = r.app.thread_start
+
+    async def thread_start(*args, **kwargs):
+        entered.set()
+        await resume.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(r.app, "thread_start", thread_start)
+    starting = asyncio.create_task(r.handle(start("starting")))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        process, old_features = r.app.proc, dict(r.app.features)
+        r.settings["features"]["goals"] = not old_features["goals"]
+        await r.prepare()
+        assert r.app.proc is process and r.app.features == old_features
+        assert r.currents["starting"].thread_id is None
+    finally:
+        resume.set()
+        await asyncio.wait_for(asyncio.gather(starting, return_exceptions=True), 10)

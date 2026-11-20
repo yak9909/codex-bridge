@@ -305,7 +305,7 @@ async def test_no_agent_is_clear_error(mgr):
 
 async def test_one_task_at_a_time(mgr, agent):
     await mgr.start("a")
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("b")
 
 
@@ -715,11 +715,11 @@ async def test_a_new_task_is_refused_while_the_lender_has_one_awaiting_approval(
     await agent.finish(tid2)  # a finished one with a session to continue
     tid = await mgr.start("a")
     await agent.push("task_state", task_id=tid, state="awaiting_lender")
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("b")  # to that lender by name
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("b", lender="friend")
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("b", continue_task_id=tid2)
     assert len([m for m in agent.sent if m["type"] == "task_start"]) == 2  # the two that were allowed
 
@@ -815,7 +815,7 @@ async def test_hello_without_current_task_id_leaves_a_queued_task_alone(mgr, age
     assert mgr.status(tid)["state"] == "queued" and mgr.current_task_id() == tid
     assert mgr.lenders()[0]["current_task_id"] == tid
     assert mgr.agent_info()["capabilities"] == {"resumable": False, "pre_approval": True, "model_select": False, "max_parallel": 1}  # it did take effect
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("b")
     await agent.push("task_state", task_id=tid, state="running", thread_id="th1")
     assert mgr.status(tid)["state"] == "running"

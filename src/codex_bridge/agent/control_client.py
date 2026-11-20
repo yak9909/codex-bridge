@@ -101,7 +101,10 @@ class ControlClient:
                         except ValueError:
                             continue
                         try:
-                            await self.runner.handle(m)
+                            if m["type"] in {"task_start", "task_followup", "session_read", "session_delete"}:
+                                self.runner.handle_later(m)
+                            else:
+                                await self.runner.handle(m)
                         except Exception as e:  # keep the connection loop alive whatever happens
                             self.on_status(f"処理中にエラー: {type(e).__name__}")
             except InvalidStatus as e:

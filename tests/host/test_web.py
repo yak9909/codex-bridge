@@ -447,16 +447,20 @@ def test_folder_write_probe_returns_quickly_when_acl_denies_writing(tmp_path, de
         # A child process lets the timeout kill the old retry loop without leaving
         # a spinning thread behind, even if an assertion fails before ACL cleanup.
         result = subprocess.run(
-            [sys.executable, "-c", "from pathlib import Path; import sys; "
+            [sys.executable, "-c", "from pathlib import Path; import json, sys, time; "
              "from codex_bridge.host.share import folder_is_writable; "
-             "print(folder_is_writable(Path(sys.argv[1])))", str(folder)],
-            capture_output=True, text=True, check=True, timeout=3)
+             "started = time.monotonic(); writable = folder_is_writable(Path(sys.argv[1])); "
+             "print(json.dumps([writable, time.monotonic() - started]))", str(folder)],
+            capture_output=True, text=True, check=True, timeout=20)
+        # Time the probe itself, independently of interpreter/import startup under Windows load.
+        writable, elapsed = json.loads(result.stdout)
+        assert elapsed < 3, f"folder write probe took {elapsed:.2f}s"
         if denied_rights == "W":
-            assert result.stdout.strip() == "False"
+            assert writable is False
         else:
             # A newly opened DELETE_ON_CLOSE handle can clean itself up even if
             # ordinary deletion is denied. Either result must leave no probe.
-            assert result.stdout.strip() in ("True", "False")
+            assert isinstance(writable, bool)
     finally:
         restored = subprocess.run([icacls, str(folder), "/remove:d", f"*{sid}"],
                                   capture_output=True, text=True, errors="replace", timeout=10)
@@ -853,7 +857,7 @@ async def test_send_task_to_a_chosen_lender(admin, host):
     assert sent["alice"][-1]["type"] == "task_start" and sent["alice"][-1]["task_id"] == r.json()["task_id"]
     assert all(m["type"] != "task_start" for m in sent["bob"])
     r = await admin.post("/admin/api/tasks", json={"prompt": "two", "lender": "alice"}, headers=H)
-    assert r.status_code == 409 and "作業中" in r.json()["detail"]
+    assert r.status_code == 409 and "上限" in r.json()["detail"]
     r = await admin.post("/admin/api/tasks", json={"prompt": "two", "lender": "carol"}, headers=H)
     assert r.status_code == 409 and "接続されていません" in r.json()["detail"]
     assert (await admin.post("/admin/api/tasks", json={"prompt": "two", "lender": 5}, headers=H)).status_code == 400
@@ -972,3 +976,16 @@ async def test_shared_allowlist_page_has_no_global_lender_settings(admin):
     assert 'data-act="allow-confirm"' in allow
     for setting in ("exec-mode", "delete-approval", "log-files", "log-result", "threshold"):
         assert f'data-act="{setting}"' not in allow
+
+
+async def test_admin_overview_lists_every_active_task_and_keeps_first(host, admin):
+    host.tokens.issue("friend")
+
+    async def send(message):
+        pass
+
+    link = host.mgr.attach("friend", send)
+    await host.mgr.on_agent_message(link, {"type": "hello", "protocol": 5, "capabilities": {"max_parallel": 3}})
+    ids = [await host.mgr.start("first"), await host.mgr.start("second")]
+    overview = (await admin.get("/admin/api/overview")).json()
+    assert overview["active_task_ids"] == ids and overview["current_task"] == ids[0]

@@ -23,7 +23,7 @@ ACTIVE_STATES = ("queued", "running", "agent_offline", "awaiting_lender")  # awa
 NO_THRESHOLDS: dict = {}  # the borrower sets no limit of its own: only the lender's `limits` count
 REQUEST_TIMEOUT = 30.0
 NOT_CONNECTED = "貸す人が接続されていません。貸す人の PC で codex-bridge が起動し、「貸す」タブに招待コードを入れているか確かめてください。"
-BUSY = "作業中の依頼があります: {}（終わるのを待つか、取り消してください）"
+BUSY = "同時に受ける依頼の上限（{} 件）に達しています"
 QUOTA = "使用量の上限のため受け付けません。再開可能: {}"
 # A continuation can only go to the lender whose Codex holds the session (design §3.3).
 RETRY_FRESH = "続きとしては送れないので、前回の報告を添えて新しく依頼してください。"
@@ -487,7 +487,8 @@ class TaskManager:
         matched = [r for r in active if thread_id and r.thread_id == thread_id]
         if len(matched) == 1:
             return matched[0].task_id
-        return active[0].task_id if len(active) == 1 else None
+        return (active[0].task_id if len(active) == 1 and
+                (not thread_id or not active[0].thread_id) else None)
 
     def is_active(self, task_id: str) -> bool:
         rec = self.tasks.get(task_id)
@@ -500,10 +501,8 @@ class TaskManager:
         return rec
 
     def _require_free(self, lender: Lender, now: float, advice: str = "") -> None:
-        if lender.busy_elsewhere:
-            raise ToolError(BUSY.format("ほかの依頼主の作業中") + advice)
-        if len(lender.active_task_ids) >= lender.max_parallel:
-            raise ToolError(BUSY.format("、".join(lender.active_task_ids)) + advice)
+        if lender.busy_elsewhere or len(lender.active_task_ids) >= lender.max_parallel:
+            raise ToolError(BUSY.format(lender.max_parallel) + advice)
         blocked = blocked_until(lender, NO_THRESHOLDS, now)
         if blocked:
             raise ToolError(QUOTA.format(iso_local(blocked)))
@@ -522,9 +521,9 @@ class TaskManager:
                  and (t := blocked_until(l, NO_THRESHOLDS, now))]
         if waits:
             raise ToolError(QUOTA.format(iso_local(min(waits))))
-        busy = [l.current_task_id or "ほかの依頼主の作業中" for l in ready if l.current_task_id or l.busy_elsewhere]
+        busy = [l for l in ready if len(l.active_task_ids) >= l.max_parallel or l.busy_elsewhere]
         if busy:
-            raise ToolError(BUSY.format(", ".join(busy)))
+            raise ToolError("、".join(f"「{l.name}」: {BUSY.format(l.max_parallel)}" for l in busy))
         raise ToolError(NOT_READY.format("、".join(l.name for l in online)))
 
     def _continue_target(self, prev: TaskRecord, lender: str | None, now: float, *,

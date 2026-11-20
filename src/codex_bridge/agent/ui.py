@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, StrictBool, StrictFloat, StrictStr
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictFloat, StrictInt, StrictStr
 
 from ..common.protocol import EFFORT_ORDER
 from .appserver import AppServerError
@@ -25,7 +25,7 @@ class Decision(BaseModel):
     task_id: StrictStr
     approve: StrictBool
     reason: StrictStr = ""
-    created: StrictFloat
+    created: StrictInt | StrictFloat
     connection_id: StrictStr | None = None
 
 

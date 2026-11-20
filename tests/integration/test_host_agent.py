@@ -347,7 +347,7 @@ async def test_a_pending_approval_is_not_lost_when_the_connection_drops_and_come
     await asyncio.sleep(0.2)  # whatever the agent says again after hello has arrived
     assert mgr.status(tid)["state"] == "awaiting_lender"  # not failed, and not lost
     assert mgr.current_task_id() == tid
-    with pytest.raises(Exception, match="作業中"):
+    with pytest.raises(Exception, match="上限"):
         await mgr.start("y")  # the lender still counts as working
     await runner.decide_pending(True)
     await until(lambda: mgr.status(tid)["state"] == "completed")
@@ -443,3 +443,27 @@ async def test_two_threads_run_on_one_appserver_over_the_real_websocket(multiple
         "threadId": "th1", "turn": {"id": "u1", "status": "interrupted"}}})
     await until(lambda: host.tasks[ids[0]].state == "cancelled")
     assert not r.active_task_ids()
+
+
+async def test_two_pending_requests_are_both_resent_after_reconnect(multiple):
+    runtime, connections, (host, _), (messages, _) = multiple
+    id = connections[0].id
+    runner = runtime.runners[id]
+    await runtime.apply_shared(runtime.settings.update({"max_parallel": 2}))
+    await runtime.update_settings(id, {"pre_approval": {"new_task": True}})
+    await until(lambda: host.lenders()[0]["max_parallel"] == 2 and host.lenders()[0]["capabilities"]["pre_approval"])
+    ids = [await host.start("first"), await host.start("second")]
+    await until(lambda: len(runner.pending_approvals) == 2 and
+                all(host.tasks[t].state == "awaiting_lender" for t in ids))
+    previous = {t: sum(m.get("state") == "awaiting_lender" and m.get("task_id") == t for m in messages) for t in ids}
+    since = host.agent_info()["since"]
+    await runtime.clients[id].drop()
+    await until(lambda: host.agent_info()["ready"] and host.agent_info()["since"] != since)
+    await until(lambda: all(sum(m.get("state") == "awaiting_lender" and m.get("task_id") == t for m in messages)
+                           > previous[t] for t in ids))
+    assert host.active_task_ids("friend") == ids
+    assert {p["task_id"] for p in runner.pending_approvals} == set(ids)
+    for task in ids:
+        assert await runner.decide_pending(False, task_id=task)
+    await until(lambda: all(host.tasks[t].state == "rejected_by_lender" for t in ids))
+    assert runtime.slot.count == 0

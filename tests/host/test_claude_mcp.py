@@ -362,7 +362,7 @@ async def test_send_task_goes_to_the_named_lender(env):
     r = text_of(await call(local, "send_task", {"prompt": "one", "lender": "alice"}))  # bob has more room
     assert r["lender"] == "alice" and starts(sent["alice"]) == [r["task_id"]] and not starts(sent["bob"])
     res = await call(local, "send_task", {"prompt": "two", "lender": "alice"})
-    assert res["isError"] and "作業中" in res["content"][0]["text"]
+    assert res["isError"] and "上限" in res["content"][0]["text"]
     res = await call(local, "send_task", {"prompt": "two", "lender": "carol"})
     assert res["isError"] and "接続されていません" in res["content"][0]["text"]
     assert not starts(sent["bob"]) and len(mgr.tasks) == 1
@@ -592,3 +592,11 @@ async def test_get_policy_lists_lender_modes(env, share):
     assert text_of(await call(local, "get_overview", {}))["lender_exec_modes"] == modes
     text_of(await call(local, "set_folder_level", {"path": "docs", "level": "write"}))
     assert text_of(await call(local, "get_policy", {}))["lender_exec_modes"] == modes
+
+
+async def test_overview_lists_every_active_task_and_keeps_first_for_compatibility(env):
+    mgr, local, _ = env
+    await join(mgr, "friend", protocol=5, capabilities={"max_parallel": 3})
+    ids = [await mgr.start("first"), await mgr.start("second")]
+    overview = text_of(await call(local, "get_overview", {}))
+    assert overview["active_task_ids"] == ids and overview["current_task"] == ids[0]

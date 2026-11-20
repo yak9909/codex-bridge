@@ -46,6 +46,8 @@ class TaskSlot:
         self.max_parallel = 3
         self.runners = []
         self.last_usage = None
+        self.moving = False
+        self.blocked_runners = set()
 
     @property
     def count(self) -> int:
@@ -87,6 +89,7 @@ class Current:
     tokens_out: int = 0
     tokens_seen: bool = False
     guard: QuotaGuard | None = None
+    prepared: bool = False  # startup RPCs have begun; another prepare must not restart this app-server
 
 
 def _summ(v, n=300):
@@ -159,7 +162,11 @@ class AgentRunner:
         self._tasks: list[asyncio.Task] = []
         self.slot = slot
         self.connection_id, self.host_name, self.prepare = connection_id, host_name, prepare
-        self._lock = slot.lock if slot else asyncio.Lock()
+        self._lock = asyncio.Lock()
+        self._prepare_lock = asyncio.Lock()
+        self._reservations: dict[str, str | None] = {}
+        self._incoming: set[asyncio.Task] = set()
+        self._closing = False
         if slot:
             slot.runners.append(self)
 
@@ -175,9 +182,11 @@ class AgentRunner:
     def cur(self, cur: Current | None) -> None:
         self.currents = {cur.task_id: cur} if cur else {}
 
-    def thread_active(self, thread_id: str) -> bool:
-        return any(c.thread_id == thread_id for c in self.currents.values()) or any(
-            p.kind == START and p.msg.get("continue_thread_id") == thread_id for p in self.approval.pendings.values())
+    def thread_active(self, thread_id: str, except_task: str | None = None) -> bool:
+        return any(c.task_id != except_task and c.thread_id == thread_id for c in self.currents.values()) or any(
+            p.task_id != except_task and p.kind == START and p.msg.get("continue_thread_id") == thread_id
+            for p in self.approval.pendings.values()) or any(
+            task != except_task and thread == thread_id for task, thread in self._reservations.items())
 
     async def send_busy_status(self) -> None:
         if self.slot:
@@ -186,12 +195,35 @@ class AgentRunner:
     async def send_models(self) -> None:
         await self._safe_send(protocol.msg("lender_models", **models_fields(self.settings, self.catalog)))
 
-    async def _release_slot(self) -> None:
+    async def _release_slot(self, task_id: str | None = None) -> None:
         if self.slot:
+            async with self.slot.lock:
+                if task_id is not None:
+                    self._reservations.pop(task_id, None)
             await self.slot.announce()
+        elif task_id is not None:
+            self._reservations.pop(task_id, None)
+
+    async def _reserve_slot(self, m: dict) -> str | None:
+        def reserve():
+            if self._closing:
+                return "アプリの終了処理中のため、今は依頼を受け付けません。"
+            if self.slot and (self.slot.moving or self in self.slot.blocked_runners):
+                return "接続先や保存場所を変更中のため、今は依頼を受け付けません。"
+            count = self.slot.count if self.slot else len(self.active_task_ids())
+            maximum = self.slot.max_parallel if self.slot else self.settings["max_parallel"]
+            if count >= maximum:
+                return f"同時に受ける依頼の上限（{maximum} 件）に達しています。"
+            self._reservations[m["task_id"]] = m.get("continue_thread_id")
+            return None
+        if self.slot:
+            async with self.slot.lock:
+                return reserve()
+        return reserve()
 
     # ---- lifecycle -----------------------------------------------------
     async def start(self) -> None:
+        self._closing = False
         self.sessions.purge_ephemeral()
         self._prune_worklog()
         self._tasks = [asyncio.create_task(self._pump()), asyncio.create_task(self._usage_loop()),
@@ -217,23 +249,28 @@ class AgentRunner:
         await self.approval.resend()
 
     def active_task_ids(self) -> list[str]:
-        return list(dict.fromkeys([*self.currents, *self.approval.pendings]))
+        return list(dict.fromkeys([*self.currents, *self.approval.pendings, *self._reservations]))
 
     def active_task_id(self) -> str | None:
         return next(iter(self.active_task_ids()), None)
 
     async def shutdown(self) -> None:
         """Record the interruption while the host is still connected, before event intake stops."""
+        self._closing = True
         await self.approval.shutdown()
         async with self._lock:
             for cur in list(self.currents.values()):
                 await self._state("failed", report=INTERRUPTED, cur=cur)
                 await self._end(cur=cur, app_alive=False)
+            for task_id in list(self._reservations):
+                await self._state("failed", report=INTERRUPTED, task_id=task_id)
+                await self._release_slot(task_id)
 
     async def stop(self) -> None:
-        for t in self._tasks:
+        tasks = [*self._tasks, *self._incoming]
+        for t in tasks:
             t.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def apply_settings(self, settings: dict) -> None:
         """Settings the lender changed that work at once (what needs a Codex restart: SettingsApplier)."""
@@ -248,7 +285,8 @@ class AgentRunner:
     async def exclusive(self):
         """No task can start inside; yields whether the agent is idle (to restart Codex or move the data)."""
         async with self._lock:
-            yield not self.active_task_ids()
+            yield (not self.active_task_ids() and not self._closing and
+                   not (self.slot and (self.slot.moving or self in self.slot.blocked_runners)))
 
     async def _end(self, app_alive: bool = True, *, cur: Current | None = None) -> None:
         """End only this task; disposable threads and pending follow-ups belong to it alone."""
@@ -266,7 +304,7 @@ class AgentRunner:
                     await asyncio.wait_for(self.app.thread_delete(cur.thread_id), DISCARD_TIMEOUT)
                 except Exception:
                     pass  # an ephemeral thread lives in memory only: nothing on disk to clean up
-        await self._release_slot()
+        await self._release_slot(cur.task_id if cur else None)
 
     # ---- sending -------------------------------------------------------
     async def _safe_send(self, m: dict) -> None:
@@ -320,6 +358,12 @@ class AgentRunner:
         await self._safe_send(protocol.msg("reply", req_id=req_id, ok=ok, data=data, error=error))
 
     # ---- host messages -------------------------------------------------
+    def handle_later(self, m: dict) -> None:
+        """Keep control-channel intake responsive while an app-server request is pending."""
+        task = asyncio.create_task(self.handle(m))
+        self._incoming.add(task)
+        task.add_done_callback(self._incoming.discard)
+
     async def handle(self, m: dict) -> None:
         t = m["type"]
         if t == "ack":
@@ -364,26 +408,24 @@ class AgentRunner:
     async def _task_start(self, m: dict) -> None:
         async with self._lock:
             if m["task_id"] in self.active_task_ids():
-                return  # A duplicate start must not end the original task.
+                return
             cont = m.get("continue_thread_id")
             if cont and self.thread_active(cont):
                 await self._state("rejected_by_lender", report="この会話は作業中です。終わるのを待ってください。",
                                   task_id=m["task_id"])
                 return
-            count = self.slot.count if self.slot else len(self.active_task_ids())
-            maximum = self.slot.max_parallel if self.slot else self.settings["max_parallel"]
-            if count >= maximum:
-                await self._state("rejected_by_lender", report=f"同時に受ける依頼の上限（{maximum} 件）に達しています。",
-                                  task_id=m["task_id"])
-                return
-            if self.guard.blocked_until is not None:
+            if self.guard.enabled and self.guard.blocked_until is not None:
                 await self._state("suspended_quota", resume_at=self.guard.blocked_until, task_id=m["task_id"])
+                return
+            refusal = await self._reserve_slot(m)
+            if refusal:
+                await self._state("rejected_by_lender", report=refusal, task_id=m["task_id"])
                 return
             if self.approval.applies(START):
                 await self.approval.hold(m, START)
                 await self._release_slot()
                 return
-            await self._start_locked(m)
+        await self._start_locked(m)
 
     def _new_guard(self) -> QuotaGuard:
         if not any(c.guard is self.guard for c in self.currents.values()):
@@ -395,15 +437,22 @@ class AgentRunner:
         return guard
 
     async def _start_locked(self, m: dict, shown: bool = False) -> None:
-        """The task was admitted already; approval does not recheck a subsequently lowered capacity."""
-        if m.get("continue_thread_id") and self.thread_active(m["continue_thread_id"]):
-            await self._state("rejected_by_lender", report="この会話は作業中です。終わるのを待ってください。",
-                              task_id=m["task_id"])
-            await self._release_slot()
-            return
-        guard = self._new_guard()
-        cur = Current(task_id=m["task_id"], ephemeral=bool(self.settings["disposable"]), guard=guard)
-        self.currents[cur.task_id] = cur
+        """Create local state under the runner lock; never hold it during startup RPCs."""
+        async with self._lock:
+            if m["task_id"] not in self._reservations:
+                return  # Cancelled while the approved request was being handed over.
+            if self._closing:
+                await self._state("failed", report=INTERRUPTED, task_id=m["task_id"])
+                await self._release_slot(m["task_id"])
+                return
+            if m.get("continue_thread_id") and self.thread_active(m["continue_thread_id"], except_task=m["task_id"]):
+                await self._state("rejected_by_lender", report="この会話は作業中です。終わるのを待ってください。",
+                                  task_id=m["task_id"])
+                await self._release_slot(m["task_id"])
+                return
+            guard = self._new_guard()
+            cur = Current(task_id=m["task_id"], ephemeral=bool(self.settings["disposable"]), guard=guard)
+            self.currents[cur.task_id] = cur
         await self._release_slot()
         self._prune_worklog()
         if not shown:
@@ -411,7 +460,10 @@ class AgentRunner:
         try:
             if self.prepare:
                 await self.prepare()
-            if guard.blocked_until is not None:
+            cur.prepared = True
+            if self.currents.get(cur.task_id) is not cur:
+                return
+            if guard.enabled and guard.blocked_until is not None:
                 await self._state("suspended_quota", resume_at=guard.blocked_until, cur=cur)
                 await self._end(cur=cur)
                 return
@@ -427,24 +479,43 @@ class AgentRunner:
             else:
                 info = await self.app.thread_start(self._instructions(), cur.ephemeral, model=model)
             cur.thread_id = info["id"]
+            if self.currents.get(cur.task_id) is not cur:
+                if cur.ephemeral or not cont:
+                    with contextlib.suppress(Exception):
+                        await self.app.thread_delete(cur.thread_id)
+                return
             cur.model = info["model"] or model
             cur.effort = effort
             self.sessions.add(cur.thread_id, cur.task_id, cur.ephemeral)
             await self._state("running", cur=cur)
             await self._event("started", cur=cur)
             await self._event("model", cur=cur, model=cur.model, effort=cur.effort)
-            cur.turn_id = await self.app.turn_start(cur.thread_id, m["prompt"], model=cur.model, effort=cur.effort)
-        except ModelRefused as e:
-            await self._state("rejected_by_lender", report=str(e), cur=cur)
-            await self._end(cur=cur)
-            return
-        except Exception as e:  # app-server gone, pipe broken, timeout...: never keep a stale task
-            await self._state("failed", cur=cur, report=f"開始できませんでした: {type(e).__name__}: {e}")
-            await self._end(cur=cur)
+            turn_id = await self.app.turn_start(cur.thread_id, m["prompt"], model=cur.model, effort=cur.effort)
+            if self.currents.get(cur.task_id) is cur:
+                cur.turn_id = turn_id
+            elif cur.cancelling:
+                with contextlib.suppress(Exception):
+                    await self.app.turn_interrupt(cur.thread_id, turn_id)
+                if cur.ephemeral:
+                    with contextlib.suppress(Exception):
+                        await self.app.thread_delete(cur.thread_id)
+        except asyncio.CancelledError:
+            if self.currents.get(cur.task_id) is cur:
+                await self._state("failed", report=INTERRUPTED, cur=cur)
+                await self._end(cur=cur, app_alive=False)
+            raise
+        except Exception as e:
+            if self.currents.get(cur.task_id) is cur:
+                state = "rejected_by_lender" if isinstance(e, ModelRefused) else "failed"
+                report = str(e) if isinstance(e, ModelRefused) else f"開始できませんでした: {type(e).__name__}: {e}"
+                await self._state(state, report=report, cur=cur)
+                await self._end(cur=cur)
+        finally:
+            if self.currents.get(cur.task_id) is not cur:
+                await self._release_slot(cur.task_id)
 
     async def _followup(self, m: dict) -> None:
-        async with self._lock:
-            await self._followup_locked(m)
+        await self._followup_locked(m)
 
     async def _followup_locked(self, m: dict) -> None:
         if self.approval.holds(m["task_id"]):  # what the lender is deciding on must not change under their hands
@@ -486,10 +557,13 @@ class AgentRunner:
         held = self.approval.drop(m["task_id"])
         if held is not None and held.kind == START:  # it never began: nothing to interrupt
             await self._state("cancelled", report=CANCELLED, task_id=held.task_id)
-            await self._release_slot()
+            await self._release_slot(held.task_id)
             return
         cur = self.currents.get(m["task_id"])
         if cur is None:
+            if m["task_id"] in self._reservations:
+                await self._state("cancelled", report=CANCELLED, task_id=m["task_id"])
+                await self._release_slot(m["task_id"])
             return
         cur.cancelling = True
         if cur.turn_id and cur.thread_id:
@@ -640,7 +714,16 @@ class AgentRunner:
                                                data={"text": cur.progress}))
 
     def _guard_for(self, cur: Current) -> QuotaGuard:
-        return cur.guard or self.guard
+        guard = cur.guard or self.guard
+        guard.enabled = self.guard.enabled
+        if not guard.enabled:
+            cur.suspend_at = None
+        return guard
+
+    def set_usage_enabled(self, enabled: bool) -> None:
+        self.guard.enabled = enabled
+        for cur in self.currents.values():
+            self._guard_for(cur)
 
     async def _apply(self, actions, *, cur: Current | None = None) -> None:
         cur = cur or self.cur
@@ -682,6 +765,7 @@ class AgentRunner:
                 if pending.kind == START and self.approval.pendings.get(pending.task_id) is pending:
                     self.approval.drop(pending.task_id)
                     await self._state("suspended_quota", task_id=pending.task_id, resume_at=self.guard.blocked_until)
+                    await self._release_slot(pending.task_id)
             await self._release_slot()
 
     # ---- periodic work -------------------------------------------------

@@ -59,7 +59,7 @@ def admin_router(host, page_url: str | None = None) -> APIRouter:
             "paused": p.paused, "exec_mode": p.exec_mode, "policy_error": host.policy.last_error,
             "lender_exec_modes": p.lender_exec_modes,
             "policy_problem": host.policy.problems(),
-            "agent": host.mgr.agent_info(), "current_task": host.mgr.current_task_id(),
+            "agent": host.mgr.agent_info(), "current_task": host.mgr.current_task_id(), "active_task_ids": host.mgr.active_task_ids(),
             "pending_approvals": len(host.approvals.pending()), "usage": host.mgr.usage(),
         }
 
