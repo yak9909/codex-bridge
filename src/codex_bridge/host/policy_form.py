@@ -187,6 +187,13 @@ def add_folder(store: PolicyStore, path: str, level: str) -> dict:
     return set_folder_level(store, target, level)
 
 
+def main_is_within_folder(main: str | None, folder: Path) -> bool:
+    if not main:
+        return False
+    registered = Path(_key(main))
+    return registered.is_relative_to(Path(_key(str(folder)))) or Path(main).resolve().is_relative_to(folder.resolve())
+
+
 def remove_folder(store: PolicyStore, path: str) -> dict:
     target = _abs(path)
     form = _form(store)
@@ -194,7 +201,7 @@ def remove_folder(store: PolicyStore, path: str) -> dict:
     form["folders"] = [f for f in form["folders"] if _key(f["path"]) != _key(target)]
     if len(form["folders"]) == before:
         raise ValueError(f"登録されていないフォルダです: {target}")
-    if form["main"] and _key(form["main"]) == _key(target):
+    if main_is_within_folder(form["main"], Path(target)):
         form["main"] = next((f["path"] for f in form["folders"] if f["level"] in ("read", "write")), None)
     save_form(store, form)
     return form

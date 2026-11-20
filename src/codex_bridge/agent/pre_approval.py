@@ -134,10 +134,7 @@ class PreApproval:
         if p.kind == START:
             await r._start_locked(p.msg, shown=True)
             return
-        cur = r.currents.get(p.task_id)
         await r._deliver_followup(p.msg, shown=True)
-        if cur is not None and r.currents.get(p.task_id) is cur:  # still working (not failed on the way): the borrower sees it again
-            await r._state("running", cur=cur)
 
     async def _reject(self, p: Pending, report: str) -> None:
         r = self.runner

@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 
 from codex_bridge.host.app import build_host
@@ -63,6 +65,50 @@ def test_main_removal_requires_every_active_task_to_end(host, running_task, tmp_
     remove_shared_folder(host, original.as_posix())
     assert host.paths.root == original / "out"
     assert original.as_posix() not in {folder["path"] for folder in host.paths.roots()}
+
+
+
+def test_cannot_remove_main_registered_through_junction_during_work(host, running_task, tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    junction = tmp_path / "junction"
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+                   check=True, capture_output=True)
+    running_task.state = "completed"
+    add_shared_folder(host, junction.as_posix(), "write")
+    set_main_shared_folder(host, junction.as_posix())
+    assert host.paths.root == target.resolve()
+    folders = host.paths.roots()
+
+    running_task.state = "running"
+    with pytest.raises(ShareBusy, match="作業中はメインのフォルダを外せません"):
+        remove_shared_folder(host, junction.as_posix())
+    assert host.paths.root == target.resolve()
+    assert host.paths.roots() == folders
+
+
+def test_removing_parent_of_main_requires_idle_and_promotes_next_folder(host, running_task, tmp_path):
+    original = host.paths.root
+    outer = tmp_path / "outer"
+    nested = outer / "nested"
+    nested.mkdir(parents=True)
+    running_task.state = "completed"
+    add_shared_folder(host, outer.as_posix(), "write")
+    set_main_shared_folder(host, nested.as_posix())
+    assert host.paths.root == nested.resolve()
+    folders = host.paths.roots()
+
+    running_task.state = "running"
+    with pytest.raises(ShareBusy) as error:
+        remove_shared_folder(host, outer.as_posix())
+    assert str(error.value) == "作業中はメインのフォルダを外せません。終わってから外してください"
+    assert host.paths.root == nested.resolve()
+    assert host.paths.roots() == folders
+
+    running_task.state = "completed"
+    remove_shared_folder(host, outer.as_posix())
+    assert host.paths.root == host.config.share_root == original
+    assert host.paths.level_of(nested) is None
 
 
 @pytest.mark.parametrize("switch", [set_main_shared_folder, change_share_root])

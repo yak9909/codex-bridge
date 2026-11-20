@@ -194,6 +194,61 @@ async def test_queued_followup_is_reported_when_cancel_ends_startup(tmp_path, mo
         assert not any(c[0] == "turn/steer" for c in r.app.calls)
 
 
+
+@pytest.mark.parametrize("approval_required", [False, True])
+@pytest.mark.parametrize("window", ["final-send", "ephemeral-delete", "reservation-rejection"])
+async def test_followup_during_task_end_is_reported_once(tmp_path, window, approval_required):
+    r, sent = runner(tmp_path)
+    r.settings["pre_approval"]["followup"] = approval_required
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def pause_end(*args):
+        entered.set()
+        await release.wait()
+
+    async def fail_start(*args, **kwargs):
+        raise AppServerError("開始失敗のテスト")
+
+    async def send(message):
+        sent.append(message)
+        if message.get("state") in {"failed", "rejected_by_lender"}:
+            await pause_end()
+
+    if window == "reservation-rejection":
+        r.settings["pre_approval"]["new_task"] = True
+        await r.handle(START)
+        r.send = send
+        ending = r.decide_pending(False, task_id="task")
+    else:
+        if window == "ephemeral-delete":
+            r.settings["disposable"] = True
+            r.app.turn_start = fail_start
+            r.app.thread_delete = pause_end
+        else:
+            r.app.thread_start = fail_start
+            r.send = send
+        ending = r.handle(START)
+
+    task = asyncio.create_task(ending)
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        assert ("task" in r.currents) == (window == "final-send")
+        assert "task" in r._reservations
+        await asyncio.wait_for(r.receive(MORE), 2)
+        assert not r._queued_followups
+        assert not r.approval.pendings
+        assert [m["data"]["text"] for m in sent if m.get("kind") == "status"] == [FOLLOWUP_ENDED]
+    finally:
+        release.set()
+        await asyncio.wait_for(task, 2)
+
+    assert not r.active_task_ids()
+    assert not r._ending_tasks
+    assert not r._queued_followups
+    assert not r.approval.pendings
+    assert [m["data"]["text"] for m in sent if m.get("kind") == "status"] == [FOLLOWUP_ENDED]
+
+
 async def test_followups_stay_ordered_while_steer_waits_and_cancel_is_still_received(tmp_path, monkeypatch):
     r, _ = runner(tmp_path)
     r.app = GatedApp("steer")

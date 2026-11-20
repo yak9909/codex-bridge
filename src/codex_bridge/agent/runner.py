@@ -178,6 +178,7 @@ class AgentRunner:
         self._reservations: dict[str, str | None] = {}
         self._incoming: set[asyncio.Task] = set()
         self._queued_followups: dict[str, list[str]] = {}
+        self._ending_tasks: set[str] = set()
         self._followup_workers: dict[str, asyncio.Task] = {}
         self._deleting_threads: set[str] = set()
         self._session_operations = 0
@@ -215,9 +216,15 @@ class AgentRunner:
             async with self.slot.lock:
                 if task_id is not None:
                     self._reservations.pop(task_id, None)
-            await self.slot.announce()
         elif task_id is not None:
             self._reservations.pop(task_id, None)
+        if task_id is not None:
+            waiting = self._take_waiting_followups(task_id)
+            self._ending_tasks.discard(task_id)
+            for _ in range(waiting):
+                await self._followup_notice(task_id, FOLLOWUP_ENDED)
+        if self.slot:
+            await self.slot.announce()
 
     async def _reserve_slot(self, m: dict) -> str | None:
         def reserve():
@@ -364,13 +371,10 @@ class AgentRunner:
         cur = cur or (self.currents.get(task_id) if task_id else self.cur)
         task_id = task_id or (cur.task_id if cur else None)
         if state in protocol.FINAL_STATES and task_id is not None:
-            waiting = len(self._queued_followups.pop(task_id, []))
-            if cur is not None:
-                waiting += len(cur.followups)
-                cur.followups.clear()
-            held = self.approval.drop(task_id)
-            if held is not None and held.kind == FOLLOWUP:
-                waiting += 1
+            if cur is not None or task_id in self._reservations:
+                # Keep refusing follow-ups until the reservation is released after cleanup.
+                self._ending_tasks.add(task_id)
+            waiting = self._take_waiting_followups(task_id, cur)
             for _ in range(waiting):
                 await self._followup_notice(task_id, FOLLOWUP_ENDED)
         self._record(task_id, "state", {"state": state, "report": report, "resume_at": resume_at})
@@ -556,6 +560,21 @@ class AgentRunner:
             if self.currents.get(cur.task_id) is not cur:
                 await self._release_slot(cur.task_id)
 
+    def _take_waiting_followups(self, task_id: str, cur: Current | None = None) -> int:
+        waiting = len(self._queued_followups.pop(task_id, []))
+        if cur is not None:
+            waiting += len(cur.followups)
+            cur.followups.clear()
+        held = self.approval.pendings.get(task_id)
+        if held is not None and held.kind == FOLLOWUP:
+            self.approval.drop(task_id)
+            waiting += 1
+        return waiting
+
+    def _accepts_followup(self, task_id: str, cur: Current | None) -> bool:
+        return task_id not in self._ending_tasks and (
+            not cur.cancelling if cur is not None else task_id in self._reservations)
+
     async def _followup_notice(self, task_id: str, text: str) -> None:
         data = {"text": text}
         self._record(task_id, "status", data)
@@ -564,11 +583,14 @@ class AgentRunner:
     async def _followup(self, m: dict, *, background: bool = False) -> None:
         async with self._lock:
             task_id = m["task_id"]
+            if task_id in self._ending_tasks:
+                await self._followup_notice(task_id, FOLLOWUP_ENDED)
+                return
             if self.approval.holds(task_id):
                 await self._followup_notice(task_id, WAITING)
                 return
             cur = self.currents.get(task_id)
-            if (cur is None and task_id not in self._reservations) or (cur and cur.cancelling):
+            if not self._accepts_followup(task_id, cur):
                 await self._followup_notice(task_id, FOLLOWUP_ENDED)
                 return
             if self.approval.applies(FOLLOWUP):
@@ -594,7 +616,8 @@ class AgentRunner:
         worker = self._followup_workers.get(cur.task_id)
         if worker is not None and not worker.done():
             return worker
-        if self._closing or cur.starting or cur.cancelling or not cur.thread_id or not cur.followups:
+        if (self._closing or cur.starting or not self._accepts_followup(cur.task_id, cur)
+                or not cur.thread_id or not cur.followups):
             return None
         worker = self._spawn(self._drain_followups(cur))
         self._followup_workers[cur.task_id] = worker
@@ -603,10 +626,13 @@ class AgentRunner:
     async def _deliver_followup(self, m: dict, shown: bool = False) -> None:
         async with self._lock:
             cur = self.currents.get(m["task_id"])
-            if (cur is None and m["task_id"] not in self._reservations) or (cur and cur.cancelling):
+            if not self._accepts_followup(m["task_id"], cur):
                 await self._followup_notice(m["task_id"], FOLLOWUP_ENDED)
                 return
             worker = self._queue_followup(m, shown)
+            if cur is not None:
+                # The worker takes the lock before handing the instruction to Codex.
+                await self._state("running", cur=cur)
         if worker is not None:
             await worker
 
@@ -616,8 +642,8 @@ class AgentRunner:
         try:
             while True:
                 async with self._lock:
-                    if (self.currents.get(cur.task_id) is not cur or cur.cancelling
-                            or cur.starting or not cur.followups):
+                    if (self.currents.get(cur.task_id) is not cur
+                            or not self._accepts_followup(cur.task_id, cur) or cur.starting or not cur.followups):
                         return
                     text = cur.followups.pop(0)
                     delivering = True
@@ -630,7 +656,7 @@ class AgentRunner:
                     except Exception:
                         pass  # A finished turn can still need a new turn, after startup has completed.
                 async with self._lock:
-                    if self.currents.get(cur.task_id) is not cur or cur.cancelling:
+                    if self.currents.get(cur.task_id) is not cur or not self._accepts_followup(cur.task_id, cur):
                         await self._followup_notice(cur.task_id, FOLLOWUP_ENDED)
                         return
                     cur.starting = True

@@ -85,14 +85,18 @@ async def test_ask_mode_waits_then_runs_after_approval(share):
     assert r2["status"] == "done" and r2["stdout"].strip() == "1"
 
 
-async def test_approval_after_pause_does_not_start_command(share):
+@pytest.mark.parametrize("pause_first", [True, False], ids=["pause-before-approval", "pause-after-approval"])
+async def test_pause_prevents_an_approved_command_from_starting(share, pause_first):
     share.set_policy(exec_mode="ask", limits={"sync_wait_sec": 1})
     marker = share.root / "out" / "ran.txt"
     result = await share.runner.run_command(f'{PY} -c "open(\'out/ran.txt\', \'w\').close()"')
     assert result["status"] == "waiting_approval"
 
-    share.set_policy(paused=True)
+    if pause_first:
+        share.set_policy(paused=True)
     share.approvals.decide(share.approvals.pending()[0].id, True)
+    if not pause_first:
+        share.set_policy(paused=True)
     result = await finish(share.runner, result)
     assert result["status"] == "denied"
     assert "停止中" in result["message"]
