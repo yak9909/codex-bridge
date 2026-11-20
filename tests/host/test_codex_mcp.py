@@ -565,3 +565,27 @@ async def test_single_task_without_a_known_thread_keeps_startup_fallback(two):
                                {"path": "out/startup.txt", "content": "x"})
     assert not result.get("isError")
     assert two.host.snapshots.touched(task) == ["out/startup.txt"]
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("write_file", {"path": "out/late-startup.txt", "content": "late"}),
+    ("delete_path", {"path": "out/late-startup.txt"}),
+    ("run_command", {"command": "echo late"}),
+])
+async def test_ended_thread_cannot_mutate_a_queued_task_without_a_known_thread(two, tool, args):
+    e = two
+    first = e.task["alice"]
+    await e.host.mgr.on_agent_message(e.link["alice"], {
+        "type": "task_state", "task_id": first, "state": "running", "thread_id": "thread-1"})
+    await e.host.mgr.cancel(first)
+    await e.host.mgr.on_agent_message(e.link["alice"], {
+        "type": "task_state", "task_id": first, "state": "cancelled", "thread_id": "thread-1"})
+    second = await e.host.mgr.start("waiting for thread", lender="alice")
+    assert e.host.mgr.tasks[second].state == "queued" and e.host.mgr.tasks[second].thread_id is None
+    target = e.root / "out/late-startup.txt"
+    target.write_text("original", encoding="utf-8")
+    result = await thread_call(e, "thread-1", tool, args)
+    assert result["isError"] and "どの依頼" in result["content"][0]["text"]
+    assert target.read_text(encoding="utf-8") == "original"
+    assert not e.host.snapshots.touched(second) and not e.host.snapshots.touched(None)
+    assert not e.host.approvals.pending() and not e.host.services.runner.jobs

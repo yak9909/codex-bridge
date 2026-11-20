@@ -36,6 +36,16 @@ TOOL_ITEMS = ("mcpToolCall", "dynamicToolCall", "commandExecution", "fileChange"
 PROGRESS_INTERVAL = 2.0  # the half-written message goes to the host at most this often (seconds)
 PROGRESS_MAX = 20_000
 INTERRUPTED = "アプリが終了したため、タスクは中断されました。"
+FOLLOWUP_ENDED = "依頼が終わったため、待機中の追加の指示は渡せませんでした。新しい依頼として送ってください。"
+SESSION_DELETING = "この会話は削除中です。終わるのを待ってください。"
+
+
+class SessionNotOwned(AppServerError):
+    pass
+
+
+class SessionBusy(AppServerError):
+    pass
 
 
 class TaskSlot:
@@ -90,6 +100,7 @@ class Current:
     tokens_seen: bool = False
     guard: QuotaGuard | None = None
     prepared: bool = False  # startup RPCs have begun; another prepare must not restart this app-server
+    starting: bool = False  # the turn/start reply must arrive before any queued follow-up is delivered
 
 
 def _summ(v, n=300):
@@ -166,6 +177,10 @@ class AgentRunner:
         self._prepare_lock = asyncio.Lock()
         self._reservations: dict[str, str | None] = {}
         self._incoming: set[asyncio.Task] = set()
+        self._queued_followups: dict[str, list[str]] = {}
+        self._followup_workers: dict[str, asyncio.Task] = {}
+        self._deleting_threads: set[str] = set()
+        self._session_operations = 0
         self._closing = False
         if slot:
             slot.runners.append(self)
@@ -183,7 +198,7 @@ class AgentRunner:
         self.currents = {cur.task_id: cur} if cur else {}
 
     def thread_active(self, thread_id: str, except_task: str | None = None) -> bool:
-        return any(c.task_id != except_task and c.thread_id == thread_id for c in self.currents.values()) or any(
+        return thread_id in self._deleting_threads or any(c.task_id != except_task and c.thread_id == thread_id for c in self.currents.values()) or any(
             p.task_id != except_task and p.kind == START and p.msg.get("continue_thread_id") == thread_id
             for p in self.approval.pendings.values()) or any(
             task != except_task and thread == thread_id for task, thread in self._reservations.items())
@@ -196,6 +211,9 @@ class AgentRunner:
         await self._safe_send(protocol.msg("lender_models", **models_fields(self.settings, self.catalog)))
 
     async def _release_slot(self, task_id: str | None = None) -> None:
+        if task_id is not None:
+            for _ in self._queued_followups.pop(task_id, []):
+                await self._followup_notice(task_id, FOLLOWUP_ENDED)
         if self.slot:
             async with self.slot.lock:
                 if task_id is not None:
@@ -267,6 +285,7 @@ class AgentRunner:
                 await self._release_slot(task_id)
 
     async def stop(self) -> None:
+        self._closing = True
         tasks = [*self._tasks, *self._incoming]
         for t in tasks:
             t.cancel()
@@ -285,7 +304,7 @@ class AgentRunner:
     async def exclusive(self):
         """No task can start inside; yields whether the agent is idle (to restart Codex or move the data)."""
         async with self._lock:
-            yield (not self.active_task_ids() and not self._closing and
+            yield (not self.active_task_ids() and not self._session_operations and not self._closing and
                    not (self.slot and (self.slot.moving or self in self.slot.blocked_runners)))
 
     async def _end(self, app_alive: bool = True, *, cur: Current | None = None) -> None:
@@ -296,7 +315,13 @@ class AgentRunner:
             if cur.guard:
                 cur.guard.on_turn_completed()
         if cur is not None:
-            self.approval.drop(cur.task_id)  # a follow-up still waiting has nowhere to go any more
+            held = self.approval.drop(cur.task_id)
+            waiting = cur.followups[:]
+            cur.followups.clear()
+            if held is not None and held.kind == FOLLOWUP:
+                waiting.append(held.prompt)
+            for _ in waiting:
+                await self._followup_notice(cur.task_id, FOLLOWUP_ENDED)
         if cur is not None and cur.ephemeral and cur.thread_id:
             self.sessions.remove(cur.thread_id)
             if app_alive:
@@ -358,13 +383,17 @@ class AgentRunner:
         await self._safe_send(protocol.msg("reply", req_id=req_id, ok=ok, data=data, error=error))
 
     # ---- host messages -------------------------------------------------
-    def handle_later(self, m: dict) -> None:
-        """Keep control-channel intake responsive while an app-server request is pending."""
-        task = asyncio.create_task(self.handle(m))
+    def _spawn(self, coroutine) -> asyncio.Task:
+        task = asyncio.create_task(coroutine)
         self._incoming.add(task)
         task.add_done_callback(self._incoming.discard)
+        return task
 
-    async def handle(self, m: dict) -> None:
+    async def receive(self, m: dict) -> None:
+        """Admit frames in wire order, then run only the Codex RPC phase in the background."""
+        await self.handle(m, background=True)
+
+    async def handle(self, m: dict, *, background: bool = False) -> None:
         t = m["type"]
         if t == "ack":
             self._unacked.pop(m["seq"], None)
@@ -377,25 +406,25 @@ class AgentRunner:
             asyncio.create_task(self.refresh_usage())
         else:
             try:
-                await self._dispatch(t, m)
+                await self._dispatch(t, m, background=background)
             except Exception as e:  # one bad message must never stop the control loop
                 self.on_log({"type": "error", "text": f"{t}: {type(e).__name__}: {e}"})
                 if "req_id" in m:
                     await self._reply(m["req_id"], False, error=f"{type(e).__name__}: {e}")
 
-    async def _dispatch(self, t: str, m: dict) -> None:
+    async def _dispatch(self, t: str, m: dict, *, background: bool = False) -> None:
         if t == "task_start":
-            await self._task_start(m)
+            await self._task_start(m, background=background)
         elif t == "task_followup":
-            await self._followup(m)
+            await self._followup(m, background=background)
         elif t == "task_cancel":
-            await self._cancel(m)
+            await self._cancel(m, background=background)
         elif t == "session_list":
             await self._reply(m["req_id"], True, data=self.sessions.list())
         elif t == "session_read":
-            await self._session_op(m, read=True)
+            await self._session_op(m, read=True, background=background)
         elif t == "session_delete":
-            await self._session_op(m, read=False)
+            await self._session_op(m, read=False, background=background)
 
     def _instructions(self) -> str:
         return PREAMBLE + feature_instructions(self.settings["features"])
@@ -405,11 +434,14 @@ class AgentRunner:
         self.on_log({"type": "task_prompt", "task_id": task_id, "prompt": text})
         self._record(task_id, "task_prompt", {"text": text})
 
-    async def _task_start(self, m: dict) -> None:
+    async def _task_start(self, m: dict, *, background: bool = False) -> None:
         async with self._lock:
             if m["task_id"] in self.active_task_ids():
                 return
             cont = m.get("continue_thread_id")
+            if cont in self._deleting_threads:
+                await self._state("rejected_by_lender", report=SESSION_DELETING, task_id=m["task_id"])
+                return
             if cont and self.thread_active(cont):
                 await self._state("rejected_by_lender", report="この会話は作業中です。終わるのを待ってください。",
                                   task_id=m["task_id"])
@@ -425,7 +457,10 @@ class AgentRunner:
                 await self.approval.hold(m, START)
                 await self._release_slot()
                 return
-        await self._start_locked(m)
+        if background:
+            self._spawn(self._start_locked(m))
+        else:
+            await self._start_locked(m)
 
     def _new_guard(self) -> QuotaGuard:
         if not any(c.guard is self.guard for c in self.currents.values()):
@@ -451,7 +486,8 @@ class AgentRunner:
                 await self._release_slot(m["task_id"])
                 return
             guard = self._new_guard()
-            cur = Current(task_id=m["task_id"], ephemeral=bool(self.settings["disposable"]), guard=guard)
+            cur = Current(task_id=m["task_id"], ephemeral=bool(self.settings["disposable"]), guard=guard,
+                          starting=True, followups=self._queued_followups.pop(m["task_id"], []))
             self.currents[cur.task_id] = cur
         await self._release_slot()
         self._prune_worklog()
@@ -487,13 +523,20 @@ class AgentRunner:
             cur.model = info["model"] or model
             cur.effort = effort
             self.sessions.add(cur.thread_id, cur.task_id, cur.ephemeral)
-            await self._state("running", cur=cur)
+            await self._state("awaiting_lender" if self.approval.holds(cur.task_id) else "running", cur=cur)
             await self._event("started", cur=cur)
             await self._event("model", cur=cur, model=cur.model, effort=cur.effort)
+            async with self._lock:
+                if self.currents.get(cur.task_id) is not cur or cur.cancelling:
+                    return
             turn_id = await self.app.turn_start(cur.thread_id, m["prompt"], model=cur.model, effort=cur.effort)
-            if self.currents.get(cur.task_id) is cur:
-                cur.turn_id = turn_id
-            elif cur.cancelling:
+            async with self._lock:
+                alive = self.currents.get(cur.task_id) is cur
+                if alive:
+                    cur.turn_id = turn_id
+                    cur.starting = False
+                    self._kick_followups(cur)
+            if not alive and cur.cancelling:
                 with contextlib.suppress(Exception):
                     await self.app.turn_interrupt(cur.thread_id, turn_id)
                 if cur.ephemeral:
@@ -514,89 +557,210 @@ class AgentRunner:
             if self.currents.get(cur.task_id) is not cur:
                 await self._release_slot(cur.task_id)
 
-    async def _followup(self, m: dict) -> None:
-        await self._followup_locked(m)
+    async def _followup_notice(self, task_id: str, text: str) -> None:
+        data = {"text": text}
+        self._record(task_id, "status", data)
+        await self._send_seq("event", task_id=task_id, kind="status", data=data)
 
-    async def _followup_locked(self, m: dict) -> None:
-        if self.approval.holds(m["task_id"]):  # what the lender is deciding on must not change under their hands
-            text = {"text": WAITING}
-            self._record(m["task_id"], "status", text)
-            await self._send_seq("event", task_id=m["task_id"], kind="status", data=text)
-            return
-        cur = self.currents.get(m["task_id"])
-        if cur is None or cur.thread_id is None:
-            return
-        if self.approval.applies(FOLLOWUP):
-            await self.approval.hold(m, FOLLOWUP)
-            return
-        await self._deliver_followup(m)
+    async def _followup(self, m: dict, *, background: bool = False) -> None:
+        async with self._lock:
+            task_id = m["task_id"]
+            if self.approval.holds(task_id):
+                await self._followup_notice(task_id, WAITING)
+                return
+            cur = self.currents.get(task_id)
+            if (cur is None and task_id not in self._reservations) or (cur and cur.cancelling):
+                await self._followup_notice(task_id, FOLLOWUP_ENDED)
+                return
+            if self.approval.applies(FOLLOWUP):
+                await self.approval.hold(m, FOLLOWUP)
+                return
+            worker = self._queue_followup(m)
+        if worker is not None and not background:
+            await worker
+
+    def _queue_followup(self, m: dict, shown: bool = False) -> asyncio.Task | None:
+        """Called under the state lock; a reservation can precede its Current."""
+        task_id = m["task_id"]
+        if not shown:
+            self.log_prompt(task_id, m["text"])
+        cur = self.currents.get(task_id)
+        if cur is None:
+            self._queued_followups.setdefault(task_id, []).append(m["text"])
+            return None
+        cur.followups.append(m["text"])
+        return self._kick_followups(cur)
+
+    def _kick_followups(self, cur: Current) -> asyncio.Task | None:
+        worker = self._followup_workers.get(cur.task_id)
+        if worker is not None and not worker.done():
+            return worker
+        if self._closing or cur.starting or cur.cancelling or not cur.thread_id or not cur.followups:
+            return None
+        worker = self._spawn(self._drain_followups(cur))
+        self._followup_workers[cur.task_id] = worker
+        return worker
 
     async def _deliver_followup(self, m: dict, shown: bool = False) -> None:
-        cur = self.currents.get(m["task_id"])
-        if cur is None or cur.thread_id is None:
-            return
-        if not shown:
-            self.log_prompt(cur.task_id, m["text"])
-        if cur.turn_id:
-            try:
-                await self.app.turn_steer(cur.thread_id, cur.turn_id, m["text"])
+        async with self._lock:
+            cur = self.currents.get(m["task_id"])
+            if (cur is None and m["task_id"] not in self._reservations) or (cur and cur.cancelling):
+                await self._followup_notice(m["task_id"], FOLLOWUP_ENDED)
                 return
-            except Exception:
-                pass  # the turn may have just ended: start a new one below
+            worker = self._queue_followup(m, shown)
+        if worker is not None:
+            await worker
+
+    async def _drain_followups(self, cur: Current) -> None:
+        """One worker per task preserves instruction order without holding the state lock over RPCs."""
+        delivering = False
         try:
-            cur.turn_id = await self.app.turn_start(cur.thread_id, m["text"], model=cur.model, effort=cur.effort)
-        except Exception as e:
-            await self._state("failed", cur=cur, report=f"追加の指示を渡せませんでした: {type(e).__name__}: {e}")
-            await self._end(cur=cur)
+            while True:
+                async with self._lock:
+                    if (self.currents.get(cur.task_id) is not cur or cur.cancelling
+                            or cur.starting or not cur.followups):
+                        return
+                    text = cur.followups.pop(0)
+                    delivering = True
+                    turn_id = cur.turn_id
+                if turn_id:
+                    try:
+                        await self.app.turn_steer(cur.thread_id, turn_id, text)
+                        delivering = False
+                        continue
+                    except Exception:
+                        pass  # A finished turn can still need a new turn, after startup has completed.
+                async with self._lock:
+                    if self.currents.get(cur.task_id) is not cur or cur.cancelling:
+                        await self._followup_notice(cur.task_id, FOLLOWUP_ENDED)
+                        return
+                    cur.starting = True
+                try:
+                    turn_id = await self.app.turn_start(cur.thread_id, text, model=cur.model, effort=cur.effort)
+                except Exception as e:
+                    async with self._lock:
+                        if self.currents.get(cur.task_id) is cur:
+                            await self._state("failed", cur=cur,
+                                              report=f"追加の指示を渡せませんでした: {type(e).__name__}: {e}")
+                            await self._end(cur=cur)
+                        else:
+                            await self._followup_notice(cur.task_id, FOLLOWUP_ENDED)
+                    return
+                async with self._lock:
+                    alive = self.currents.get(cur.task_id) is cur
+                    if alive:
+                        cur.turn_id, cur.starting = turn_id, False
+                        delivering = False
+                if not alive:
+                    with contextlib.suppress(Exception):
+                        await self.app.turn_interrupt(cur.thread_id, turn_id)
+                    await self._followup_notice(cur.task_id, FOLLOWUP_ENDED)
+                    return
+        except asyncio.CancelledError:
+            if delivering:
+                await self._followup_notice(cur.task_id, FOLLOWUP_ENDED)
+            raise
+        finally:
+            async with self._lock:
+                if self._followup_workers.get(cur.task_id) is asyncio.current_task():
+                    self._followup_workers.pop(cur.task_id, None)
+                    if self.currents.get(cur.task_id) is cur:
+                        self._kick_followups(cur)
 
-    async def _cancel(self, m: dict) -> None:
+    async def _cancel(self, m: dict, *, background: bool = False) -> None:
         async with self._lock:
-            await self._cancel_locked(m)
-
-    async def _cancel_locked(self, m: dict) -> None:
-        held = self.approval.drop(m["task_id"])
-        if held is not None and held.kind == START:  # it never began: nothing to interrupt
-            await self._state("cancelled", report=CANCELLED, task_id=held.task_id)
-            await self._release_slot(held.task_id)
-            return
-        cur = self.currents.get(m["task_id"])
-        if cur is None:
-            if m["task_id"] in self._reservations:
-                await self._state("cancelled", report=CANCELLED, task_id=m["task_id"])
-                await self._release_slot(m["task_id"])
-            return
-        cur.cancelling = True
-        if cur.turn_id and cur.thread_id:
-            try:
-                await self.app.turn_interrupt(cur.thread_id, cur.turn_id)
+            held = self.approval.drop(m["task_id"])
+            if held is not None and held.kind == START:
+                await self._state("cancelled", report=CANCELLED, task_id=held.task_id)
+                await self._release_slot(held.task_id)
                 return
-            except AppServerError:
-                pass
-        await self._state("cancelled", cur=cur, report=cur.last_message)
-        await self._end(cur=cur)
+            cur = self.currents.get(m["task_id"])
+            if cur is None:
+                if m["task_id"] in self._reservations:
+                    await self._state("cancelled", report=CANCELLED, task_id=m["task_id"])
+                    await self._release_slot(m["task_id"])
+                return
+            if held is not None:
+                await self._followup_notice(cur.task_id, FOLLOWUP_ENDED)
+            cur.cancelling = True
+            if cur.starting or not cur.turn_id or not cur.thread_id:
+                await self._state("cancelled", cur=cur, report=cur.last_message)
+                await self._end(cur=cur)
+                return
+            thread_id, turn_id = cur.thread_id, cur.turn_id
+        if background:
+            self._spawn(self._interrupt(cur, thread_id, turn_id))
+        else:
+            await self._interrupt(cur, thread_id, turn_id)
 
-    async def _session_op(self, m: dict, read: bool) -> None:
+    async def _interrupt(self, cur: Current, thread_id: str, turn_id: str) -> None:
+        try:
+            await self.app.turn_interrupt(thread_id, turn_id)
+        except Exception:
+            async with self._lock:
+                if self.currents.get(cur.task_id) is cur:
+                    await self._state("cancelled", cur=cur, report=cur.last_message)
+                    await self._end(cur=cur)
+
+    async def _begin_session_operation(self, thread_id: str, *, read: bool) -> None:
         async with self._lock:
-            await self._session_op_locked(m, read)
+            if not self.sessions.owns(thread_id):
+                raise SessionNotOwned(NOT_OWNED)
+            if (self._closing or (self.slot and
+                    (self.slot.moving or self in self.slot.blocked_runners))):
+                raise SessionBusy("接続先や保存場所を変更中のため、今は会話を操作できません。")
+            if thread_id in self._deleting_threads:
+                raise SessionBusy(SESSION_DELETING)
+            if not read and self.thread_active(thread_id):
+                raise SessionBusy("作業中のセッションは削除できません")
+            if not read:
+                self._deleting_threads.add(thread_id)
+            self._session_operations += 1
 
-    async def _session_op_locked(self, m: dict, read: bool) -> None:
+    def _finish_session_operation(self, thread_id: str, *, read: bool) -> None:
+        # No await: a done callback also releases operations cancelled before their first slice.
+        self._session_operations -= 1
+        if not read:
+            self._deleting_threads.discard(thread_id)
+
+    @contextlib.asynccontextmanager
+    async def session_operation(self, thread_id: str, *, read: bool):
+        await self._begin_session_operation(thread_id, read=read)
+        try:
+            yield
+        finally:
+            self._finish_session_operation(thread_id, read=read)
+
+    async def _session_op(self, m: dict, read: bool, *, background: bool = False) -> None:
         tid = m["thread_id"]
-        if not self.sessions.owns(tid):
-            await self._reply(m["req_id"], False, error=NOT_OWNED)
+        try:
+            await self._begin_session_operation(tid, read=read)
+        except AppServerError as e:
+            await self._reply(m["req_id"], False, error=str(e))
             return
+        if background:
+            task = self._spawn(self._session_rpc(m, read))
+            task.add_done_callback(lambda _: self._finish_session_operation(tid, read=read))
+        else:
+            try:
+                await self._session_rpc(m, read)
+            finally:
+                self._finish_session_operation(tid, read=read)
+
+    async def _session_rpc(self, m: dict, read: bool) -> None:
+        tid = m["thread_id"]
         try:
             if self.prepare:
                 await self.prepare()
             if read:
                 await self._reply(m["req_id"], True, data=await self.app.thread_read(tid))
             else:
-                if self.thread_active(tid):
-                    raise AppServerError("作業中のセッションは削除できません")
                 await self.app.thread_delete(tid)
                 self.sessions.remove(tid)
                 await self._reply(m["req_id"], True, data={"deleted": tid})
-        except AppServerError as e:
-            await self._reply(m["req_id"], False, error=str(e))
+        except Exception as e:
+            error = str(e) if isinstance(e, AppServerError) else f"{type(e).__name__}: {e}"
+            await self._reply(m["req_id"], False, error=error)
 
     # ---- app-server events --------------------------------------------
     async def _pump(self) -> None:

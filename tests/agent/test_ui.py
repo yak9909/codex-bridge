@@ -404,12 +404,12 @@ async def test_a_session_cannot_be_resumed_while_its_deletion_is_in_flight(env):
     await entered.wait()
     resume = asyncio.create_task(env.runner.handle({"type": "task_start", "task_id": "t2", "prompt": "続き",
                                                     "continue_thread_id": "s1"}))
-    await asyncio.sleep(0)
-    assert env.runner.cur is None
+    await asyncio.wait_for(resume, 1)
+    assert env.runner.cur is None and not env.runner._lock.locked()
+    assert env.sent[-1]["state"] == "rejected_by_lender" and "削除中" in env.sent[-1]["report"]
     finish.set()
     assert (await deletion).status_code == 200
-    await resume
-    assert env.runner.cur is None and env.sent[-1]["state"] == "failed"
+    assert not env.runner._deleting_threads and env.runner._session_operations == 0
 
 
 async def test_files_visibility_never_exposes_nested_nonpath_arguments(env):
@@ -452,3 +452,37 @@ async def test_pending_decision_still_rejects_non_numeric_creation_times(env, cr
     response = await env.http.post("/api/pending", headers=WRITE,
                                    json={"task_id": "t1", "created": created, "approve": True})
     assert response.status_code == 422 and env.runner.pending_approvals
+
+
+async def test_slow_ui_delete_allows_other_task_progress_and_completion(env):
+    from test_multi_task_fix1 import wait_until
+
+    env.runner.sessions.add("saved", "old")
+    env.runner.cur = Current("active", "active-thread", "active-turn")
+    env.runner.app.events = asyncio.Queue()
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def delete(thread_id):
+        entered.set()
+        await finish.wait()
+    env.runner.app.thread_delete = delete
+    pump = asyncio.create_task(env.runner._pump())
+    deletion = asyncio.create_task(env.http.delete("/api/sessions/saved", headers=WRITE))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        assert not env.runner._lock.locked()
+        await env.runner.app.events.put({"method": "item/agentMessage/delta", "params": {
+            "threadId": "active-thread", "turnId": "active-turn", "itemId": "message", "delta": "進みました"}})
+        await env.runner.app.events.put({"method": "turn/completed", "params": {
+            "threadId": "active-thread", "turn": {"id": "active-turn", "status": "completed"}}})
+        await wait_until(lambda: env.runner.cur is None)
+        assert not deletion.done()
+        assert any(m.get("kind") == "progress" for m in env.sent)
+        assert any(m.get("state") == "completed" for m in env.sent)
+        finish.set()
+        assert (await deletion).status_code == 200
+    finally:
+        finish.set()
+        await asyncio.gather(deletion, return_exceptions=True)
+        pump.cancel()
+        await asyncio.gather(pump, return_exceptions=True)

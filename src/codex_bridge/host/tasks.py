@@ -487,6 +487,9 @@ class TaskManager:
         matched = [r for r in active if thread_id and r.thread_id == thread_id]
         if len(matched) == 1:
             return matched[0].task_id
+        if thread_id and any(r.lender == lender and r.thread_id == thread_id and r.state not in ACTIVE_STATES
+                             for r in self.tasks.values()):
+            return None
         return (active[0].task_id if len(active) == 1 and
                 (not thread_id or not active[0].thread_id) else None)
 

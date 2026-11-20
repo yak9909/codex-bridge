@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictFloat, StrictInt, 
 
 from ..common.protocol import EFFORT_ORDER
 from .appserver import AppServerError
+from .runner import SessionBusy, SessionNotOwned
 from .settings import FEATURE_INFO, SettingsStore
 from .ui_tasks import task_view
 
@@ -221,18 +222,19 @@ def create_ui_app(runner, settings: SettingsStore, client, *, versions: dict, da
     @app.delete("/api/sessions/{thread_id}")
     async def delete_session(thread_id: str, connection_id: str | None = None):
         runner = one(connection_id, thread_id=thread_id)
-        async with runner.exclusive():  # a resumed task cannot start while deletion is in flight
-            if not runner.sessions.owns(thread_id):
-                raise HTTPException(404, "このツールで作ったセッションではありません")
-            if runner.thread_active(thread_id):
-                raise HTTPException(409, "作業中のセッションは削除できません")
-            try:
-                if runner.prepare:
-                    await runner.prepare()
-                await runner.app.thread_delete(thread_id)
-            except (AppServerError, OSError, TimeoutError) as e:
-                raise HTTPException(502, f"削除できませんでした: {e}") from e
-            runner.sessions.remove(thread_id)
+        try:
+            async with runner.session_operation(thread_id, read=False):
+                try:
+                    if runner.prepare:
+                        await runner.prepare()
+                    await runner.app.thread_delete(thread_id)
+                except (AppServerError, OSError, TimeoutError) as e:
+                    raise HTTPException(502, f"削除できませんでした: {e}") from e
+                runner.sessions.remove(thread_id)
+        except SessionNotOwned as e:
+            raise HTTPException(404, str(e)) from e
+        except SessionBusy as e:
+            raise HTTPException(409, str(e)) from e
         return {"deleted": thread_id}
 
     @app.get("/api/settings")

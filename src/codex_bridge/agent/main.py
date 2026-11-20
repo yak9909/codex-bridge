@@ -105,7 +105,7 @@ class AgentConnections:
             desired = runner.settings["features"]
             wd = resolve_workdir(runner.settings, self.home)
             if (app.running and (app.features != desired or Path(app.workdir) != wd)
-                    and len(runner.currents) == 1
+                    and len(runner.currents) == 1 and not runner._session_operations
                     and any(c.thread_id is None and not c.prepared for c in runner.currents.values())):
                 await app.restart(features=desired, workdir=wd)
             elif not app.running:
@@ -249,7 +249,7 @@ class AgentConnections:
             return connection
 
     def _require_idle(self, id):
-        if self.runners[id].active_task_id() is not None:
+        if self.runners[id].active_task_id() is not None or self.runners[id]._session_operations:
             raise RuntimeError("作業中・承認待ちの接続先は変更できません")
 
     @asynccontextmanager
@@ -338,7 +338,7 @@ class AgentConnections:
     async def move_data(self, new):
         async with self._changes:
             async with self.slot.lock:
-                if self.slot.count:
+                if self.slot.count or any(r._session_operations for r in self.runners.values()):
                     raise ValueError("作業中・承認待ちは保存場所を変えられません")
                 self.moving = self.slot.moving = True
             was_paused = self.paused
