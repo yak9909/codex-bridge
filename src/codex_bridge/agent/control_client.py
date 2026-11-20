@@ -46,14 +46,15 @@ class ControlClient:
         """Say who this agent is and what it can do. A callable `hello` is called now, so that a setting changed since
         the last connection (disposable, pre-approval) is what the host hears.
 
-        `current_task_id` (the task the agent works on or holds for the lender's yes; None: it has none) makes the
-        host fail every task it thinks is running here but is not named. That is for a new connection only: a
+        `active_task_ids` includes work and pending approvals; `current_task_id` keeps the first for old hosts.
+        A new host fails tasks it thinks are running here but are absent from this list. That is for a new connection only: a
         hello about changed settings leaves it out (`with_task=False`), because it can overlap the start of a task
         the agent has not heard of yet."""
         if self.ws is None:
             return
         fields = self.hello() if callable(self.hello) else self.hello
-        extra = {"current_task_id": self.runner.active_task_id()} if with_task else {}
+        extra = {"current_task_id": self.runner.active_task_id(),
+                 "active_task_ids": self.runner.active_task_ids()} if with_task else {}
         await self.send(protocol.msg("hello", **fields, **extra))
 
     async def refresh_hello(self) -> None:

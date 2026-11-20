@@ -299,14 +299,15 @@ table.grid .indent { padding-left: var(--s4); }
 .tl-body { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* Keep the hidden toggle inputs inside their scroll pane's containing block. */
 .switch { position: relative; }
-/* Only the request scrolls: keep metadata and decision controls outside its box.
-   Equal rows also keep multiple approvals within the same share of the window. */
-.alerts { display: grid; grid-auto-rows: minmax(0, 1fr); max-height: 30vh; }
+/* Keep metadata and decisions outside the request box. Many approvals scroll as a list;
+   each row retains enough room to read the request and use its controls. */
+.alerts { display: grid; grid-auto-rows: minmax(0, 1fr); max-height: 30vh; overflow-y: auto; scrollbar-width: thin; }
 .alerts[hidden] { display: none; }
+.alerts:has(> .alert:nth-child(3)) { grid-auto-rows: auto; }
 .alert.multi { min-height: 0; grid-template-rows: minmax(0, 1fr); }
 .alert.multi .body { min-width: 0; min-height: 0; align-self: stretch; grid-template-rows: minmax(0, 1fr) auto auto; }
 .alert.multi .approval-body { grid-template-rows: auto minmax(0, 1fr) auto; }
-.pending-prompt { display: block; min-height: 0; max-height: calc(5 * var(--lh-body)); overflow: auto; scrollbar-width: thin;
+.pending-prompt { display: block; min-height: calc(2 * var(--ctl-sm) + 2px); max-height: calc(5 * var(--lh-body)); overflow: auto; scrollbar-width: thin;
   font-size: var(--fs); line-height: var(--lh-body); white-space: pre-wrap; overflow-wrap: anywhere;
   padding: var(--s2); border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); }
 .composer-bar { flex-wrap: wrap; }
@@ -325,6 +326,7 @@ table.grid .indent { padding-left: var(--s4); }
 .pre-timeout[hidden], .pop li[hidden] { display: none; }
 .lend-shell .set .ctl > .combo[data-combo="pre"] { flex: 1; width: auto; min-width: 160px; }
 .model-search input { width: 100%; }
+.lend-shell .alert { gap: var(--s2); }
 .lend-shell .alert input { width: 100%; min-width: 0; max-width: 24em; }
 .lend-shell .rowset .lbl { min-width: 0; flex-wrap: wrap; }
 .lend-shell .rowset .cap { overflow-wrap: anywhere; }

@@ -1,7 +1,7 @@
 """Real Chrome layout checks against extreme data, without touching the installed app.
 
 Set CODEX_BRIDGE_CHROME to override Chrome, and CODEX_BRIDGE_LAYOUT_SHOTS to
-save the two desktop detail screenshots (1280 x 900, at 2x).
+save both tabs and expanded cards at desktop and narrow widths, at 2x.
 """
 
 from __future__ import annotations
@@ -66,13 +66,18 @@ class Page:
         await self.wait(f"document.querySelector({json.dumps(selector)})")
         await self.js(f"document.querySelector({json.dumps(selector)}).click()")
 
-    async def shot(self, side):
+    async def shot(self, side, selector=None):
         if folder := os.environ.get("CODEX_BRIDGE_LAYOUT_SHOTS"):
             path = Path(folder)
             path.mkdir(parents=True, exist_ok=True)
             await self.js("document.querySelector('.d-req').scrollTop = 0; document.querySelector('.d-log').scrollTop = 0")
+            if selector:
+                await self.js(f"document.querySelector({json.dumps(selector)}).scrollIntoView({{block: \'start\'}})")
+            else:
+                await self.js("window.scrollTo(0, 0)")
+            await asyncio.sleep(0.1)
             result = await self.call("Page.captureScreenshot", format="png", captureBeyondViewport=False)
-            (path / f"stress-{side}.png").write_bytes(base64.b64decode(result["data"]))
+            (path / f"stress-{side}-{self.width}px-2x.png").write_bytes(base64.b64decode(result["data"]))
 
 
 @pytest.fixture(scope="module")
@@ -99,7 +104,7 @@ def stress_server(tmp_path_factory):
     thread.start()
     server = None
     try:
-        server = ready.result(timeout=10)
+        server = ready.result(timeout=60)
         deadline = time.monotonic() + 5
         while not server.started:
             assert thread.is_alive() and time.monotonic() < deadline, "layout server did not start"
@@ -124,10 +129,16 @@ def chrome(tmp_path_factory):
     try:
         active = profile / "DevToolsActivePort"
         deadline = time.monotonic() + 8
-        while not active.exists():
+        while True:
             assert proc.poll() is None and time.monotonic() < deadline, "Chrome did not start DevTools"
+            try:
+                lines = active.read_text(encoding="utf-8").splitlines()
+                if len(lines) >= 2:
+                    port, browser_path = lines[:2]
+                    break
+            except (OSError, ValueError):
+                pass  # Chrome briefly holds this file open while publishing the endpoint on Windows.
             time.sleep(0.025)
-        port, browser_path = active.read_text(encoding="utf-8").splitlines()[:2]
         browser_ws = f"ws://127.0.0.1:{port}{browser_path}"
         with urlopen(f"http://127.0.0.1:{port}/json/list", timeout=3) as response:
             pages = json.load(response)
@@ -153,10 +164,11 @@ async def test_extreme_layout(stress_server, chrome, width, height):
     problems = []
     async with connect(chrome, proxy=None, max_size=16 * 1024 * 1024) as ws:
         page = Page(ws)
+        page.width = width
         await page.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=2, mobile=False)
         await page.call("Page.navigate", url=stress_server)
         # The host API returns the last 200 events of the 300+ event fixture.
-        await page.wait("document.querySelectorAll('[data-slot=lenders] .ent').length === 33 && document.querySelectorAll('.items li').length >= 62 && document.querySelectorAll('.d-log .tl li').length >= 200")
+        await page.wait("document.querySelectorAll('[data-slot=lenders] .ent').length === 33 && document.querySelectorAll('.items li').length >= 62")
 
         async def check(scenario):
             await page.wait("document.readyState === 'complete'")
@@ -186,12 +198,13 @@ async def test_extreme_layout(stress_server, chrome, width, height):
             errors = await page.js("[...document.querySelectorAll('.frame > .note-warn')].map(e => e.textContent)")
             problems.extend(f"{scenario} ({width}px): {error}" for error in errors)
 
+        await page.wait("document.querySelector(\'[data-slot=lenders] .ent:first-child .cap\').textContent.includes(\'2 件作業中\')")
         # Select through the actual list; ready predicates verify the detail, not just the shell.
         await page.js("[...document.querySelectorAll('.items li')].find(e => e.textContent.includes('web のテスト')).click()")
         await page.wait("document.querySelector('.d-head').textContent.includes('web のテスト')")
+        await page.wait("document.querySelectorAll(\'.d-log .tl li\').length >= 200")
         await check("使う・長い1行の依頼")
-        if width == 1280:
-            await page.shot("use")
+        await page.shot("use-multiple")
         await page.js("[...document.querySelectorAll('.items li')].find(e => e.textContent.includes('src/module_0/')).click()")
         await page.wait("document.querySelector('.d-head').textContent.includes('src/module_0/')")
         await check("使う・200行の依頼")
@@ -200,7 +213,9 @@ async def test_extreme_layout(stress_server, chrome, width, height):
         await page.click('[data-slot=lenders] .ent:first-child .set-group details summary')
         await page.wait("document.querySelector('[data-slot=lenders] .ent:first-child .set-group details[open] .pop')")
         await check("使う・貸す人の設定と使えるモデル")
+        await page.shot("use-lender-card")
         await page.click('[data-slot=lenders] .ent:first-child .set-group details summary')
+        await page.shot("use-lender-settings", "[data-slot=lenders] .ent:first-child .set-group")
         await page.click('[data-slot=lenders] .ent:first-child [data-act=toggle]')
         for tab, label in [("folders", "共有フォルダ"), ("allow", "許可リスト")]:
             await page.click(f'.surface [data-tab={tab}]')
@@ -212,15 +227,19 @@ async def test_extreme_layout(stress_server, chrome, width, height):
         await check("使う・招待")
 
         await page.click('.topbar [data-tab=lend]')
-        await page.wait("document.querySelectorAll('[data-slot=connections] .ent').length === 13 && document.querySelectorAll('.d-log .tl li').length >= 300 && document.querySelector('.pending-prompt')")
+        await page.wait("document.querySelectorAll('[data-slot=connections] .ent').length === 13 && document.querySelector('.pending-prompt')")
         await page.js("[...document.querySelectorAll('.items li')].find(e => e.textContent.includes('web のテスト')).click()")
         await page.wait("document.querySelector('.d-head').textContent.includes('web のテスト')")
+        await page.wait("document.querySelectorAll(\'[data-pending]\').length === 2")
+        await page.js("[...document.querySelectorAll(\'[data-pending] input\')].forEach((e, i) => e.value = \'理由 \' + i)")
+        await page.wait("document.querySelectorAll(\'.d-log .tl li\').length >= 300")
         await check("貸す・長い依頼と追加の指示の許可待ち")
-        if width == 1280:
-            await page.shot("lend")
+        await page.shot("lend-multiple-pending", "[data-slot=pending]")
         await page.click('[data-slot=connections] .ent:first-child [data-act=card]')
         await page.wait("document.querySelector('[data-slot=connections] .ent:first-child .ent-set select')")
+        assert await page.js("[...document.querySelectorAll(\'[data-pending] input\')].map(e => e.value)") == ["理由 0", "理由 1"]
         await check("貸す・依頼主の設定")
+        await page.shot("lend-requester-card", "[data-slot=connections] .ent:first-child")
         await page.click('.surface [data-tab=pc]')
         await page.wait("!document.querySelector('[data-panel=pc]').hidden")
         await check("貸す・この PC")

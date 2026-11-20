@@ -99,7 +99,7 @@ class AgentConnections:
             desired = runner.settings["features"]
             wd = resolve_workdir(runner.settings, self.home)
             if (app.running and (app.features != desired or Path(app.workdir) != wd)
-                    and runner.cur and runner.cur.thread_id is None):
+                    and not any(c.thread_id for c in runner.currents.values())):
                 await app.restart(features=desired, workdir=wd)
             elif not app.running:
                 app.features = dict(desired)
@@ -298,6 +298,8 @@ class AgentConnections:
             await self.clients[id].refresh_hello()  # limits also appear in hello even when Codex is still lazy
             await runner.send_models()  # the over-limit behaviour (limits.force) is part of the lender's view
 
+        await self.slot.announce()
+
     async def settle(self):
         if self.moving:
             return
@@ -316,7 +318,7 @@ class AgentConnections:
 
     async def move_data(self, new):
         async with self.slot.lock:
-            if self.slot.owner is not None:
+            if self.slot.count:
                 raise ValueError("作業中・承認待ちは保存場所を変えられません")
             was_paused = self.paused
             await self.set_paused(True)
@@ -335,7 +337,8 @@ class AgentConnections:
 
     def rows(self):
         return [{"id": id, "host_name": runner.host_name, "connected": self.clients[id].ws is not None,
-                 "invite_problem": self.clients[id].invite_problem, "busy": runner.active_task_id() is not None}
+                 "invite_problem": self.clients[id].invite_problem, "busy": bool(runner.active_task_ids()),
+                 "active_task_ids": runner.active_task_ids()}
                 for id, runner in self.runners.items()]
 
 
@@ -401,7 +404,7 @@ class AgentRole:
         """(borrowers connected, connections, approvals waiting) for the tray."""
         rows = self.runtime.rows()
         return (sum(bool(r["connected"]) for r in rows), len(rows),
-                sum(1 for r in self.runtime.runners.values() if r.pending_approval))
+                sum(len(r.pending_approvals) for r in self.runtime.runners.values()))
 
     def _make_app(self, connection, current):
         app = AppServer(self.cmd, connection.invite.url, connection.invite.token,
@@ -430,7 +433,7 @@ class AgentRole:
             self.applog.add("lend", *line)
         if message.get("type") == "task_state" and message.get("state") == "awaiting_lender":
             runner = self.runtime.runners.get(message.get("connection_id"))
-            pending = runner.pending_approval if runner else None
+            pending = next((p for p in runner.pending_approvals if p["task_id"] == message.get("task_id")), None) if runner else None
             key = (runner.connection_id, pending["task_id"], pending["created"]) if pending else None
             if key is not None and key != self._notified:
                 self._notified = key

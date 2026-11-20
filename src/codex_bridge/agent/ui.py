@@ -25,7 +25,7 @@ class Decision(BaseModel):
     task_id: StrictStr
     approve: StrictBool
     reason: StrictStr = ""
-    created: StrictFloat | None = None
+    created: StrictFloat
     connection_id: StrictStr | None = None
 
 
@@ -150,8 +150,7 @@ def create_ui_app(runner, settings: SettingsStore, client, *, versions: dict, da
 
     @app.get("/api/overview")
     async def overview():
-        active = connections.slot.owner if connections else legacy_runner
-        current = active or next(iter(runners()), None)
+        current = next((r for r in runners() if r.active_task_ids()), next(iter(runners()), None))
         runner = current
         client = connections.clients.get(runner.connection_id) if connections and runner else None
         if connections is None:
@@ -167,12 +166,13 @@ def create_ui_app(runner, settings: SettingsStore, client, *, versions: dict, da
                 if window is not None:
                     usage[key] = {"used_percent": window.used_percent, "resets_at": window.resets_at,
                                   "resets_at_local": datetime.fromtimestamp(window.resets_at).astimezone().isoformat()}
-        state = ("paused" if client.paused else "awaiting_lender" if runner.pending_approval else
-                 "running" if runner.cur is not None else "idle")
+        state = ("paused" if client.paused else "awaiting_lender" if any(r.pending_approvals for r in runners()) else
+                 "running" if any(r.currents for r in runners()) else "idle")
         # The invite's name identifies the lender. The protocol has no requester display name yet.
         connected = any(row["connected"] for row in connections.rows()) if connections else client.ws is not None
         return {"host_name": urlsplit(client.invite.url).netloc, "connected": connected, "paused": client.paused,
-                "state": state, **versions, "usage": usage, "limits": dict(runner.friend_limits),
+                "state": state, "active_tasks": sum(len(r.active_task_ids()) for r in runners()),
+                "pending_approvals": sum(len(r.pending_approvals) for r in runners()), **versions, "usage": usage, "limits": dict(runner.friend_limits),
                 "thresholds": dict(runner.guard.thresholds), "effective_limits": runner.guard.effective_limits(),
                 "blocked_until": runner.guard.blocked_until, "log_visibility": runner.log_visibility}
 
@@ -202,22 +202,19 @@ def create_ui_app(runner, settings: SettingsStore, client, *, versions: dict, da
 
     @app.get("/api/pending")
     async def pending(connection_id: str | None = None):
-        return next((r.pending_approval for r in runners(connection_id) if r.pending_approval), None)
+        return [p for r in runners(connection_id) for p in r.pending_approvals]
 
     @app.post("/api/pending")
     async def decide(body: Decision):
         runner = one(body.connection_id, task_id=body.task_id)
-        current = runner.pending_approval
-        if body.created is not None and (current is None or current["created"] != body.created):
-            raise HTTPException(409, "承認待ちが変わりました。画面を更新してください")
-        if not await runner.decide_pending(body.approve, body.reason, task_id=body.task_id):
+        if not await runner.decide_pending(body.approve, body.reason, task_id=body.task_id, created=body.created):
             raise HTTPException(409, "承認待ちが変わりました。画面を更新してください")
         return {"decided": True}
 
     @app.get("/api/sessions")
     async def sessions(connection_id: str | None = None):
         return [{"thread_id": s["thread_id"], "created": s["created"], "task_ids": s["task_ids"],
-                 "active": r.cur is not None and r.cur.thread_id == s["thread_id"],
+                 "active": r.thread_active(s["thread_id"]),
                  "disposable": bool(s.get("ephemeral")), **r.connection_fields()}
                 for r in runners(connection_id) for s in r.sessions.list()]
 
@@ -227,7 +224,7 @@ def create_ui_app(runner, settings: SettingsStore, client, *, versions: dict, da
         async with runner.exclusive():  # a resumed task cannot start while deletion is in flight
             if not runner.sessions.owns(thread_id):
                 raise HTTPException(404, "このツールで作ったセッションではありません")
-            if runner.cur is not None and runner.cur.thread_id == thread_id:
+            if runner.thread_active(thread_id):
                 raise HTTPException(409, "作業中のセッションは削除できません")
             try:
                 if runner.prepare:

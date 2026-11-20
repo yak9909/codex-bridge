@@ -161,7 +161,8 @@ class TaskManager:
         (self.dir / f"{rec.task_id}.json").write_text(json.dumps(asdict(rec), ensure_ascii=False), encoding="utf-8")
         lender = self._lenders.get(rec.lender)
         if lender is not None:
-            lender.current_task_id = self.current_task_id(lender.name)
+            lender.active_task_ids = self.active_task_ids(lender.name)
+            lender.current_task_id = next(iter(lender.active_task_ids), None)
         self._changed()
 
     def mark_notified_final(self, task_id: str) -> None:
@@ -198,7 +199,8 @@ class TaskManager:
         lender = self._lenders.get(name)
         if lender is None:
             lender = self._lenders[name] = Lender(name=name)
-            lender.current_task_id = self.current_task_id(name)
+            lender.active_task_ids = self.active_task_ids(name)
+            lender.current_task_id = next(iter(lender.active_task_ids), None)
         for stale in [i for i, l in self._links.items() if l is lender]:
             del self._links[stale]
         link_id = next(self._link_ids)
@@ -265,7 +267,7 @@ class TaskManager:
         return {"connected": l.connected, "ready": l.ready, "since": l.since, "name": l.name,
                 "agent_version": l.agent_version, "codex_version": l.codex_version, "auth_mode": l.auth_mode,
                 "protocol": l.protocol, "capabilities": dict(l.capabilities),
-                "models": l.models, "max_effort": l.max_effort}
+                "models": l.models, "max_effort": l.max_effort, "max_parallel": l.max_parallel}
 
     def agent_info(self, lender: str | None = None) -> dict:
         """Without a name: the latest connection (the single-lender view). With a name: that lender
@@ -281,9 +283,9 @@ class TaskManager:
         connected since: not connected, no usage, and what it can do is not known (capabilities None)."""
         def row(l: Lender) -> dict:
             return {**self._info(l), "limits": l.limits, "lender_view": l.view, "usage": self._usage_of(l),
-                    "current_task_id": l.current_task_id, "last_assigned": l.last_assigned,
+                    "active_task_ids": list(l.active_task_ids), "current_task_id": l.current_task_id, "last_assigned": l.last_assigned,
                     "busy_elsewhere": l.busy_elsewhere}
-        never = [{**row(Lender(name=n, current_task_id=self.current_task_id(n))), "capabilities": None}
+        never = [{**row(Lender(name=n, active_task_ids=self.active_task_ids(n), current_task_id=self.current_task_id(n))), "capabilities": None}
                  for n in dict.fromkeys(invited) if n not in self._lenders]
         return [row(l) for l in self._lenders.values()] + never
 
@@ -309,18 +311,27 @@ class TaskManager:
                 as_text(m.get(k)) for k in ("agent_version", "codex_version", "auth_mode"))
             lender.protocol = as_protocol(m.get("protocol"))
             lender.capabilities = normalize_capabilities(m.get("capabilities"))
+            lender.max_parallel = lender.capabilities["max_parallel"] if lender.protocol >= 5 else 1
+            lender.capabilities["max_parallel"] = lender.max_parallel
             lender.models = normalize_models(m.get("models"))
             lender.max_effort = normalize_effort(m.get("max_effort"))
             lender.view = normalize_lender_view(m.get("lender_view"))
+            if lender.view is not None:
+                lender.view["max_parallel"] = lender.max_parallel
             limits = normalize_limits(m.get("limits"))
             if limits is not None:
                 lender.limits = limits
-            if "current_task_id" in m:
-                self._reconcile(lender, m.get("current_task_id"))
+            if lender.protocol >= 5 and isinstance(m.get("active_task_ids"), list):
+                self._reconcile(lender, [v for v in m["active_task_ids"] if isinstance(v, str)])
+            elif "current_task_id" in m:
+                self._reconcile(lender, [m["current_task_id"]] if isinstance(m["current_task_id"], str) else [])
             lender.ready = True
             await lender.send(self._settings_msg(lender.name))
             self._changed()
         elif t == "lender_models":
+            if lender.protocol >= 5 and isinstance(m.get("capabilities"), dict):
+                lender.capabilities = normalize_capabilities(m["capabilities"])
+                lender.max_parallel = lender.capabilities["max_parallel"]
             lender.models = normalize_models(m.get("models"))
             lender.max_effort = normalize_effort(m.get("max_effort"))
             lender.view = normalize_lender_view(m.get("lender_view"))
@@ -398,14 +409,14 @@ class TaskManager:
                 else:
                     fut.set_exception(ToolError(m.get("error") or "貸す人の PC でエラーが起きました"))
 
-    def _reconcile(self, lender: Lender, agent_task_id: str | None) -> None:
-        """After (re)connect: keep the task this lender's agent still runs, fail the ones it lost
+    def _reconcile(self, lender: Lender, agent_task_ids: list[str]) -> None:
+        """After (re)connect: keep the tasks this lender's agent still runs, fail the ones it lost
         (e.g. it restarted). Other lenders' tasks are left alone."""
         for rec in self.tasks.values():
             if rec.state not in ACTIVE_STATES or rec.lender not in (None, lender.name):
                 continue
             rec.lender = lender.name
-            if rec.task_id == agent_task_id:
+            if rec.task_id in agent_task_ids:
                 if rec.state == "agent_offline":  # (else the agent already said where the task stands)
                     rec.state = rec.state_before_offline or "running"
             else:
@@ -462,12 +473,21 @@ class TaskManager:
         self._changed()
 
     # ---- tasks ---------------------------------------------------------
+    def active_task_ids(self, lender: str | None = None) -> list[str]:
+        return [r.task_id for r in self.tasks.values()
+                if r.state in ACTIVE_STATES and (lender is None or r.lender == lender)]
+
     def current_task_id(self, lender: str | None = None) -> str | None:
-        """The named lender's active task; without a name, any active task."""
-        for rec in self.tasks.values():
-            if rec.state in ACTIVE_STATES and (lender is None or rec.lender == lender):
-                return rec.task_id
-        return None
+        """Compatibility view: the first active task."""
+        return next(iter(self.active_task_ids(lender)), None)
+
+    def task_for(self, lender: str, thread_id: str | None) -> str | None:
+        """Match only this lender's active tasks; the single-task fallback supports old Codex versions."""
+        active = [self.tasks[t] for t in self.active_task_ids(lender)]
+        matched = [r for r in active if thread_id and r.thread_id == thread_id]
+        if len(matched) == 1:
+            return matched[0].task_id
+        return active[0].task_id if len(active) == 1 else None
 
     def is_active(self, task_id: str) -> bool:
         rec = self.tasks.get(task_id)
@@ -482,14 +502,14 @@ class TaskManager:
     def _require_free(self, lender: Lender, now: float, advice: str = "") -> None:
         if lender.busy_elsewhere:
             raise ToolError(BUSY.format("ほかの依頼主の作業中") + advice)
-        if lender.current_task_id:
-            raise ToolError(BUSY.format(lender.current_task_id) + advice)
+        if len(lender.active_task_ids) >= lender.max_parallel:
+            raise ToolError(BUSY.format("、".join(lender.active_task_ids)) + advice)
         blocked = blocked_until(lender, NO_THRESHOLDS, now)
         if blocked:
             raise ToolError(QUOTA.format(iso_local(blocked)))
 
     def _pick(self, now: float, among: list[Lender] | None = None) -> Lender:
-        """Automatic routing (design §3.3): the free lender with the most headroom."""
+        """Automatic routing: fewest active tasks, then most usage headroom."""
         online = among if among is not None else self._connected()
         lender = pick_lender(online, NO_THRESHOLDS, now)
         if lender is not None:
@@ -498,7 +518,7 @@ class TaskManager:
         # or the only ones left have just connected and not said hello yet
         ready = [l for l in online if l.ready]
         waits = [t for l in ready
-                 if l.current_task_id is None and not l.busy_elsewhere
+                 if len(l.active_task_ids) < l.max_parallel and not l.busy_elsewhere
                  and (t := blocked_until(l, NO_THRESHOLDS, now))]
         if waits:
             raise ToolError(QUOTA.format(iso_local(min(waits))))
@@ -527,6 +547,9 @@ class TaskManager:
             raise ToolError(f"「{target.name}」は使い捨てのセッションで動いているため、会話が残っていません。{RETRY_FRESH}")
         if not prev.thread_id:
             raise ToolError(f"このタスクには続けられるセッションがありません: {prev.task_id}")
+        if any(r.state in ACTIVE_STATES and r.lender == target.name and
+               (r.task_id == prev.task_id or r.thread_id == prev.thread_id) for r in self.tasks.values()):
+            raise ToolError("この会話は作業中です。追加の指示を送るか、終わるのを待ってください。")
         self._require_free(target, now, advice=RETRY_FRESH)
         return target
 
@@ -563,7 +586,7 @@ class TaskManager:
             target = self._pick(now)
         task_id = time.strftime("t%Y%m%d-%H%M%S") + f"-{next(self._task_ids)}"
         rec = TaskRecord(task_id=task_id, prompt=prompt, created=now, continue_task_id=continue_task_id,
-                         lender=target.name, origin=origin, session=session, model=model, effort=effort)
+                         lender=target.name, origin=origin, session=session, model=model, effort=effort, thread_id=thread_id)
         self.tasks[task_id] = rec
         self._events[task_id] = []
         target.last_assigned = now

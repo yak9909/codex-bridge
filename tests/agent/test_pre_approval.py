@@ -373,10 +373,11 @@ async def test_a_cancel_for_another_task_leaves_the_pending_one(env):
     assert env.runner.pending_approval["task_id"] == "t1" and env.states() == ["awaiting_lender"]
 
 
-async def test_a_second_task_while_one_waits_is_refused_not_queued(env):
+async def test_a_second_task_above_capacity_is_refused_not_queued(env):
+    env.runner.settings["max_parallel"] = 1
     await env.start()
     await env.start("t2", "別の")
-    assert env.last_state("t2")["state"] == "failed" and "作業中" in env.last_state("t2")["report"]
+    assert env.last_state("t2")["state"] == "rejected_by_lender" and "上限" in env.last_state("t2")["report"]
     assert env.runner.pending_approval["task_id"] == "t1"
 
 

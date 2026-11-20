@@ -186,3 +186,33 @@ def test_lender_tab_reads_setup_error_from_resident_state():
     text = (APP / "lend.js").read_text(encoding="utf-8")
     assert 'get("/app/api/state")' in text
     assert 'setupErrorHtml(appState.lend.error)' in text
+
+
+def test_parallel_lender_cards_and_pending_items_are_escaped(run_app_js):
+    run_app_js('''
+import assert from "node:assert/strict";
+import { lenderParts } from "./use-lenders.js";
+import { connectionHead } from "./lend-cards.js";
+import { pendingHtml } from "./lend.js";
+const parts = lenderParts({name: "<alice>", connected:true, ready:true, current_task_id:"a",
+  active_task_ids:["a","b"], lender_view: {max_parallel: 3, features:{}, pre_approval:{}, over_limit:"report"}},
+  {open:true}, new Map());
+assert.ok(parts.head.includes("2 件作業中"));
+assert.ok(parts.set.includes("同時に受ける依頼"));
+assert.ok(parts.set.includes('<option>3</option>'));
+assert.ok(parts.set.includes("&lt;alice&gt;"));
+const tasks = ["one","two"].map(task_id => ({task_id, connection_id:"c", state:"running", prompt:"task"}));
+assert.ok(connectionHead({id:"c", host_name:"<host>", connected:true, busy:true}, false, tasks).includes("2 件作業中"));
+const one = pendingHtml({task_id:'<one>', connection_id:'<host>', created:1, prompt:'<script>first</script>', kind:"start"});
+const two = pendingHtml({task_id:'<two>', connection_id:'<host>', created:2, prompt:'<img src=x>', kind:"followup"});
+for (const html of [one, two]) {
+  assert.ok(!html.includes("<script>") && !html.includes("<img"));
+  assert.equal((html.match(/data-act="decide"/g) || []).length, 2);
+  assert.ok(html.includes('data-act="reason"') && html.includes('data-pending='));
+}
+assert.ok(one.includes("&lt;one&gt;") && two.includes("&lt;two&gt;"));
+''')
+    source = (APP / "lend.js").read_text(encoding="utf-8")
+    assert 'data-act="parallel"' in source and 'length: 8' in source
+    assert 'max_parallel: Number(input.value)' in source
+    assert 'item.querySelector' in source and 'created: p.created' in source

@@ -14,6 +14,8 @@ function stateOf(l) {
 function caption(l, tasks) {
   if (!l.connected) return `<span class="cap">${l.since ? `最後につながったのは ${esc(fmtDay(l.since))}` : "まだつながっていません"}</span>`;
   if (!l.ready) return '<span class="cap">使用量を読み込んでいます</span>';
+  const count = l.active_task_ids?.length || (l.current_task_id ? 1 : 0);
+  if (count > 1) return `<span class="cap low">${esc(count)} 件作業中</span>`;
   const t = l.current_task_id && tasks.get(l.current_task_id);
   if (t) return `<span class="cap ellipsis">${esc(taskTitle(t))}</span>`;
   if (l.current_task_id) return `<span class="cap ellipsis">${esc(l.current_task_id)}</span>`;
@@ -91,6 +93,7 @@ function viewGroup(l) {
   const rows = [
     row("使えるモデル", modelsRow(v)),
     row("推論の強さの上限", v ? `<select class="ro" aria-readonly="true" tabindex="-1"><option>${esc(v.max_effort)}</option></select>` : dash()),
+    row("同時に受ける依頼", v ? `<select class="ro" aria-readonly="true" tabindex="-1"><option>${esc(v.max_parallel ?? 1)}</option></select>` : dash()),
     row("始める前の許可", preRow(v)),
     row("続きの依頼", flag(v && v.resumable)),
     row("Web 検索", flag(f && f.web_search)),

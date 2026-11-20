@@ -36,16 +36,22 @@ INSTRUCTIONS = (
 # Invite name of the lender whose Codex sent the message being handled. Set only while that one
 # message is handled, so two lenders calling at the same time each see their own name.
 current_lender: ContextVar[str | None] = ContextVar("current_lender", default=None)
+current_thread_id: ContextVar[str | None] = ContextVar("current_thread_id", default=None)
+call_task_id: ContextVar[str | None] = ContextVar("call_task_id", default=None)
 
 
 async def _as_lender(ctx, call_next):
     """MCP server middleware: handle the message as the lender BearerAuth matched its token to."""
     scope = getattr(ctx.request, "scope", None) or {}
+    meta = (ctx.params or {}).get("_meta") or {}
+    thread_id = meta.get("threadId") if isinstance(meta, dict) else None
+    thread_token = current_thread_id.set(thread_id if isinstance(thread_id, str) and thread_id else None)
     token = current_lender.set((scope.get("state") or {}).get("lender"))
     try:
         return await call_next(ctx)
     finally:
         current_lender.reset(token)
+        current_thread_id.reset(thread_token)
 
 
 @dataclass
@@ -77,8 +83,12 @@ def build_codex_mcp(s: HostServices, match_token: Callable[[str], str | None]) -
     server = MCPServer(name="codex-bridge", instructions=INSTRUCTIONS, middleware=[_as_lender])
 
     async def run(name: str, args: dict, fn, *, blocking: bool) -> CallToolResult:
+        task_id = s.task_id_fn()
+        token = call_task_id.set(task_id)
         try:
             s.paths.check_configured()
+            if name in {"write_file", "edit_file", "apply_patch", "move_path", "delete_path", "run_command"} and task_id is None:
+                raise ToolError("どの依頼の操作か分からないため、書き込み・削除・コマンド実行は受け付けません。")
             result = await (asyncio.to_thread(fn) if blocking else fn())
         except (ToolError, OSError) as e:
             if isinstance(e, PermissionError):
@@ -93,9 +103,11 @@ def build_codex_mcp(s: HostServices, match_token: Callable[[str], str | None]) -
                 message = f"ファイルの操作に失敗しました: {e.strerror or str(e)}"
             else:
                 message = str(e)
-            s.audit.write("tool_call", tool=name, args=_summarize(args), ok=False, error=message, task_id=s.task_id_fn())
+            s.audit.write("tool_call", tool=name, args=_summarize(args), ok=False, error=message, task_id=task_id)
             return error_result(message)
-        s.audit.write("tool_call", tool=name, args=_summarize(args), ok=True, task_id=s.task_id_fn())
+        finally:
+            call_task_id.reset(token)
+        s.audit.write("tool_call", tool=name, args=_summarize(args), ok=True, task_id=task_id)
         return json_result(result)
 
     def tool(description: str):

@@ -222,12 +222,12 @@ async def hold(env, task_id="t1"):
 
 @pytest.mark.parametrize("approve", [True, False])
 async def test_pending_decisions_use_the_task_id_seen_and_cannot_be_repeated(env, approve):
-    assert (await env.http.get("/api/pending")).json() is None
+    assert (await env.http.get("/api/pending")).json() == []
     await hold(env)
-    pending = (await env.http.get("/api/pending")).json()
+    pending, = (await env.http.get("/api/pending")).json()
     assert pending["task_id"] == "t1" and pending["kind"] == "start" and pending["created"]
     assert (await env.http.get("/api/overview")).json()["state"] == "awaiting_lender"
-    body = {"task_id": "t1", "approve": approve, "reason": "今は使えません"}
+    body = {"task_id": "t1", "created": pending["created"], "approve": approve, "reason": "今は使えません"}
     assert (await env.http.post("/api/pending", json=body, headers=WRITE)).status_code == 200
     assert env.runner.pending_approval is None
     assert (await env.http.post("/api/pending", json=body, headers=WRITE)).status_code == 409
@@ -237,7 +237,7 @@ async def test_pending_decisions_use_the_task_id_seen_and_cannot_be_repeated(env
 
 async def test_stale_approval_cannot_decide_a_different_pending_task(env):
     await hold(env, "new")
-    response = await env.http.post("/api/pending", json={"task_id": "old", "approve": True}, headers=WRITE)
+    response = await env.http.post("/api/pending", json={"task_id": "old", "created": 0.0, "approve": True}, headers=WRITE)
     assert response.status_code == 409 and env.runner.pending_approval["task_id"] == "new"
     assert env.runner.cur is None
     assert await env.runner.decide_pending(True, task_id="old") is False
@@ -418,3 +418,19 @@ async def test_files_visibility_never_exposes_nested_nonpath_arguments(env):
                                         "result_summary": "SECRET"})
     task = (await env.http.get("/api/tasks/t1")).json()
     assert "SECRET" not in str(task)
+
+
+async def test_multiple_pending_decisions_and_overview_counts(env):
+    await hold(env, "one")
+    await hold(env, "two")
+    rows = (await env.http.get("/api/pending")).json()
+    assert [p["task_id"] for p in rows] == ["one", "two"]
+    overview = (await env.http.get("/api/overview")).json()
+    assert overview["active_tasks"] == overview["pending_approvals"] == 2
+    missing_created = {"task_id": "one", "approve": True}
+    assert (await env.http.post("/api/pending", json=missing_created, headers=WRITE)).status_code == 422
+    for row, approve in zip(rows, (True, False)):
+        body = {"task_id": row["task_id"], "created": row["created"], "approve": approve, "reason": "今は使いません"}
+        assert (await env.http.post("/api/pending", json=body, headers=WRITE)).status_code == 200
+    assert set(env.runner.currents) == {"one"} and not env.runner.pending_approvals
+    assert (await env.http.get("/api/pending")).json() == []

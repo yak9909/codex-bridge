@@ -152,7 +152,7 @@ async def test_settings_are_per_connection_but_limits_are_shared(multi):
     assert 'web_search="disabled"' not in multi.fakes[a].argv
     assert 'web_search="disabled"' in multi.fakes[b].argv
     assert set((await multi.http.get("/api/settings")).json()["settings"]) == {
-        "limits", "workdir", "log_retention_days"}
+        "limits", "workdir", "log_retention_days", "max_parallel"}
     assert (await multi.http.put(f"/api/connections/{a}/settings", json={"limits": {}}, headers=WRITE)).status_code == 400
 
 
@@ -261,7 +261,7 @@ async def test_connections_api_validates_codes_settings_and_local_write_header(m
     new = await multi.http.post("/api/connections", json={"code": make_invite("http://c.invalid", "s", "f")}, headers=WRITE)
     assert new.status_code == 201
     rows = (await multi.http.get("/api/connections")).json()
-    assert len(rows) == 3 and all(set(r) == {"id", "host_name", "connected", "invite_problem", "busy"} for r in rows)
+    assert len(rows) == 3 and all(set(r) == {"id", "host_name", "connected", "invite_problem", "busy", "active_task_ids"} for r in rows)
     assert "secret" not in str(rows)
     assert (await multi.http.get("/api/connections/missing/settings")).status_code == 404
     for body in ({}, {"code": 1}, {"code": "bad", "other": "x"}):
@@ -270,6 +270,7 @@ async def test_connections_api_validates_codes_settings_and_local_write_header(m
 
 async def test_concurrent_requests_reserve_one_slot_and_keep_each_pending_timeout(multi):
     m = multi.runtime
+    await m.apply_shared(m.settings.update({"max_parallel": 1}))
     for connection in (multi.a, multi.b):
         await m.update_settings(connection.id, {"pre_approval": {"enabled": True, "timeout_min": None}})
     a, b = (m.runners[c.id] for c in (multi.a, multi.b))

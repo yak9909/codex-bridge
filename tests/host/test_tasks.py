@@ -75,7 +75,7 @@ async def test_lender_models_message_updates_offer(mgr, model_agent):
 
 VIEW = {"features": {"web_search": True, "image_generation": False, "multi_agent": False, "goals": True},
         "pre_approval": {"new_task": True, "followup": False, "timeout_min": 30},
-        "resumable": True, "over_limit": "stop", "max_effort": "high",
+        "resumable": True, "over_limit": "stop", "max_effort": "high", "max_parallel": 1,
         "models_all": [{"model": "m1", "allowed": True, "is_default": True},
                        {"model": "m2", "allowed": False, "is_default": False}]}
 
@@ -814,7 +814,7 @@ async def test_hello_without_current_task_id_leaves_a_queued_task_alone(mgr, age
                      protocol=2, capabilities={"resumable": False, "pre_approval": True})
     assert mgr.status(tid)["state"] == "queued" and mgr.current_task_id() == tid
     assert mgr.lenders()[0]["current_task_id"] == tid
-    assert mgr.agent_info()["capabilities"] == {"resumable": False, "pre_approval": True, "model_select": False}  # it did take effect
+    assert mgr.agent_info()["capabilities"] == {"resumable": False, "pre_approval": True, "model_select": False, "max_parallel": 1}  # it did take effect
     with pytest.raises(ToolError, match="作業中"):
         await mgr.start("b")
     await agent.push("task_state", task_id=tid, state="running", thread_id="th1")

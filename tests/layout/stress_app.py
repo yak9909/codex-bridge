@@ -32,7 +32,7 @@ LONG_NAME = "very-long-lender-name-" * 3
 LONG_PATH = "D:/work/" + "/".join(f"nested-folder-{i}" for i in range(25)) + "/report.md"
 VIEW = {"features": {"web_search": False, "image_generation": True, "multi_agent": False, "goals": True},
         "pre_approval": {"new_task": True, "followup": True, "timeout_min": 30}, "resumable": True, "over_limit": "report",
-        "max_effort": "xhigh",
+        "max_effort": "xhigh", "max_parallel": 3,
         "models_all": [{"model": f"GPT-6.{i}-Model-With-A-Long-Name", "allowed": i % 3 != 0, "is_default": i == 1} for i in range(14)]}
 MODELS = [{"model": f"GPT-6.{i}-Model-With-A-Long-Name", "efforts": ["low", "high", "xhigh"], "is_default": i == 1}
           for i in range(14) if i % 3 != 0]
@@ -62,8 +62,8 @@ async def _fill_host(host, now: float) -> None:
     links = {}
     for name in names[:3]:
         links[name] = link = _Link(host, name)
-        await link.push("hello", agent_version="0.3.0", codex_version="x", auth_mode="chatgpt", protocol=4,
-                        capabilities={"resumable": True, "pre_approval": True, "model_select": True}, models=MODELS,
+        await link.push("hello", agent_version="0.3.0", codex_version="x", auth_mode="chatgpt", protocol=5,
+                        capabilities={"resumable": True, "pre_approval": True, "model_select": True, "max_parallel": 3}, models=MODELS,
                         max_effort="xhigh", lender_view=VIEW, limits={"five_hour": 80, "weekly": 60, "force": False},
                         current_task_id=None)
         await link.push("usage", five_hour={"used_percent": 45, "resets_at": now + 3600},
@@ -83,6 +83,8 @@ async def _fill_host(host, now: float) -> None:
         await y.push("event", task_id=t, kind="tool_finished",
                      data={"tool": "run_command", "arguments": {"command": f"npm test -- {LONG_PATH}"}, "success": True})
     await y.push("task_state", task_id=t, state="running")
+    second = await host.mgr.start("並行して進める別の依頼", lender="yamada")
+    await y.push("task_state", task_id=second, thread_id="parallel-thread", state="running")
     host.approvals.request("command", "npm test -- --runInBand " + LONG_PATH, t)
     host.approvals.request("delete", LONG_PATH, t)
     # Populate tasks before displaying the over-limit state: real starts enforce quotas.
@@ -143,7 +145,12 @@ def _lender_side(root: Path, now: float):
     log2.add("t2", "state", {"state": "completed"}, **first.connection_fields())
     first.cur = Current("t1", "thread1", model=MODELS[0]["model"], effort="high")
     first.approval.pending = Pending({"task_id": "t1", "text": LONG_LINE}, "followup", now - 180, None, 30)
-    connections.slot.owner = first
+    first.currents["t3"] = Current("t3", "thread3")
+    log.add("t3", "task_prompt", {"text": "同時に進める別の依頼"}, **first.connection_fields())
+    log.add("t3", "state", {"state": "running"}, **first.connection_fields())
+    log.add("t4", "task_prompt", {"text": MANY_LINES}, **first.connection_fields())
+    log.add("t4", "state", {"state": "awaiting_lender"}, **first.connection_fields())
+    first.approval.pendings["t4"] = Pending({"task_id": "t4", "prompt": MANY_LINES}, "start", now - 60, None, 30)
 
     async def apply(saved):
         pass
@@ -157,7 +164,7 @@ def _lender_side(root: Path, now: float):
         error = None
 
         def counts(self):
-            return (sum(c["connected"] for c in connections.rows()), len(connections.runners), 1)
+            return (sum(c["connected"] for c in connections.rows()), len(connections.runners), sum(len(r.pending_approvals) for r in connections.runners.values()))
 
         async def set_paused(self, p):
             self.paused = p

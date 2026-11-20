@@ -35,6 +35,7 @@ DEFAULTS = {
     "log_retention_days": 30,
     "allowed_models": None,
     "max_effort": "xhigh",
+    "max_parallel": 3,
 }
 
 
@@ -225,9 +226,9 @@ def test_stopping_sub_agents_is_also_asked_for_in_the_instructions():
 
 
 # ---- hello (design 6) ----------------------------------------------------------------------
-def test_hello_says_protocol_4_what_this_agent_can_do_and_its_limits():
+def test_hello_says_protocol_5_what_this_agent_can_do_and_its_limits():
     h = st.hello_fields(DEFAULTS)
-    assert h == {"protocol": 4, "capabilities": {"resumable": True, "pre_approval": False, "model_select": True},
+    assert h == {"protocol": 5, "capabilities": {"resumable": True, "pre_approval": False, "model_select": True, "max_parallel": 3},
                  "limits": {"five_hour": 80, "weekly": 80, "force": False}, "models": None, "max_effort": "xhigh",
                  "lender_view": h["lender_view"]}
     s = copy.deepcopy(DEFAULTS)
@@ -235,10 +236,10 @@ def test_hello_says_protocol_4_what_this_agent_can_do_and_its_limits():
     s["pre_approval"]["followup"] = True
     s["limits"] = {"five_hour": 60, "weekly": None, "force": True}
     h = st.hello_fields(s)
-    assert h["capabilities"] == {"resumable": False, "pre_approval": True, "model_select": True}
+    assert h["capabilities"] == {"resumable": False, "pre_approval": True, "model_select": True, "max_parallel": 3}
     assert h["limits"] == {"five_hour": 60, "weekly": None, "force": True}
     # what the host makes of it (host/lenders.py): the same, nothing dropped or turned around
-    assert lenders.as_protocol(h["protocol"]) == 4
+    assert lenders.as_protocol(h["protocol"]) == 5
     assert lenders.normalize_capabilities(h["capabilities"]) == h["capabilities"]
     assert lenders.normalize_limits(h["limits"]) == h["limits"]
     h["limits"]["five_hour"] = 1  # a copy: the settings are not changed through it
@@ -260,10 +261,10 @@ def test_hello_has_lender_view():
     view = st.hello_fields(s, CATALOG)["lender_view"]
     assert view == {"features": {"web_search": False, "image_generation": False, "multi_agent": False, "goals": True},
                     "pre_approval": {"new_task": True, "followup": False, "timeout_min": None},
-                    "resumable": False, "over_limit": "stop", "max_effort": "high",
+                    "resumable": False, "over_limit": "stop", "max_effort": "high", "max_parallel": 3,
                     "models_all": [{"model": "m1", "allowed": True, "is_default": True},
                                    {"model": "m2", "allowed": False, "is_default": False}]}
-    assert set(view) == {"features", "pre_approval", "resumable", "over_limit", "max_effort", "models_all"}
+    assert set(view) == {"features", "pre_approval", "resumable", "over_limit", "max_effort", "models_all", "max_parallel"}
     plain = st.hello_fields(DEFAULTS, None)["lender_view"]
     assert plain["over_limit"] == "report" and plain["resumable"] is True and plain["models_all"] is None
     assert [m["allowed"] for m in st.hello_fields(DEFAULTS, CATALOG)["lender_view"]["models_all"]] == [True, True]
@@ -286,7 +287,7 @@ def test_pre_approval_legacy_enabled(tmp_path, legacy, expected):
 
 def test_hello_fields_v03():
     h = st.hello_fields(st.defaults())
-    assert h["protocol"] == 4
+    assert h["protocol"] == 5
     assert h["capabilities"]["model_select"] is True
     assert h["models"] is None and h["max_effort"] == "xhigh"
 
@@ -299,6 +300,7 @@ def test_models_fields_filters_catalog_for_the_connection():
     fields = st.models_fields(settings, catalog)
     assert fields.pop("lender_view")["models_all"] == [{"model": "m1", "allowed": False, "is_default": True},
                                                        {"model": "m2", "allowed": True, "is_default": False}]
+    assert fields.pop("capabilities") == st.capabilities(settings)
     assert fields == expected
     hello = st.hello_fields(settings, catalog)
     assert {key: hello[key] for key in expected} == expected
@@ -952,3 +954,23 @@ async def test_the_data_is_moved_from_the_running_root_even_when_location_txt_sa
     assert snapshot(new) == before  # what was in use is what arrived
     assert (stale / "decoy.txt").read_text(encoding="utf-8") == "not the data"  # the other place is untouched
     assert setup.data_root() == new  # and location.txt now says where the data is
+
+
+@pytest.mark.parametrize("value", [0, 9, -1, True, False, 2.5, "3", None, [], {}])
+def test_max_parallel_rejects_invalid_values_and_preserves_the_store(tmp_path, value):
+    store = st.SettingsStore(tmp_path / "settings.json", shared=True)
+    store.update({"max_parallel": 4})
+    with pytest.raises(ValueError, match="1〜8"):
+        store.update({"max_parallel": value})
+    assert store.get()["max_parallel"] == 4
+
+
+@pytest.mark.parametrize("value", range(1, 9))
+def test_max_parallel_is_shared_persistent_and_announced(tmp_path, value):
+    store = st.SettingsStore(tmp_path / "settings.json", shared=True)
+    store.update({"max_parallel": value})
+    settings = {**st.defaults(), **st.SettingsStore(store.path, shared=True).get()}
+    assert settings["max_parallel"] == value
+    assert st.hello_fields(settings)["capabilities"]["max_parallel"] == value
+    assert st.models_fields(settings, None)["lender_view"]["max_parallel"] == value
+    assert st.models_fields(settings, None)["capabilities"]["max_parallel"] == value
