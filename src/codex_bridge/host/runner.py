@@ -4,17 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-import ntpath
-import re
 import secrets
 import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable
 
 from ..common.audit import AuditLog
 from .approvals import Approvals
+from .command_rules import inspect_commands, lex, normalized_path, program_name
 from .paths import UNSET_SHARE_MSG, SafePaths, ToolError, not_found
 from .policy import OUTPUTS_TOP, Policy, PolicyStore, glob_to_regex, normalize_rel
 from .snapshots import Snapshots
@@ -56,85 +55,29 @@ def match_allow(command: str, patterns: list[str]) -> bool:
     return False
 
 
-def _program(token: str) -> str:
-    name = ntpath.basename(token.strip("'\"")).lower()
-    stem, ext = ntpath.splitext(name)
-    return stem if ext in (".exe", ".cmd", ".bat", ".com") else name
-
-
-def _rule_segments(command: str) -> Iterator[str]:
-    start = 0
-    quote = ""
-    escaped = False
-    for i, char in enumerate(command):
-        if quote:
-            if char == quote and not escaped:
-                quote = ""
-            escaped = char == "\\" and not escaped
-        elif char in "'\"":
-            quote = char
-        elif char in "&|;\r\n":
-            yield command[start:i]
-            start = i + 1
-    yield command[start:]
-    if quote and start:
-        yield command
-
-
-_RULE_WORD = re.compile(r""" "[^"]*" | '[^']*' | \S+ """, re.VERBOSE)
-_WINDOWS_PROGRAM = re.compile(r"""(?i)^\s*((?:[a-z]:[\\/]|\\\\)[^:"'\r\n]*?\.(?:exe|cmd|bat|com))(?=\s|$)""")
-
-
-def _unquote(token: str) -> str:
-    if len(token) >= 2 and token[0] in "'\"" and token[-1] == token[0]:
-        return token[1:-1]
-    return token
-
-
-def _rule_commands(command: str, depth: int = 0) -> Iterator[list[str]]:
-    for segment in _rule_segments(command):
-        # Accept a Windows program path with spaces as well as a quoted path.
-        path = _WINDOWS_PROGRAM.match(segment)
-        words = list(_RULE_WORD.finditer(segment, path.end() if path else 0))
-        tokens = [word.group() for word in words]
-        if path:
-            tokens.insert(0, path[1])
-        if not tokens:
-            continue
-        program = _program(tokens[0])
-        yield [program, *tokens[1:]]
-        if depth == 3 or len(tokens) < 3:
-            continue
-        flag = tokens[1].lower()
-        if ((program == "cmd" and flag in ("/c", "/k"))
-                or (program in ("powershell", "pwsh") and flag in ("-c", "-command"))):
-            # Keep the original quotes, including CMD's outer pair around a quoted executable.
-            first_arg = words[1 if path else 2]
-            inner = segment[first_arg.start():].rstrip()
-            if inner.startswith('""') or len(tokens) == 3:
-                inner = _unquote(inner)
-            elif program != "cmd":
-                inner = _unquote(tokens[2]) + segment[first_arg.end():]
-            yield from _rule_commands(inner, depth + 1)
-        elif program in ("bash", "sh") and flag == "-c":
-            yield from _rule_commands(_unquote(tokens[2]), depth + 1)
-
-
-def _matching_rule(commands: list[list[str]], patterns: list[str]) -> str | None:
+def _matching_rule(commands: list[list[str | None]], patterns: list[str]) -> str | None:
     for pattern in patterns:
-        tokens = _tokens(pattern)
-        if not tokens:
+        segments, uncertain = lex(pattern, "powershell", pattern=True)
+        if uncertain or not segments:
             continue
+        tokens = [word.value for word in segments[0]]
         rest_any = tokens[-1] == "*"
         fixed = tokens[:-1] if rest_any else tokens
-        if fixed:
-            fixed[0] = _program(fixed[0])
         for command in commands:
             if len(command) < len(fixed) or (not rest_any and len(command) != len(fixed)):
                 continue
-            if all(_token_match(p, t) for p, t in zip(fixed, command)):
+            pairs = zip(fixed, command)
+            if all(t is not None and _rule_token_match(p, t, i == 0) for i, (p, t) in enumerate(pairs)):
                 return pattern
     return None
+
+
+def _rule_token_match(pattern: str, token: str, program: bool) -> bool:
+    normalize = program_name if program else normalized_path
+    pat, value = normalize(pattern), normalize(token)
+    if any(c in pat for c in "*?["):
+        return glob_to_regex(pat).fullmatch(normalize_rel(value)) is not None
+    return pat.casefold() == value.casefold()
 
 
 def decode_output(b: bytes) -> str:
@@ -197,24 +140,21 @@ class CommandRunner:
             return "実行は許可されていません（実行モードが off です）", False
         deny = [*policy.deny_patterns, *(task.deny if task else [])]
         ask = [] if approved else [*policy.ask_patterns, *(task.ask if task else [])]
-        commands = list(_rule_commands(job.command)) if deny or ask else []
+        commands, uncertain = inspect_commands(job.command)
         if (rule := _matching_rule(commands, deny)) is not None:
             return f"コマンドの規則の拒否リストに当たるため実行しません: {rule}", False
         if approved:
             return None, False
-        if _matching_rule(commands, ask) is not None:
+        if uncertain or _matching_rule(commands, ask) is not None:
             return None, True
-        return None, self._needs_approval(job.command, job.task_id, mode, policy)
-
-    def _needs_approval(self, command: str, task_id: str | None, mode: str, policy: Policy) -> bool:
         if policy.confirm_modified_scripts:
-            touched = {t.lower() for t in self.snapshots.touched(task_id)}
-            for tok in _tokens(command):
-                if normalize_rel(tok.strip('"')).lower() in touched:
-                    return True
+            touched = {normalized_path(path).casefold() for path in self.snapshots.touched(job.task_id)}
+            if any(normalized_path(token).casefold() in touched for words in commands for token in words
+                   if token is not None):
+                return None, True
         if mode == "allowlist":
-            return not match_allow(command, policy.allow_patterns)
-        return mode == "ask"
+            return None, not match_allow(job.command, policy.allow_patterns)
+        return None, mode == "ask"
 
     async def run_command(self, command: str, cwd: str = ".", timeout_sec: int | None = None) -> dict:
         self.paths.check_running()

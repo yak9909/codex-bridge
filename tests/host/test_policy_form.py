@@ -58,6 +58,14 @@ def test_form_roundtrip(tmp_path):
         ((tmp_path / "work" / "locked").as_posix(), "read"), ((tmp_path / "tools").as_posix(), "read")}
 
 
+@pytest.mark.parametrize("key", ["allow", "deny", "ask"])
+def test_policy_rejects_unclosed_pattern_quotes(tmp_path, key):
+    store = store_with(tmp_path)
+    with pytest.raises(ValueError, match="引用符"):
+        store.update(**{f"exec_{key}": ['show "unfinished']})
+    assert parse_policy(store.as_dict()).exec_mode == "allowlist"
+
+
 def test_command_rule_lists_roundtrip_through_folder_edits(tmp_path):
     store = store_with(tmp_path)
     assert store.current().deny_patterns == store.current().ask_patterns == []

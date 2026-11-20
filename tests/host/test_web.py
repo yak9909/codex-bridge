@@ -907,7 +907,7 @@ async def test_admin_task_exec_settings_are_guarded_and_partial(admin, host):
     task_id = reply.json()["task_id"]
     url = f"/admin/api/tasks/{task_id}"
     assert (await admin.put(f"{url}/exec", json={"exec_mode": "off"})).status_code == 403
-    reply = await admin.put(f"{url}/exec", json={"ask": ["echo y"], "exec_mode": None}, headers=H)
+    reply = await admin.put(f"{url}/exec", json={"ask": ["echo y"], "exec_mode": "inherit"}, headers=H)
     assert reply.status_code == 200
     assert reply.json() == {"exec_mode": None, "deny": ["echo x"], "ask": ["echo y"], "effective_exec_mode": "all"}
     detail = (await admin.get(url)).json()

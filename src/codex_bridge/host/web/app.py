@@ -270,6 +270,8 @@ def admin_router(host, page_url: str | None = None) -> APIRouter:
     @r.put("/api/tasks/{task_id}/exec")
     async def task_exec(task_id: str, body: dict):
         changes = {key: body[key] for key in ("exec_mode", "deny", "ask") if key in body}
+        if changes.get("exec_mode") == "inherit":
+            changes["exec_mode"] = None
         try:
             return host.mgr.set_task_exec(task_id, **changes)
         except ToolError as e:

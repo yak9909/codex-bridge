@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import threading
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -11,6 +12,8 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
+
+from .command_rules import lex
 
 Level = Literal["hidden", "read", "write"]
 ExecMode = Literal["off", "allowlist", "ask", "all"]
@@ -188,6 +191,9 @@ def command_patterns(value, label: str) -> list[str]:
         return []
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"{label} はコマンドの型の並びで指定してください")
+    for item in value:
+        if lex(item, "powershell", pattern=True)[1]:
+            raise ValueError(f"{label} の型の引用符が閉じていません: {item}")
     return list(value)
 
 
@@ -245,6 +251,11 @@ def parse_policy(data: dict | None) -> Policy:
     allow = ex.get("allow") or []
     if not isinstance(allow, list) or not all(isinstance(a, str) for a in allow):
         raise ValueError("exec.allow must be a list of strings")
+    for pattern in allow:
+        try:
+            shlex.split(pattern, posix=False)
+        except ValueError as e:
+            raise ValueError(f"exec.allow の型の引用符が閉じていません: {pattern}") from e
     lim = data.get("limits") or {}
     try:
         limits = Limits(**{k: int(v) for k, v in lim.items()})

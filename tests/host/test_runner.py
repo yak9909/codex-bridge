@@ -5,6 +5,7 @@ from threading import Event
 
 import pytest
 
+from codex_bridge.host.command_rules import inspect_commands, lex
 from codex_bridge.host.paths import ToolError
 from codex_bridge.host.runner import match_allow
 
@@ -123,9 +124,102 @@ async def test_rule_separators_respect_quotes_and_wrapper_depth(share, monkeypat
 
     monkeypatch.setattr(share.runner, "_execute", execute)
     share.set_policy(exec_mode="all", exec_deny=["blocked"], limits={"sync_wait_sec": 1})
-    for command in ('echo "quoted && blocked"', "cmd /c cmd /c cmd /c cmd /c blocked"):
-        assert (await share.runner.run_command(command))["status"] == "done"
+    assert (await share.runner.run_command('echo "quoted && blocked"'))["status"] == "done"
+    waiting = await share.runner.run_command("cmd /c cmd /c cmd /c cmd /c blocked")
+    assert waiting["status"] == "waiting_approval"
+    approval, = share.approvals.pending()
+    share.approvals.decide(approval.id, False)
+    await share.runner.jobs[waiting["job_id"]].done.wait()
     assert (await share.runner.run_command("cmd /c cmd /c cmd /c blocked"))["status"] == "denied"
+
+
+@pytest.mark.parametrize("shell, source, expected", [
+    ("cmd", r'write "sample\" & show next', [["write", "sample\\"], ["show", "next"]]),
+    ("cmd", "write 'one & show two'", [["write", "'one"], ["show", "two'"]]),
+    ("cmd", 'show pa^rt left^&right "a^b"', [["show", "part", "left&right", "a^b"]]),
+    ("posix", r"""show 'one & two' name\ space; show "literal\q" """,
+     [["show", "one & two", "name space"], ["show", "literal\\q"]]),
+    ("powershell", 'show "a' + chr(96) + """"b"; show 'one | two'""",
+     [["show", 'a"b'], ["show", "one | two"]]),
+])
+def test_rule_lexer_keeps_each_shells_literals(shell, source, expected):
+    segments, uncertain = lex(source, shell)
+    assert [[word.value for word in words] for words in segments] == expected
+    assert not uncertain
+
+
+@pytest.mark.parametrize("source", [
+    'cmd /s /C "show blue"',
+    'cmd /C"show blue"',
+    '%COMSPEC% /k "show blue"',
+    'pwsh -NoProfile -comm "show blue"',
+    """bash -lc 'show blue'""",
+    'call show blue',
+])
+def test_inspection_finds_nested_sample_command(source):
+    commands, uncertain = inspect_commands(source)
+    assert ["show", "blue"] in commands
+    assert not uncertain
+
+
+@pytest.mark.parametrize("source", [
+    'show "unfinished', 'show last^', 'pwsh -NoProfile -ec sample',
+    'powershell -EncodedCommand sample', 'bash -lc', 'cmd /c cmd /c cmd /c cmd /c show',
+    'show (sample)', 'show %SAMPLE%',
+])
+async def test_unreadable_input_requires_approval(share, source):
+    share.set_policy(exec_mode="all", exec_deny=["show"], limits={"sync_wait_sec": 0})
+    reply = await share.runner.run_command(source)
+    assert reply["status"] == "waiting_approval"
+    approval, = share.approvals.pending()
+    share.approvals.decide(approval.id, False)
+    await share.runner.jobs[reply["job_id"]].done.wait()
+
+
+@pytest.mark.parametrize("rule_type", ["deny", "ask"])
+@pytest.mark.parametrize("source, expected", [
+    ('show "assets/color.dat"', True),
+    ('show assets/../assets/color.dat', True),
+    ('show assets/../images/color.dat', False),
+])
+async def test_restrictive_rules_match_normalized_arguments(share, monkeypatch, rule_type, source, expected):
+    async def execute(job, cwd, timeout):
+        job.status = "done"
+
+    monkeypatch.setattr(share.runner, "_execute", execute)
+    share.set_policy(exec_mode="all", limits={"sync_wait_sec": 0}, **{f"exec_{rule_type}": ["show assets/**"]})
+    reply = await share.runner.run_command(source)
+    job = share.runner.jobs[reply["job_id"]]
+    if expected and rule_type == "ask":
+        assert reply["status"] == "waiting_approval"
+        approval, = share.approvals.pending()
+        share.approvals.decide(approval.id, False)
+        await job.done.wait()
+    else:
+        await job.done.wait()
+        assert job.status == ("denied" if expected else "done")
+
+
+@pytest.mark.parametrize("source, expected", [
+    ('echo before & cmd /s /c "python scripts/./new.py"', True),
+    ('cmd /c "python scripts/example.py"', False),
+])
+async def test_modified_script_is_checked_in_nested_commands(share, monkeypatch, source, expected):
+    async def execute(job, cwd, timeout):
+        job.status = "done"
+
+    monkeypatch.setattr(share.runner, "_execute", execute)
+    share.task("t1")
+    share.write.write_file("scripts/new.py", "print(1)\n")
+    share.set_policy(exec_mode="all", exec_confirm_modified_scripts=True, limits={"sync_wait_sec": 0})
+    reply = await share.runner.run_command(source)
+    job = share.runner.jobs[reply["job_id"]]
+    if expected:
+        assert reply["status"] == "waiting_approval"
+        approval, = share.approvals.pending()
+        share.approvals.decide(approval.id, False)
+    await job.done.wait()
+    assert job.status == ("denied" if expected else "done")
 
 
 async def test_new_rules_apply_after_the_pre_execution_scan(share, monkeypatch):
