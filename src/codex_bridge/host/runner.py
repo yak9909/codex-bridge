@@ -146,10 +146,12 @@ class CommandRunner:
         ask = [] if approved else [*policy.ask_patterns, *(task.ask if task else [])]
         if approved and not deny:
             return None, False
+        inputs: list[str] = []
         if deny or ask:
             programs = [tokens[0] for pattern in (*deny, *ask) if (tokens := _rule_tokens(pattern))]
             commands, uncertain = inspect_commands(
-                job.command, related_program=lambda name: any(_rule_token_match(p, name, True) for p in programs))
+                job.command, related_program=lambda name: any(_rule_token_match(p, name, True) for p in programs),
+                inputs=inputs if policy.confirm_modified_scripts and not approved else None)
             if (rule := _matching_rule(commands, deny)) is not None:
                 return f"コマンドの規則の拒否リストに当たるため実行しません: {rule}", False
             if approved:
@@ -160,8 +162,15 @@ class CommandRunner:
             # Retain the legacy modified-script check when there are no restrictive rules.
             commands = [[token.strip('"') for token in _tokens(job.command)]]
         if policy.confirm_modified_scripts:
+            if not (deny or ask) and "<" in job.command:
+                inspect_commands(job.command, inputs=inputs)
+            changed_paths = self.snapshots.touched(job.task_id)
+            if inputs:
+                input_paths = {normalized_path(path).lower() for path in changed_paths}
+                if any(normalized_path(path).lower() in input_paths for path in inputs):
+                    return None, True
             normalize = normalized_path if deny or ask else normalize_rel
-            touched = {normalize(path).lower() for path in self.snapshots.touched(job.task_id)}
+            touched = {normalize(path).lower() for path in changed_paths}
             if any(normalize(token).lower() in touched for words in commands for token in words
                    if token is not None):
                 return None, True

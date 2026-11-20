@@ -309,13 +309,77 @@ def test_task_only_rules_enable_contextual_inspection(share, monkeypatch):
         assert share.runner._command_decision(job, policy) == (None, expected)
 
 
+@pytest.mark.parametrize("source", [
+    'powershell -Command "write (show blue)"',
+    'pwsh -c "write $(show blue)"',
+    'write $(show blue)',
+    "bash -c 'write $(show blue)'",
+    "bash -c 'write " + chr(96) + "show blue" + chr(96) + "'",
+    'pwsh -c "write (write (show blue))"',
+])
+@pytest.mark.parametrize("color", ["blue", "red"])
+def test_command_rules_inspect_subexpressions(share, source, color):
+    job = Job("sample", source.replace("blue", color), ".", None)
+    share.set_policy(exec_mode="all")
+    assert share.runner._command_decision(job, share.policy.current()) == (None, False)
+    share.set_policy(exec_deny=["show blue"])
+    denied, pending = share.runner._command_decision(job, share.policy.current())
+    assert (bool(denied), pending) == (color == "blue", False)
+
+
+@pytest.mark.parametrize("source", [
+    'write $(show blue',
+    'pwsh -c "write (show blue"',
+])
+def test_unclosed_subexpressions_require_approval(share, source):
+    share.set_policy(exec_mode="all", exec_deny=["show blue"])
+    assert share.runner._command_decision(Job("sample", source, ".", None), share.policy.current()) == (None, True)
+
+
+@pytest.mark.parametrize("source", [
+    "powershell -WindowStyle Hidden show blue",
+    "pwsh /wind HIDDEN -ep RemoteSigned show blue",
+    "pwsh -ExecutionPolicy:RemoteSigned -OutputF Text show blue",
+    "powershell -PSConsoleF demo.psc1 -Version 5.1 -Configura Demo show blue",
+    "pwsh -WorkingD sample -InputF Text show blue",
+])
+@pytest.mark.parametrize("color", ["blue", "red"])
+def test_powershell_options_skip_values_before_implicit_commands(share, source, color):
+    share.set_policy(exec_mode="all", exec_deny=["show blue"])
+    job = Job("sample", source.replace("blue", color), ".", None)
+    denied, pending = share.runner._command_decision(job, share.policy.current())
+    assert (bool(denied), pending) == (color == "blue", False)
+
+
+def test_powershell_unknown_option_requests_approval(share):
+    share.set_policy(exec_mode="all", exec_deny=["show blue"])
+    job = Job("sample", "pwsh -unknown sample show red", ".", None)
+    assert share.runner._command_decision(job, share.policy.current()) == (None, True)
+
+
+@pytest.mark.parametrize("deny", [[], ["unrelated"]])
+@pytest.mark.parametrize("source, expected", [
+    ("python <scripts/new.py", True),
+    ('python 0< "scripts/new.py"', True),
+    ('cmd /c "python < scripts/new.py"', True),
+    ("python < scripts/other.py", False),
+])
+def test_modified_script_checks_input_redirection(share, deny, source, expected):
+    share.task("t1")
+    share.write.write_file("scripts/new.py", "print(1)\n")
+    share.set_policy(exec_mode="all", exec_deny=deny, exec_confirm_modified_scripts=True)
+    job = Job("sample", source, ".", "t1")
+    assert share.runner._command_decision(job, share.policy.current()) == (None, expected)
+
+
 def test_rules_match_options_at_the_written_positions(share):
     source = "git -C dir push"
     job = Job("sample", source, ".", None)
     share.set_policy(exec_mode="all", exec_deny=["git * push *"])
     assert share.runner._command_decision(job, share.policy.current()) == (None, False)
-    share.set_policy(exec_deny=["git -C * push *"])
-    assert share.runner._command_decision(job, share.policy.current())[0] is not None
+    share.set_policy(exec_deny=["git -C ** push *"])
+    for command in (source, "git -C ../repo push", r"git -C A:\repo push"):
+        assert share.runner._command_decision(Job("sample", command, ".", None), share.policy.current())[0] is not None
     share.set_policy(exec_deny=["del /q *"])
     assert share.runner._command_decision(Job("sample", "del /q x", ".", None), share.policy.current())[0] is not None
 

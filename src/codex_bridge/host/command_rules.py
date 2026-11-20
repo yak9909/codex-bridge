@@ -24,7 +24,40 @@ class Word:
     has_parentheses: bool = False
 
 
-def lex(command: str, shell: Shell = "cmd", *, pattern: bool = False, cmd_semicolons: bool = False) -> tuple[list[list[Word]], bool]:
+def _expression_end(command: str, start: int, shell: Shell, closing: str) -> int | None:
+    """Find the end of a substitution without treating quoted delimiters as syntax."""
+    quote = ""
+    level = 1
+    escape = "\\" if shell == "posix" else chr(96)
+    i = start
+    while i < len(command):
+        char = command[i]
+        if char == escape and quote != "'":
+            i += 2
+            continue
+        if closing != ")" and char == closing:
+            return i
+        if char == quote:
+            if shell == "powershell" and command[i + 1:i + 2] == char:
+                i += 2
+                continue
+            quote = ""
+        elif not quote:
+            if char in "'\"":
+                quote = char
+            elif char == ")" and closing == ")":
+                level -= 1
+                if level == 0:
+                    return i
+            elif char == "(" and closing == ")":
+                level += 1
+        i += 1
+    return None
+
+
+def lex(command: str, shell: Shell = "cmd", *, pattern: bool = False, cmd_semicolons: bool = False,
+        expressions: list[tuple[str, Shell]] | None = None,
+        inputs: list[str] | None = None) -> tuple[list[list[Word]], bool]:
     """Return recognizable commands and whether any part needs manual review."""
     commands: list[list[Word]] = []
     words: list[Word] = []
@@ -32,7 +65,7 @@ def lex(command: str, shell: Shell = "cmd", *, pattern: bool = False, cmd_semico
     start = None
     quote = ""
     uncertain = False
-    expands = has_parentheses = redirect_target = False
+    expands = has_parentheses = redirect_target = input_target = False
     groups = 0
     separators = "&|\r\n" + (";" if shell != "cmd" or cmd_semicolons else "")
     cmd_delimiters = ",;=" if shell == "cmd" and not pattern else ""
@@ -40,13 +73,16 @@ def lex(command: str, shell: Shell = "cmd", *, pattern: bool = False, cmd_semico
     escape = {"cmd": "^", "posix": "\\", "powershell": chr(96)}[shell]
 
     def finish_word(end: int, *, complete: bool = True) -> None:
-        nonlocal start, expands, has_parentheses, redirect_target
+        nonlocal start, expands, has_parentheses, redirect_target, input_target
         if start is not None:
+            value = "".join(parts)
             if not redirect_target:
-                words.append(Word("".join(parts), start, end, complete, expands, has_parentheses))
+                words.append(Word(value, start, end, complete, expands, has_parentheses))
+            elif input_target and inputs is not None and complete:
+                inputs.append(value)
             parts.clear()
             start = None
-            expands = has_parentheses = redirect_target = False
+            expands = has_parentheses = redirect_target = input_target = False
 
     i = 0
     while i < len(command):
@@ -59,8 +95,33 @@ def lex(command: str, shell: Shell = "cmd", *, pattern: bool = False, cmd_semico
             redirection = _REDIRECTION.match(command, i)
             assert redirection is not None
             redirect_target = redirection[1] is None
+            input_target = redirection[0] == "<"
             i = redirection.end()
             continue
+        if expressions is not None and not pattern and quote != "'":
+            opening = 0
+            closing = ")"
+            if command.startswith("$(", i) and (shell != "cmd" or not quote):
+                opening = 2
+            elif shell == "powershell" and char == "(" and not quote and (words or start is not None):
+                opening = 1
+            elif shell == "posix" and char == chr(96):
+                opening = 1
+                closing = chr(96)
+            if opening:
+                child: Shell = "posix" if shell == "cmd" else shell
+                end = _expression_end(command, i + opening, child, closing)
+                if start is None:
+                    start = i
+                if end is None:
+                    uncertain = True
+                    finish_word(len(command), complete=False)
+                    break
+                expressions.append((command[i + opening:end], child))
+                expands |= opening == 2 or closing != ")"
+                parts.append(command[i:end + 1])
+                i = end + 1
+                continue
         group_start = char == "(" and start is None and not words and not redirect_target
         group_end = char == ")" and groups > 0
         if not quote and not pattern and (char in separators or group_start or group_end):
@@ -70,7 +131,7 @@ def lex(command: str, shell: Shell = "cmd", *, pattern: bool = False, cmd_semico
                 words = []
             if redirect_target:
                 uncertain = True
-                redirect_target = False
+                redirect_target = input_target = False
             groups += int(group_start) - int(group_end)
             uncertain |= shell == "powershell" and char == "&" and not (
                 command[i:i + 2] == "&&" or (i > 0 and command[i - 1] == "&"))
@@ -158,9 +219,21 @@ def _start_payload(command: str, words: list[Word]) -> str | None:
     return None
 
 
+_POWERSHELL_VALUE_OPTIONS = (
+    "-windowstyle", "-executionpolicy", "-configurationname", "-configurationfile",
+    "-outputformat", "-inputformat", "-psconsolefile", "-version", "-workingdirectory",
+    "-settingsfile", "-custompipename",
+)
+_POWERSHELL_SWITCHES = (
+    "-noprofile", "-noprofileloadtime", "-nologo", "-noexit", "-noninteractive",
+    "-interactive", "-sta", "-mta", "-login", "-help", "-?",
+)
+
+
 def _powershell_argument(words: list[Word]) -> tuple[int | None, bool]:
     implicit = None
     skip_value = False
+    uncertain = False
     for i, word in enumerate(words[1:], start=1):
         if skip_value:
             skip_value = False
@@ -170,14 +243,21 @@ def _powershell_argument(words: list[Word]) -> tuple[int | None, bool]:
             if implicit is None:
                 implicit = i
             continue
-        flag = "-" + flag[1:]
+        flag, separator, _ = ("-" + flag[1:]).partition(":")
         if flag == "-ec" or (len(flag) > 1 and "-encodedcommand".startswith(flag)):
             return None, True
         if len(flag) > 1 and "-command".startswith(flag):
-            return (i + 1, False) if i + 1 < len(words) else (None, True)
-        skip_value = flag in ("-executionpolicy", "-inputformat", "-outputformat",
-                              "-workingdirectory", "-configurationname", "-version", "-file")
-    return implicit, False
+            if separator or i + 1 == len(words):
+                return None, True
+            return i + 1, uncertain
+        if len(flag) > 1 and "-file".startswith(flag):
+            # Everything after the script name belongs to the script.
+            return implicit, uncertain or (not separator and i + 1 == len(words))
+        if len(flag) > 1 and (flag == "-ep" or any(option.startswith(flag) for option in _POWERSHELL_VALUE_OPTIONS)):
+            skip_value = not separator
+        elif len(flag) < 2 or not any(option.startswith(flag) for option in _POWERSHELL_SWITCHES):
+            uncertain = True
+    return implicit, uncertain or skip_value
 
 
 def _payload(command: str, words: list[Word], shell: Shell) -> tuple[str | None, Shell, bool]:
@@ -197,7 +277,7 @@ def _payload(command: str, words: list[Word], shell: Shell) -> tuple[str | None,
             tail = tail[1:-1]
         elif command[first.start] == '"':
             tail = first.value + command[first.end:words[-1].end]
-        return tail, "powershell", not tail.strip()
+        return tail, "powershell", unknown or not tail.strip()
     for i, word in enumerate(words[1:], start=1):
         flag = word.value.lower()
         if program in ("cmd", "%comspec%") and flag.startswith(("/c", "/k")) and len(flag) > 2:
@@ -234,10 +314,12 @@ def _payload(command: str, words: list[Word], shell: Shell) -> tuple[str | None,
 
 
 def inspect_commands(command: str, shell: Shell = "cmd", depth: int = 0, *,
-                     related_program: Callable[[str], bool] = lambda _: True) -> tuple[list[list[str | None]], bool]:
-    segments, uncertain = lex(command, shell)
+                     related_program: Callable[[str], bool] = lambda _: True,
+                     inputs: list[str] | None = None) -> tuple[list[list[str | None]], bool]:
+    expressions: list[tuple[str, Shell]] = []
+    segments, uncertain = lex(command, shell, expressions=expressions, inputs=inputs)
     if shell == "cmd" and ";" in command:
-        extra, unknown = lex(command, shell, cmd_semicolons=True)
+        extra, unknown = lex(command, shell, cmd_semicolons=True, expressions=[], inputs=inputs)
         if extra != segments:
             segments.extend(extra)
             uncertain |= unknown
@@ -261,10 +343,11 @@ def inspect_commands(command: str, shell: Shell = "cmd", depth: int = 0, *,
         payload, child, unknown = _payload(command, words, shell)
         uncertain |= unknown
         if payload is not None:
-            if depth >= 3:
-                uncertain = True
-            else:
-                nested, unknown = inspect_commands(payload, child, depth + 1, related_program=related_program)
-                commands.extend(nested)
-                uncertain |= unknown
+            expressions.append((payload, child))
+    if depth >= 3:
+        return commands, uncertain or bool(expressions)
+    for payload, child in expressions:
+        nested, unknown = inspect_commands(payload, child, depth + 1, related_program=related_program, inputs=inputs)
+        commands.extend(nested)
+        uncertain |= unknown
     return commands, uncertain
