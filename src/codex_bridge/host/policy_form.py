@@ -200,11 +200,13 @@ def folder_removal_form(store: PolicyStore, path: str) -> tuple[dict, bool]:
         before = store.current()
         after = parse_policy(form)
         readable = ("read", "write")
-        # A surviving alias cannot replace access through the resolved main path.
-        loses_main = any(
-            before.level_for_abs(main) in readable and after.level_for_abs(main) not in readable
-            for main in (before.main, Path(form["main"])) if main is not None
-        )
+        if before.main is not None and before.level_for_abs(before.main) in readable:
+            loses_main = after.level_for_abs(before.main) not in readable
+        else:
+            # A junction-only registration can match the original spelling alone.
+            registered_main = Path(form["main"])
+            loses_main = (before.level_for_abs(registered_main) in readable
+                          and after.level_for_abs(registered_main) not in readable)
         if loses_main:
             form["main"] = next((f["path"] for f in form["folders"] if f["level"] in ("read", "write")), None)
     return form, loses_main

@@ -146,6 +146,32 @@ def test_removing_real_parent_of_main_registered_via_junction(host, running_task
         assert alias.as_posix() in registered
 
 
+
+@pytest.mark.parametrize("state", ["running", "completed"])
+def test_removing_junction_registration_keeps_main_shared_via_real_parent(host, running_task, tmp_path, state):
+    outer = tmp_path / "outer"
+    project = outer / "project"
+    project.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(outer)],
+                   check=True, capture_output=True)
+    running_task.state = "completed"
+    add_shared_folder(host, outer.as_posix(), "write")
+    add_shared_folder(host, alias.as_posix(), "write")
+    set_main_shared_folder(host, (alias / "project").as_posix())
+    expected = project.resolve()
+    assert host.paths.resolve(".", "write") == expected
+
+    running_task.state = state
+    remove_shared_folder(host, alias.as_posix())
+
+    assert host.paths.root == host.config.share_root == expected
+    assert host.paths.resolve(".", "write") == expected
+    registered = {row["path"] for row in host.paths.roots()}
+    assert alias.as_posix() not in registered
+    assert outer.as_posix() in registered
+
+
 @pytest.mark.parametrize("state", ["running", "completed"])
 @pytest.mark.parametrize("removed", ["parent", "junction"])
 def test_removal_keeps_main_that_is_still_shared(host, running_task, tmp_path, state, removed):
