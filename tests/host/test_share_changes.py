@@ -37,6 +37,34 @@ def test_add_and_remove_share_during_task(host, running_task, tmp_path):
     assert file.read_text(encoding="utf-8") == "test"
 
 
+def test_main_removal_requires_every_active_task_to_end(host, running_task, tmp_path):
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    add_shared_folder(host, extra.as_posix(), "read")
+    original = host.paths.root
+    folders = host.paths.roots()
+    second = TaskRecord(task_id="t2", prompt="p", created=0, state="running")
+    host.mgr.tasks[second.task_id] = second
+
+    def assert_main_removal_blocked():
+        with pytest.raises(ShareBusy) as error:
+            remove_shared_folder(host, original.as_posix())
+        assert str(error.value) == "作業中はメインのフォルダを外せません。終わってから外してください"
+        assert host.paths.root == original
+        assert host.paths.roots() == folders
+
+    assert host.mgr.active_task_ids() == [running_task.task_id, second.task_id]
+    assert_main_removal_blocked()
+    running_task.state = "completed"
+    assert host.mgr.active_task_ids() == [second.task_id]
+    assert_main_removal_blocked()
+
+    second.state = "completed"
+    remove_shared_folder(host, original.as_posix())
+    assert host.paths.root == original / "out"
+    assert original.as_posix() not in {folder["path"] for folder in host.paths.roots()}
+
+
 @pytest.mark.parametrize("switch", [set_main_shared_folder, change_share_root])
 def test_main_switch_requires_no_active_task(host, running_task, tmp_path, switch):
     extra = tmp_path / "extra"

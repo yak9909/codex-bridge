@@ -69,8 +69,10 @@ def add_shared_folder(host, path: str, level: str = "read") -> Path:
 
 def remove_shared_folder(host, path: str) -> Path:
     p = _guard(host, path, removing=True)
-    host.share_warning = None
     before = host.paths.root
+    if before == p and host.mgr.active_task_ids():
+        raise ShareBusy("作業中はメインのフォルダを外せません。終わってから外してください")
+    host.share_warning = None
     remove_folder(host.policy, p.as_posix())
     after = host.paths.root
     if after != before:  # the main folder moved on (or is gone): host.yaml must say the same

@@ -28,8 +28,9 @@ def test_undo_rejects_absolute_path(tmp_path, share):
     assert (victim / "f.txt").exists()
 
 
-def test_undo_rejects_all_changes_if_one_target_is_no_longer_shared(share):
-    from codex_bridge.host.policy_form import remove_folder
+@pytest.mark.parametrize("change", ["remove", "read"])
+def test_undo_rejects_all_changes_if_one_target_is_no_longer_writable(share, change):
+    from codex_bridge.host.policy_form import remove_folder, set_folder_level
 
     share.add_folder(share.outside, "write")
     share.task("t1")
@@ -37,11 +38,15 @@ def test_undo_rejects_all_changes_if_one_target_is_no_longer_shared(share):
     inside = share.root / "out" / "changed.txt"
     share.write.write_file(outside.as_posix(), "outside change")
     share.write.write_file("out/changed.txt", "inside change")
-    remove_folder(share.policy, share.outside.as_posix())
+    if change == "remove":
+        remove_folder(share.policy, share.outside.as_posix())
+    else:
+        set_folder_level(share.policy, share.outside.as_posix(), "read")
+        assert share.paths.level_of(outside) == "read"
 
     with pytest.raises(ValueError) as error:
         share.snapshots.undo("t1")
-    assert str(error.value) == f"共有を外したフォルダのファイルは元に戻せません: {outside}"
+    assert str(error.value) == f"書き込めない場所のファイルは元に戻せません（共有を外した・読むだけや見せないに変えた）: {outside}"
     assert outside.read_text(encoding="utf-8") == "outside change"
     assert inside.read_text(encoding="utf-8") == "inside change"
     assert len(share.snapshots.touched("t1")) == 2

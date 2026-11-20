@@ -459,7 +459,7 @@ async def test_undo_task_reports_removed_share(env, share):
 
     result = await call(local, "undo_task", {"task_id": "t5"})
     assert result["isError"]
-    assert result["content"][0]["text"] == f"共有を外したフォルダのファイルは元に戻せません: {target}"
+    assert result["content"][0]["text"] == f"書き込めない場所のファイルは元に戻せません（共有を外した・読むだけや見せないに変えた）: {target}"
     assert target.read_text(encoding="utf-8") == "changed"
 
 

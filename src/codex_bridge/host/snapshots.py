@@ -78,7 +78,7 @@ class Snapshots:
                                     or self.paths.level_of(destination.resolve()) != "write"):
                                 raise ToolError
                 except (ToolError, OSError, RuntimeError):
-                    raise ValueError(f"共有を外したフォルダのファイルは元に戻せません: {target}") from None
+                    raise ValueError(f"書き込めない場所のファイルは元に戻せません（共有を外した・読むだけや見せないに変えた）: {target}") from None
             restored = []
             # Restore in reverse order so parents created later are removed first.
             for entry in reversed(list(manifest.values())):

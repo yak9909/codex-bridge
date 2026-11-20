@@ -8,6 +8,7 @@ import pytest
 
 from codex_bridge.agent.appserver import AppServerError
 from codex_bridge.agent.control_client import ControlClient
+from codex_bridge.agent.runner import FOLLOWUP_ENDED
 from codex_bridge.agent.settings import hello_fields
 from codex_bridge.common import protocol
 from codex_bridge.common.invite import Invite
@@ -157,6 +158,24 @@ async def test_buffered_start_cancel_always_cancels_the_admitted_reservation(tmp
         assert not any(c[0] == "turn/start" for c in r.app.calls)
 
 
+
+@pytest.mark.parametrize("approval_required", [False, True])
+async def test_reservation_cancel_reports_undelivered_followup_before_final_state(
+        tmp_path, monkeypatch, approval_required):
+    r, _ = runner(tmp_path)
+    r.app = GatedApp("turn")
+    r.settings["pre_approval"]["followup"] = approval_required
+    async with control(r, monkeypatch, [START, MORE, CANCEL]) as ws:
+        await asyncio.wait_for(ws.drained.wait(), 2)
+        assert not r.currents
+        notices = [m for m in status_messages(ws) if m["data"]["text"] == FOLLOWUP_ENDED]
+        assert len(notices) == 1
+        final = next(m for m in ws.sent if m.get("state") == "cancelled")
+        assert ws.sent.index(notices[0]) < ws.sent.index(final)
+        assert not r.active_task_ids()
+        assert not any(c[0] == "turn/start" for c in r.app.calls)
+
+
 @pytest.mark.parametrize("stage", ["prepare", "thread", "turn"])
 async def test_queued_followup_is_reported_when_cancel_ends_startup(tmp_path, monkeypatch, stage):
     r, _ = runner(tmp_path)
@@ -167,8 +186,10 @@ async def test_queued_followup_is_reported_when_cancel_ends_startup(tmp_path, mo
     r.prepare = prepare
     async with control(r, monkeypatch, [START, MORE, CANCEL], r.app.entered.wait) as ws:
         await asyncio.wait_for(ws.drained.wait(), 2)
-        assert any(m.get("state") == "cancelled" for m in ws.sent)
-        assert len(status_messages(ws)) == 1 and "追加の指示" in status_messages(ws)[0]["data"]["text"]
+        final = next(m for m in ws.sent if m.get("state") == "cancelled")
+        notices = status_messages(ws)
+        assert [m["data"]["text"] for m in notices] == [FOLLOWUP_ENDED]
+        assert ws.sent.index(notices[0]) < ws.sent.index(final)
         assert not r.active_task_ids()
         assert not any(c[0] == "turn/steer" for c in r.app.calls)
 

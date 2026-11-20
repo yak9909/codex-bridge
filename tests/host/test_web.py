@@ -358,12 +358,16 @@ def store_bad_folder(host):
     return bad.as_posix()
 
 
-async def claude_call(admin, name, args):
+async def claude_result(admin, name, args):
     response = await admin.post("/claude/mcp", headers={"Accept": "application/json, text/event-stream"},
                                 json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                                       "params": {"name": name, "arguments": args}})
     assert response.status_code == 200, response.text
-    result = response.json()["result"]
+    return response.json()["result"]
+
+
+async def claude_call(admin, name, args):
+    result = await claude_result(admin, name, args)
     assert not result.get("isError"), result
     return json.loads(result["content"][0]["text"])
 
@@ -607,6 +611,50 @@ async def test_folder_api_during_task(admin, host, tmp_path):
     assert (await admin.post("/admin/api/folders/remove", json=body, headers=H)).status_code == 200
 
 
+@pytest.mark.parametrize("via", ["api", "mcp"])
+async def test_main_removal_during_task_reports_busy(admin, host, tmp_path, via):
+    from codex_bridge.host.share import add_shared_folder
+    from codex_bridge.host.tasks import TaskRecord
+
+    original = host.paths.root
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    add_shared_folder(host, extra.as_posix())
+    folders = host.paths.roots()
+    host.mgr.tasks["t1"] = task = TaskRecord(task_id="t1", prompt="p", created=0, state="running")
+
+    async def remove(path):
+        body = {"path": path.as_posix()}
+        if via == "api":
+            return await admin.post("/admin/api/folders/remove", headers=H, json=body)
+        return await claude_result(admin, "remove_shared_folder", body)
+
+    async with running(host.claude_ep):
+        response = await remove(original)
+        message = "作業中はメインのフォルダを外せません。終わってから外してください"
+        if via == "api":
+            assert response.status_code == 409
+            assert response.json()["detail"] == message
+        else:
+            assert response["isError"]
+            assert response["content"][0]["text"] == message
+        assert host.paths.root == original
+        assert host.paths.roots() == folders
+
+        spare = tmp_path / "spare"
+        spare.mkdir()
+        add_shared_folder(host, spare.as_posix())
+        response = await remove(spare)
+        assert (response.status_code == 200 if via == "api" else not response.get("isError"))
+        assert host.paths.level_of(spare) is None
+        assert host.paths.root == original
+
+        task.state = "completed"
+        response = await remove(original)
+        assert (response.status_code == 200 if via == "api" else not response.get("isError"))
+    assert host.paths.root == extra.resolve()
+
+
 async def test_undo_api_reports_removed_share(admin, host, tmp_path):
     from codex_bridge.host.share import add_shared_folder, remove_shared_folder
     from codex_bridge.host.tasks import TaskRecord
@@ -622,7 +670,7 @@ async def test_undo_api_reports_removed_share(admin, host, tmp_path):
 
     response = await admin.post("/admin/api/tasks/t1/undo", headers=H)
     assert response.status_code == 400
-    assert response.json()["detail"] == f"共有を外したフォルダのファイルは元に戻せません: {target}"
+    assert response.json()["detail"] == f"書き込めない場所のファイルは元に戻せません（共有を外した・読むだけや見せないに変えた）: {target}"
     assert target.read_text(encoding="utf-8") == "changed"
 
 

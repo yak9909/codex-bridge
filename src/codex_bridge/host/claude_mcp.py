@@ -405,7 +405,7 @@ def build_claude_mcp(mgr: TaskManager, approvals: Approvals, snapshots: Snapshot
     async def add_shared_folder(path: str, level: str = "read") -> CallToolResult:
         return await run(lambda: _folder_call("add", path, level))
 
-    @tool("共有フォルダを一覧から外します（path はフルパス）。作業中でも外せます。利用者に頼まれたときだけ使ってください。")
+    @tool("共有フォルダを一覧から外します（path はフルパス）。作業中はメイン以外のフォルダを外せます。利用者に頼まれたときだけ使ってください。")
     async def remove_shared_folder(path: str) -> CallToolResult:
         return await run(lambda: _folder_call("remove", path))
 

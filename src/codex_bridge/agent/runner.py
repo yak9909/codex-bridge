@@ -211,9 +211,6 @@ class AgentRunner:
         await self._safe_send(protocol.msg("lender_models", **models_fields(self.settings, self.catalog)))
 
     async def _release_slot(self, task_id: str | None = None) -> None:
-        if task_id is not None:
-            for _ in self._queued_followups.pop(task_id, []):
-                await self._followup_notice(task_id, FOLLOWUP_ENDED)
         if self.slot:
             async with self.slot.lock:
                 if task_id is not None:
@@ -314,14 +311,6 @@ class AgentRunner:
             self.currents.pop(cur.task_id, None)
             if cur.guard:
                 cur.guard.on_turn_completed()
-        if cur is not None:
-            held = self.approval.drop(cur.task_id)
-            waiting = cur.followups[:]
-            cur.followups.clear()
-            if held is not None and held.kind == FOLLOWUP:
-                waiting.append(held.prompt)
-            for _ in waiting:
-                await self._followup_notice(cur.task_id, FOLLOWUP_ENDED)
         if cur is not None and cur.ephemeral and cur.thread_id:
             self.sessions.remove(cur.thread_id)
             if app_alive:
@@ -374,6 +363,16 @@ class AgentRunner:
                      task_id: str | None = None, thread_id: str | None = None, cur: Current | None = None) -> None:
         cur = cur or (self.currents.get(task_id) if task_id else self.cur)
         task_id = task_id or (cur.task_id if cur else None)
+        if state in protocol.FINAL_STATES and task_id is not None:
+            waiting = len(self._queued_followups.pop(task_id, []))
+            if cur is not None:
+                waiting += len(cur.followups)
+                cur.followups.clear()
+            held = self.approval.drop(task_id)
+            if held is not None and held.kind == FOLLOWUP:
+                waiting += 1
+            for _ in range(waiting):
+                await self._followup_notice(task_id, FOLLOWUP_ENDED)
         self._record(task_id, "state", {"state": state, "report": report, "resume_at": resume_at})
         await self._send_seq("task_state", task_id=task_id, state=state,
                              thread_id=thread_id or (cur.thread_id if cur else None), report=report,
@@ -661,11 +660,11 @@ class AgentRunner:
                 await self._followup_notice(cur.task_id, FOLLOWUP_ENDED)
             raise
         finally:
-            async with self._lock:
-                if self._followup_workers.get(cur.task_id) is asyncio.current_task():
-                    self._followup_workers.pop(cur.task_id, None)
-                    if self.currents.get(cur.task_id) is cur:
-                        self._kick_followups(cur)
+            # stop() can join this worker while holding the lock. Cleanup never yields.
+            if self._followup_workers.get(cur.task_id) is asyncio.current_task():
+                self._followup_workers.pop(cur.task_id, None)
+                if self.currents.get(cur.task_id) is cur:
+                    self._kick_followups(cur)
 
     async def _cancel(self, m: dict, *, background: bool = False) -> None:
         async with self._lock:
@@ -674,14 +673,14 @@ class AgentRunner:
                 await self._state("cancelled", report=CANCELLED, task_id=held.task_id)
                 await self._release_slot(held.task_id)
                 return
+            if held is not None:
+                await self._followup_notice(held.task_id, FOLLOWUP_ENDED)
             cur = self.currents.get(m["task_id"])
             if cur is None:
                 if m["task_id"] in self._reservations:
                     await self._state("cancelled", report=CANCELLED, task_id=m["task_id"])
                     await self._release_slot(m["task_id"])
                 return
-            if held is not None:
-                await self._followup_notice(cur.task_id, FOLLOWUP_ENDED)
             cur.cancelling = True
             if cur.starting or not cur.turn_id or not cur.thread_id:
                 await self._state("cancelled", cur=cur, report=cur.last_message)

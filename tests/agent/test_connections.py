@@ -9,6 +9,7 @@ import pytest
 
 from codex_bridge.agent.connections import ConnectionStore
 from codex_bridge.agent.main import AgentConnections
+from codex_bridge.agent.runner import Current
 from codex_bridge.agent.settings import SettingsStore
 from codex_bridge.agent.setup import load_invite, save_invite
 from codex_bridge.agent.ui import create_ui_app
@@ -346,6 +347,42 @@ async def test_prepare_does_not_restart_an_idle_appserver_for_deferred_settings(
     assert app.proc is process and app.features == old_features
     await runner.handle(start("needs-new-features"))
     assert app.proc is not process and app.features == runner.settings["features"]
+
+
+@pytest.mark.parametrize("operation", ["remove", "replace_invite", "move_data"])
+async def test_connection_changes_finish_while_followup_steer_is_pending(multi, monkeypatch, operation):
+    runtime = multi.runtime
+    connection_id = multi.a.id
+    runner = runtime.runners[connection_id]
+    entered = asyncio.Event()
+
+    async def steer(*args):
+        entered.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(runner.app, "turn_steer", steer)
+    monkeypatch.setattr("codex_bridge.agent.main.move_data_root", lambda *a, **k: [])
+    assert await runner._reserve_slot(start("task")) is None
+    runner.currents["task"] = Current("task", "thread-1", "turn-1")
+    await runner.receive({"type": "task_followup", "task_id": "task", "text": "more"})
+    await asyncio.wait_for(entered.wait(), 3)
+    worker = runner._followup_workers["task"]
+    async with runner._lock:
+        await runner._on_event({"method": "turn/completed", "params": {
+            "threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}}})
+    assert not runner.active_task_ids()
+    assert not worker.done()
+
+    if operation == "remove":
+        change = runtime.remove(connection_id)
+    elif operation == "replace_invite":
+        invite = make_invite("http://a.invalid", "rotated", "friend")
+        change = runtime.replace_invite(connection_id, invite)
+    else:
+        change = runtime.move_data(multi.home / "new")
+    await asyncio.wait_for(change, 3)
+    assert worker.cancelled()
+    assert "task" not in runner._followup_workers
 
 
 async def test_data_move_blocks_new_admission_without_holding_the_pc_lock(multi, monkeypatch):
