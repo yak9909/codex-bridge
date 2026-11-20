@@ -76,7 +76,8 @@ def build_host(config: HostConfig, config_path: Path | None = None) -> Host:
                       protected=(config.rg_path, *((config_path,) if config_path else ())))
     snapshots = Snapshots(data, paths)
     approvals = Approvals(policy)
-    mgr = TaskManager(data, touched_fn=snapshots.touched, check_start=paths.check_configured)
+    mgr = TaskManager(data, touched_fn=snapshots.touched, check_start=paths.check_configured,
+                      policy_fn=policy.current)
     notifier = Notifier(mgr, approvals)
     tokens = TokenStore(data)
     def invite_changed(name):
@@ -97,7 +98,8 @@ def build_host(config: HostConfig, config_path: Path | None = None) -> Host:
     services = HostServices(
         paths=paths, policy=policy, read=ReadTools(paths, policy), search=SearchTools(paths, policy, config.rg_path),
         write=write, runner=CommandRunner(paths, policy, approvals, snapshots, audit, task_id_fn,
-                                          lender_fn=current_lender.get, thread_fn=current_thread_id.get),
+                                          lender_fn=current_lender.get, thread_fn=current_thread_id.get,
+                                          task_record_fn=mgr.tasks.get),
         approvals=approvals, snapshots=snapshots, audit=audit, task_id_fn=task_id_fn)
     events = Broadcaster()
     approvals.on_change.append(events.notify)

@@ -2,7 +2,7 @@
 import { esc, fmtDay } from "/app/static/api.js";
 import { icon, codeFieldHtml, monthDay, taskTitle, meter, row, toggle, logCombo as sharedLogCombo, OVER_LIMIT, CHEV } from "/app/static/common.js";
 
-const EXEC_MODES = [["off", "実行しない"], ["allowlist", "許可リストだけ自動"], ["ask", "毎回承認"], ["all", "すべて自動"]];
+export const EXEC_MODES = [["off", "実行しない"], ["allowlist", "許可リストだけ自動"], ["ask", "毎回承認"], ["all", "すべて自動"]];
 
 function stateOf(l) {
   if (l.connected && l.current_task_id) return ["作業中", "ok"];
@@ -107,7 +107,7 @@ function viewGroup(l) {
 
 function setBody(l, ui) {
   const del = toggle(l.delete_approval, `data-act="delete-approval" data-name="${esc(l.name)}"`);
-  return `<div class="ent-set">${row("コマンド実行", execSelect(l))}${row("削除の前に承認する", del)}${row("相手に見せる記録", logCombo(l))}` +
+  return `<div class="ent-set">${row("コマンド実行", execSelect(l), "拒否・確認リストはどのモードでも適用")}${row("削除の前に承認する", del)}${row("相手に見せる記録", logCombo(l))}` +
     `${inviteRow(l, ui)}${viewGroup(l)}</div>`;
 }
 

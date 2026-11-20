@@ -6,7 +6,7 @@ form = {
               {"path": "D:/tools/lib", "level": "read"},
               {"path": "D:/work/project/secret", "level": "hidden"}],
   "advanced_rules": [{"path": "**/*.lock", "level": "hidden"}],  # wildcard rules, relative to main
-  "exec": {"mode": "allowlist", "allow": [...], "confirm_modified_scripts": False},
+  "exec": {"mode": "allowlist", "deny": [...], "ask": [...], "allow": [...], "confirm_modified_scripts": False},
   "lender_exec_modes": {"friend": "ask"},                      # only the mode varies per lender
   "delete_needs_approval": True,
   "lender_delete_approval": {"friend": False},                 # per-lender override of the line above
@@ -20,7 +20,7 @@ import json
 import os
 from pathlib import Path, PureWindowsPath
 
-from .policy import EXEC_MODES, LEVELS, PolicyStore, normalize_rel, parse_policy
+from .policy import EXEC_MODES, LEVELS, PolicyStore, command_patterns, normalize_rel, parse_policy
 
 INHERIT = "inherit"
 
@@ -47,7 +47,8 @@ def form_from_raw(raw: dict | None) -> dict:
         "folders": [{"path": Path(str(f["path"])).as_posix(), "level": f.get("level")}
                     for f in raw.get("folders") or []],
         "advanced_rules": list(raw.get("advanced_rules") or []),
-        "exec": {"mode": "off" if mode is False else mode, "allow": list(ex.get("allow") or []),
+        "exec": {"mode": "off" if mode is False else mode,
+                 **{key: list(ex.get(key) or []) for key in ("deny", "ask", "allow")},
                  "confirm_modified_scripts": bool(ex.get("confirm_modified_scripts", False))},
         "lender_exec_modes": {name: ("off" if v is False else v)
                               for name, v in (raw.get("lender_exec_modes") or {}).items()},
@@ -86,6 +87,8 @@ def yaml_from_form(form: dict) -> str:
     lender_modes = parse_policy({"lender_exec_modes": form.get("lender_exec_modes")}).lender_exec_modes
     delete_approvals = parse_policy({"lender_delete_approval": form.get("lender_delete_approval")}).lender_delete_approval
     allow = [a.strip() for a in ex.get("allow") or [] if a and a.strip()]
+    deny = command_patterns(ex.get("deny"), "exec.deny")
+    ask = command_patterns(ex.get("ask"), "exec.ask")
 
     lines = [
         "# codex-bridge 権限の規則（管理画面の「共有フォルダと権限」で編集できます）",
@@ -115,14 +118,17 @@ def yaml_from_form(form: dict) -> str:
         "#   allowlist = allow に合うコマンドは自動で実行、それ以外は承認待ち",
         "#   ask       = 毎回承認待ち",
         "#   all       = すべて自動で実行（おすすめしません）",
+        "# off の判定のあと、どのモードでも、拒否、確認、書き換えたスクリプトの順に調べる。",
         "exec:",
         f"  mode: {_q(mode)}",
-        "  # 自動で実行してよいコマンドの型（最後の * は「任意の引数」、** は「下のフォルダすべて」）",
-        "  allow:" if allow else "  allow: []",
+        "  # コマンドの型（最後の * は「任意の引数」、** は「下のフォルダすべて」）",
     ]
-    lines += [f"    - {_q(a)}" for a in allow]
+    for key, rules, label in (("deny", deny, "拒否する"), ("ask", ask, "承認を求める"),
+                              ("allow", allow, "allowlist のとき自動で実行する")):
+        lines.extend([f"  # {label}", f"  {key}:" if rules else f"  {key}: []"])
+        lines.extend(f"    - {_q(rule)}" for rule in rules)
     lines += [
-        "  # true にすると、作業中に書き換えたスクリプトの実行は承認待ちになる",
+        "  # true にすると、すべて自動でも作業中に書き換えたスクリプトの実行は承認待ちになる",
         f"  confirm_modified_scripts: {str(bool(ex.get('confirm_modified_scripts'))).lower()}",
     ]
     if lender_modes:

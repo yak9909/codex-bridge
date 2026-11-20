@@ -1,6 +1,7 @@
 import asyncio
 import subprocess
 import sys
+from threading import Event
 
 import pytest
 
@@ -29,11 +30,129 @@ def test_allowlist_match():
     assert not match_allow("python scripts/a.py | more", pats)
     assert not match_allow("python scripts/../../evil.py", pats)
     assert not match_allow("python scripts/a.txt", pats)
+    assert not match_allow(r"A:\share\python.exe scripts/x.py", pats)
+    assert not match_allow('python "scripts/a.py', pats)
 
 
 def test_allowlist_exact_tokens():
     assert match_allow("git status", ["git status"])
     assert not match_allow("git status --porcelain", ["git status"])
+
+
+@pytest.mark.parametrize("command, pattern", [
+    ("echo a && git push", "git push *"),
+    ("echo a||git push|more", "git push *"),
+    ("echo a&git push;echo b", "git push *"),
+    ("echo a\r\ngit push", "git push *"),
+    ('cmd /c "git push origin"', "git push *"),
+    ("CMD.EXE /K git push origin", "git push *"),
+    ('powershell -Command "git push"', "git push *"),
+    ("pwsh -c git push", "git push *"),
+    ('pwsh -c "git push" origin', "git push *"),
+    ("bash -c 'rm -rf x'", "rm -rf *"),
+    ("""cmd /c "pwsh -c 'sh -c git'" """, "git"),
+    (r'"C:\Program Files\Git\cmd\git.exe" push', "git push *"),
+    (r'C:\Program Files\Git\cmd\git.exe push', "git push *"),
+    (r'cmd /c ""C:\Program Files\Git\cmd\git.exe" push"', "git push *"),
+    ('git push "unfinished', "git push *"),
+    ('git push && echo "unfinished', "git push *"),
+])
+async def test_command_rules_match_segments_and_wrappers(share, monkeypatch, command, pattern):
+    async def unexpected(*args):
+        pytest.fail("the command must be blocked or wait for approval")
+
+    monkeypatch.setattr(share.runner, "_execute", unexpected)
+    share.set_policy(exec_mode="all", exec_deny=[pattern], exec_ask=[pattern], limits={"sync_wait_sec": 0})
+    denied = await share.runner.run_command(command)
+    assert denied["status"] == "denied"
+    assert denied["message"] == f"コマンドの規則の拒否リストに当たるため実行しません: {pattern}"
+    assert not share.approvals.pending()
+
+    share.set_policy(exec_deny=[])
+    waiting = await share.runner.run_command(command)
+    assert waiting["status"] == "waiting_approval"
+    approval, = share.approvals.pending()
+    share.approvals.decide(approval.id, False)
+    await asyncio.wait_for(share.runner.jobs[waiting["job_id"]].done.wait(), timeout=2)
+
+
+@pytest.mark.parametrize("mode, deny, ask, modified, allowed, status", [
+    ("off", True, True, True, True, "denied"),
+    ("all", True, True, True, True, "denied"),
+    ("all", False, True, True, True, "waiting_approval"),
+    ("all", False, False, True, True, "waiting_approval"),
+    ("allowlist", False, False, True, True, "waiting_approval"),
+    ("allowlist", False, False, False, True, "done"),
+    ("allowlist", False, False, False, False, "waiting_approval"),
+    ("ask", False, False, False, True, "waiting_approval"),
+    ("all", False, False, False, False, "done"),
+])
+async def test_command_decision_order(share, monkeypatch, mode, deny, ask, modified, allowed, status):
+    command = "python scripts/new.py"
+    executed = []
+
+    async def execute(job, cwd, timeout):
+        executed.append(job.command)
+        job.status = "done"
+
+    monkeypatch.setattr(share.runner, "_execute", execute)
+    share.task("t1")
+    share.write.write_file("scripts/new.py", "print(1)\n")
+    share.set_policy(exec_mode=mode, exec_deny=[command] if deny else [], exec_ask=[command] if ask else [],
+                     exec_allow=[command] if allowed else [], exec_confirm_modified_scripts=modified,
+                     limits={"sync_wait_sec": 0})
+    reply = await share.runner.run_command(command)
+    job = share.runner.jobs[reply["job_id"]]
+    if status != "waiting_approval":
+        await asyncio.wait_for(job.done.wait(), timeout=2)
+    assert job.status == status
+    if status == "waiting_approval":
+        approval, = share.approvals.pending()
+        share.approvals.decide(approval.id, False)
+        await asyncio.wait_for(job.done.wait(), timeout=2)
+    else:
+        assert not share.approvals.pending()
+    assert executed == ([command] if status == "done" else [])
+    if mode == "off":
+        assert "off" in reply["message"]
+
+
+async def test_rule_separators_respect_quotes_and_wrapper_depth(share, monkeypatch):
+    async def execute(job, cwd, timeout):
+        job.status = "done"
+
+    monkeypatch.setattr(share.runner, "_execute", execute)
+    share.set_policy(exec_mode="all", exec_deny=["blocked"], limits={"sync_wait_sec": 1})
+    for command in ('echo "quoted && blocked"', "cmd /c cmd /c cmd /c cmd /c blocked"):
+        assert (await share.runner.run_command(command))["status"] == "done"
+    assert (await share.runner.run_command("cmd /c cmd /c cmd /c blocked"))["status"] == "denied"
+
+
+async def test_new_rules_apply_after_the_pre_execution_scan(share, monkeypatch):
+    loop = asyncio.get_running_loop()
+    scanning = asyncio.Event()
+    release = Event()
+
+    def scan(*args):
+        loop.call_soon_threadsafe(scanning.set)
+        assert release.wait(5)
+        return {}
+
+    async def unexpected(*args, **kwargs):
+        pytest.fail("the command became denied during the scan")
+
+    monkeypatch.setattr(share.runner, "_write_area_state", scan)
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", unexpected)
+    share.set_policy(exec_mode="all", limits={"sync_wait_sec": 0})
+    reply = await share.runner.run_command("echo example")
+    job = share.runner.jobs[reply["job_id"]]
+    try:
+        await asyncio.wait_for(scanning.wait(), timeout=5)
+        share.set_policy(exec_deny=["echo example"])
+    finally:
+        release.set()
+    await asyncio.wait_for(job.done.wait(), timeout=5)
+    assert job.status == "denied" and "拒否リスト" in job.message
 
 
 async def test_mode_off_refuses(share):

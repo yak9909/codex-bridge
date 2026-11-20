@@ -30,6 +30,11 @@ LONG_LINE = "web のテストが落ちているので直してください。" +
 MANY_LINES = "\n".join(f"{i + 1}. src/module_{i}/file_{i}.ts の型を確かめ、必要なら直してください。" for i in range(200))
 LONG_NAME = "very-long-lender-name-" * 3
 LONG_PATH = "D:/work/" + "/".join(f"nested-folder-{i}" for i in range(25)) + "/report.md"
+LONG_RULES = {
+    "deny": [f"git push origin {LONG_PATH}/blocked-{i}" for i in range(28)],
+    "ask": [f"npm run {LONG_PATH}/review-{i} *" for i in range(28)],
+    "allow": [f"python {LONG_PATH}/check-{i}.py *" for i in range(28)],
+}
 VIEW = {"features": {"web_search": False, "image_generation": True, "multi_agent": False, "goals": True},
         "pre_approval": {"new_task": True, "followup": True, "timeout_min": 30}, "resumable": True, "over_limit": "report",
         "max_effort": "xhigh", "max_parallel": 3,
@@ -68,6 +73,8 @@ async def _fill_host(host, now: float) -> None:
                         current_task_id=None)
         await link.push("usage", five_hour={"used_percent": 45, "resets_at": now + 3600},
                         weekly={"used_percent": 45, "resets_at": now + 86400 * 2}, ts=now)
+    host.policy.update(lender_exec_modes={"yamada": "all"},
+                       **{f"exec_{key}": value for key, value in LONG_RULES.items()})
     host.mgr.check_start = None
     s = links["suzuki"]
     for i in range(60):  # a long list of finished requests
@@ -76,7 +83,8 @@ async def _fill_host(host, now: float) -> None:
     t = await host.mgr.start(MANY_LINES, lender="suzuki")
     await s.push("task_state", task_id=t, state="completed", report="終わりました。")
     y = links["yamada"]
-    t = await host.mgr.start(LONG_LINE, lender="yamada", model=MODELS[0]["model"], effort="high")
+    t = await host.mgr.start(LONG_LINE, lender="yamada", model=MODELS[0]["model"], effort="high",
+                             exec_mode="ask", deny=LONG_RULES["deny"], ask=LONG_RULES["ask"])
     await y.push("event", task_id=t, kind="started", data={})
     for i in range(150):  # hundreds of timeline lines
         await y.push("event", task_id=t, kind="agent_message", data={"text": f"手順 {i}: " + "確かめています。" * 6})

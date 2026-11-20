@@ -169,6 +169,30 @@ for (const side of ["use", "lend"]) {
 ''')
 
 
+def test_command_rules_and_task_settings_escape_patterns(run_app_js):
+    run_app_js('''
+import assert from "node:assert/strict";
+import { rulesHtml } from "./use-pages.js";
+import { taskExecHtml, taskExecModeLabel } from "./use-tasks.js";
+const pattern = '</textarea><img src=x onerror="bad">';
+const global = rulesHtml({exec: {deny: [pattern], ask: [pattern], allow: [pattern]}});
+const keys = Array.from(global.matchAll(/data-key="(deny|ask|allow)"/g), match => match[1]);
+assert.deepEqual(keys, ["deny", "ask", "allow"]);
+const task = {task_id: '<task>', state: "running", exec_mode: "ask", deny: [pattern], ask: [pattern]};
+const active = taskExecHtml(task);
+const finished = taskExecHtml({...task, state: "completed"});
+for (const html of [global, active, finished]) {
+  assert.ok(html.includes('&lt;/textarea&gt;&lt;img src=x onerror=&quot;bad&quot;&gt;'));
+  assert.ok(!html.includes("<img"));
+}
+assert.ok(active.includes('data-id="&lt;task&gt;"'));
+assert.match(active, /value="ask" selected/);
+assert.equal(taskExecModeLabel("ask"), "毎回承認");
+assert.equal((finished.match(/ readonly/g) || []).length, 2);
+assert.ok(!finished.includes("<select"));
+''')
+
+
 def test_lender_setup_warning_is_escaped_and_shows_recovery_actions(run_app_js):
     run_app_js('''
 import assert from "node:assert/strict";

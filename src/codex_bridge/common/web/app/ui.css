@@ -216,7 +216,16 @@ select.ro, input.ro { pointer-events: none; appearance: none; }
 .detail { display: grid; grid-template-rows: auto fit-content(40%) minmax(0, 1fr) auto; min-height: 0; min-width: 0; }
 .d-req { min-height: 0; padding: var(--s3) max(0px, calc(var(--s4) - var(--sbw))) var(--s3) var(--s4); border-bottom: 1px solid var(--line); }
 .d-req:empty { display: none; }
-.d-req > h3 { font-size: var(--fs-cap); color: var(--muted); margin-bottom: var(--s2); }
+.task-exec { margin-bottom: var(--s3); }
+.task-exec > summary { cursor: pointer; overflow-wrap: anywhere; }
+.task-exec > summary .cap { margin-left: var(--s1); }
+.task-exec-fields { display: grid; gap: var(--s2); margin-top: var(--s2); }
+@media (width > 1040px) {
+  .task-exec-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .task-exec-fields > :first-child { grid-column: 1 / -1; }
+}
+.command-patterns { font-family: var(--mono); display: block; }
+.d-req > h3, .d-req-prompt > h3 { font-size: var(--fs-cap); color: var(--muted); margin-bottom: var(--s2); }
 .d-prompt { white-space: pre-wrap; overflow-wrap: anywhere; }
 .d-head { display: grid; gap: var(--s2); padding: var(--s4); border-bottom: 1px solid var(--line); }
 .d-title { display: flex; align-items: center; gap: var(--s2); }

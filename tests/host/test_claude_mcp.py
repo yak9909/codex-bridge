@@ -20,7 +20,7 @@ ACCEPT = {"Accept": "application/json, text/event-stream", "Content-Type": "appl
 
 @pytest.fixture
 async def env(share):
-    mgr = TaskManager(share.data_dir, touched_fn=share.snapshots.touched)
+    mgr = TaskManager(share.data_dir, touched_fn=share.snapshots.touched, policy_fn=share.policy.current)
     share.tokens = TokenStore(share.data_dir)
     ep = build_claude_mcp(mgr, share.approvals, share.snapshots, policy=share.policy, tokens=share.tokens,
                           public_bind="100.1.2.3:8765", share_root=lambda: share.paths.root,
@@ -78,7 +78,7 @@ async def test_tool_names(env):
     mgr, local, _ = env
     r = await local.post("/claude/mcp", headers=ACCEPT, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     assert {t["name"] for t in r.json()["result"]["tools"]} == {
-        "send_task", "send_followup", "get_status", "get_result", "cancel_task", "get_usage",
+        "send_task", "set_task_exec", "send_followup", "get_status", "get_result", "cancel_task", "get_usage",
         "undo_task", "list_sessions", "read_session", "delete_session",
         "list_approvals", "decide_approval", "get_policy", "set_policy", "set_folder_level", "set_exec_mode",
         "set_paused",
@@ -210,7 +210,38 @@ async def test_send_task_origin_claude_by_default(env):
     rec = mgr.tasks[result["task_id"]]
     assert rec.origin == "claude" and rec.session is None
     assert result == {"task_id": rec.task_id, "lender": "friend", "model": None, "effort": None,
+                      "exec_mode": None, "deny": [], "ask": [], "effective_exec_mode": "allowlist",
                       "note": claude_mcp.NOTIFY_NOTE}
+
+
+async def test_task_exec_mcp_inheritance_and_persistence(env, share):
+    mgr, local, _ = env
+    share.set_policy(lender_exec_modes={"friend": "ask"})
+    link = await join(mgr, "friend", capabilities={"resumable": True})
+    fields = {"exec_mode": "all", "deny": ["git push *"], "ask": ["git commit *"]}
+    reply = text_of(await call(local, "send_task", {"prompt": "first", **fields}))
+    assert all(reply[k] == v for k, v in fields.items())
+    assert reply["effective_exec_mode"] == "ask"
+    task_id = reply["task_id"]
+    task = {"task_id": task_id}
+    for name in ("get_status", "get_result"):
+        info = text_of(await call(local, name, task))
+        assert all(info[k] == v for k, v in fields.items())
+        assert info["effective_exec_mode"] == "ask"
+
+    updated = text_of(await call(local, "set_task_exec", {**task, "ask": []}))
+    assert updated == {**task, **fields, "ask": [], "effective_exec_mode": "ask"}
+    share.policy.set_lender_exec_mode("friend", "all")
+    assert text_of(await call(local, "get_status", task))["effective_exec_mode"] == "all"
+    restored = TaskManager(share.data_dir, touched_fn=share.snapshots.touched, policy_fn=share.policy.current)
+    assert restored.exec_settings(task_id) == {**fields, "ask": [], "effective_exec_mode": "all"}
+    await mgr.on_agent_message(link, {"type": "task_state", **task, "thread_id": "th", "state": "completed"})
+    refused = await call(local, "set_task_exec", {**task, "exec_mode": "off"})
+    assert refused["isError"] and "作業中" in refused["content"][0]["text"]
+    continued = text_of(await call(local, "send_task", {"prompt": "second", "continue_task_id": task_id}))
+    assert continued["exec_mode"] == "all" and continued["ask"] == [] and continued["deny"] == fields["deny"]
+    cleared = text_of(await call(local, "set_task_exec", {"task_id": continued["task_id"], "exec_mode": "inherit"}))
+    assert cleared["exec_mode"] is None and cleared["effective_exec_mode"] == "all"
 
 
 async def test_send_task_origin_codex_by_query(env):
@@ -241,6 +272,7 @@ async def test_send_task_model_effort_reach_agent(env, spec, model, effort):
     rec = mgr.tasks[result["task_id"]]
     assert (rec.model, rec.effort) == (model, effort)
     assert result == {"task_id": rec.task_id, "lender": "friend", "model": model, "effort": effort,
+                      "exec_mode": None, "deny": [], "ask": [], "effective_exec_mode": "allowlist",
                       "note": claude_mcp.NOTIFY_NOTE}
     assert claude_mcp.NOTIFY_NOTE == (
         "承認待ちか終了になると自動で知らせが届きます（install-mcp で設定済みの場合）。それまで状態を確かめる必要はありません。")

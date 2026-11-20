@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import ntpath
+import re
 import secrets
 import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 from ..common.audit import AuditLog
 from .approvals import Approvals
 from .paths import UNSET_SHARE_MSG, SafePaths, ToolError, not_found
 from .policy import OUTPUTS_TOP, Policy, PolicyStore, glob_to_regex, normalize_rel
 from .snapshots import Snapshots
+from .tasks import TaskRecord
 
 FORBIDDEN_CHARS = set("&|;<>^\r\n`")
 CREATIONFLAGS = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -51,6 +54,87 @@ def match_allow(command: str, patterns: list[str]) -> bool:
         if all(_token_match(p, t) for p, t in zip(fixed, toks)):
             return True
     return False
+
+
+def _program(token: str) -> str:
+    name = ntpath.basename(token.strip("'\"")).lower()
+    stem, ext = ntpath.splitext(name)
+    return stem if ext in (".exe", ".cmd", ".bat", ".com") else name
+
+
+def _rule_segments(command: str) -> Iterator[str]:
+    start = 0
+    quote = ""
+    escaped = False
+    for i, char in enumerate(command):
+        if quote:
+            if char == quote and not escaped:
+                quote = ""
+            escaped = char == "\\" and not escaped
+        elif char in "'\"":
+            quote = char
+        elif char in "&|;\r\n":
+            yield command[start:i]
+            start = i + 1
+    yield command[start:]
+    if quote and start:
+        yield command
+
+
+_RULE_WORD = re.compile(r""" "[^"]*" | '[^']*' | \S+ """, re.VERBOSE)
+_WINDOWS_PROGRAM = re.compile(r"""(?i)^\s*((?:[a-z]:[\\/]|\\\\)[^:"'\r\n]*?\.(?:exe|cmd|bat|com))(?=\s|$)""")
+
+
+def _unquote(token: str) -> str:
+    if len(token) >= 2 and token[0] in "'\"" and token[-1] == token[0]:
+        return token[1:-1]
+    return token
+
+
+def _rule_commands(command: str, depth: int = 0) -> Iterator[list[str]]:
+    for segment in _rule_segments(command):
+        # Accept a Windows program path with spaces as well as a quoted path.
+        path = _WINDOWS_PROGRAM.match(segment)
+        words = list(_RULE_WORD.finditer(segment, path.end() if path else 0))
+        tokens = [word.group() for word in words]
+        if path:
+            tokens.insert(0, path[1])
+        if not tokens:
+            continue
+        program = _program(tokens[0])
+        yield [program, *tokens[1:]]
+        if depth == 3 or len(tokens) < 3:
+            continue
+        flag = tokens[1].lower()
+        if ((program == "cmd" and flag in ("/c", "/k"))
+                or (program in ("powershell", "pwsh") and flag in ("-c", "-command"))):
+            # Keep the original quotes, including CMD's outer pair around a quoted executable.
+            first_arg = words[1 if path else 2]
+            inner = segment[first_arg.start():].rstrip()
+            if inner.startswith('""') or len(tokens) == 3:
+                inner = _unquote(inner)
+            elif program != "cmd":
+                inner = _unquote(tokens[2]) + segment[first_arg.end():]
+            yield from _rule_commands(inner, depth + 1)
+        elif program in ("bash", "sh") and flag == "-c":
+            yield from _rule_commands(_unquote(tokens[2]), depth + 1)
+
+
+def _matching_rule(commands: list[list[str]], patterns: list[str]) -> str | None:
+    for pattern in patterns:
+        tokens = _tokens(pattern)
+        if not tokens:
+            continue
+        rest_any = tokens[-1] == "*"
+        fixed = tokens[:-1] if rest_any else tokens
+        if fixed:
+            fixed[0] = _program(fixed[0])
+        for command in commands:
+            if len(command) < len(fixed) or (not rest_any and len(command) != len(fixed)):
+                continue
+            if all(_token_match(p, t) for p, t in zip(fixed, command)):
+                return pattern
+    return None
 
 
 def decode_output(b: bytes) -> str:
@@ -91,36 +175,50 @@ class CommandRunner:
     def __init__(self, paths: SafePaths, policy: PolicyStore, approvals: Approvals,
                  snapshots: Snapshots, audit: AuditLog, task_id_fn: Callable[[], str | None],
                  lender_fn: Callable[[], str | None] = lambda: None,
-                 thread_fn: Callable[[], str | None] = lambda: None) -> None:
+                 thread_fn: Callable[[], str | None] = lambda: None,
+                 task_record_fn: Callable[[str], TaskRecord | None] = lambda _: None) -> None:
         self.paths = paths
         self.policy = policy
         self.approvals = approvals
         self.snapshots = snapshots
         self.audit = audit
         self.task_id_fn = task_id_fn
+        self.task_record_fn = task_record_fn
         self.lender_fn = lender_fn  # invite name of the lender making the current call (None: not known)
         self.thread_fn = thread_fn
         self.jobs: dict[str, Job] = {}
         self._ids = itertools.count(1)
         self._tasks: set[asyncio.Task] = set()
 
-    def _needs_approval(self, command: str, task_id: str | None, mode: str) -> bool:
-        p = self.policy.current()
-        if mode == "ask":
-            return True
-        if mode == "allowlist" and not match_allow(command, p.allow_patterns):
-            return True
-        if p.confirm_modified_scripts:
+    def _command_decision(self, job: Job, policy: Policy, *, approved: bool = False) -> tuple[str | None, bool]:
+        task = self.task_record_fn(job.task_id) if job.task_id is not None else None
+        mode = policy.effective_exec_mode(job.lender, task.exec_mode if task else None)
+        if mode == "off":
+            return "実行は許可されていません（実行モードが off です）", False
+        deny = [*policy.deny_patterns, *(task.deny if task else [])]
+        ask = [] if approved else [*policy.ask_patterns, *(task.ask if task else [])]
+        commands = list(_rule_commands(job.command)) if deny or ask else []
+        if (rule := _matching_rule(commands, deny)) is not None:
+            return f"コマンドの規則の拒否リストに当たるため実行しません: {rule}", False
+        if approved:
+            return None, False
+        if _matching_rule(commands, ask) is not None:
+            return None, True
+        return None, self._needs_approval(job.command, job.task_id, mode, policy)
+
+    def _needs_approval(self, command: str, task_id: str | None, mode: str, policy: Policy) -> bool:
+        if policy.confirm_modified_scripts:
             touched = {t.lower() for t in self.snapshots.touched(task_id)}
             for tok in _tokens(command):
                 if normalize_rel(tok.strip('"')).lower() in touched:
                     return True
-        return False
+        if mode == "allowlist":
+            return not match_allow(command, policy.allow_patterns)
+        return mode == "ask"
 
     async def run_command(self, command: str, cwd: str = ".", timeout_sec: int | None = None) -> dict:
         self.paths.check_running()
         p = self.policy.current()
-        mode = p.exec_mode_for(self.lender_fn())
         real_cwd = self.paths.resolve(cwd, "read")
         if not real_cwd.is_dir():
             raise not_found(cwd)
@@ -128,17 +226,15 @@ class CommandRunner:
         job = Job(id=f"j{next(self._ids)}", command=command, cwd=normalize_rel(cwd), task_id=task_id,
                   lender=self.lender_fn(), thread_id=self.thread_fn())
         self.jobs[job.id] = job
-        if mode == "off":
-            job.status, job.message = "denied", "実行は許可されていません（実行モードが off です）"
+        denial, needs_approval = self._command_decision(job, p)
+        if denial is not None:
+            job.status, job.message = "denied", denial
             job.done.set()
             self.audit.write("command", job_id=job.id, command=command, status="denied", task_id=task_id)
             return job.snapshot()
         timeout = min(int(timeout_sec or p.limits.exec_timeout_sec), p.limits.exec_timeout_sec)
-        if self._needs_approval(command, task_id, mode):
-            a = self.approvals.request("command", command, task_id, cwd=job.cwd or ".")
-            job.approval_id = a.id
-            job.status = "waiting_approval"
-            job.message = "管理者の承認待ちです。get_command_result で結果を確かめてください。"
+        if needs_approval:
+            self._request_approval(job)
         t = asyncio.create_task(self._run_job(job, real_cwd, timeout))
         self._tasks.add(t)
         t.add_done_callback(self._tasks.discard)
@@ -160,17 +256,32 @@ class CommandRunner:
             pass
         return job.snapshot()
 
+    def _request_approval(self, job: Job) -> None:
+        approval = self.approvals.request("command", job.command, job.task_id, cwd=job.cwd or ".")
+        job.approval_id = approval.id
+        job.status = "waiting_approval"
+        job.message = "管理者の承認待ちです。get_command_result で結果を確かめてください。"
+
+    def _check_before_execution(self, job: Job) -> bool:
+        self.paths.check_running()
+        denial, needs_approval = self._command_decision(job, self.policy.current(), approved=job.approval_id is not None)
+        if denial is not None:
+            raise ToolError(denial)
+        return needs_approval
+
+    async def _await_approval(self, job: Job) -> None:
+        approval_id = job.approval_id
+        assert approval_id is not None
+        status = await self.approvals.wait(approval_id, timeout=float("inf"))
+        self.approvals.consume(approval_id)
+        if status != "approved":
+            raise ToolError("実行は拒否されました" if status == "denied" else "承認の期限が切れたため実行しませんでした")
+        self._check_before_execution(job)
+
     async def _run_job(self, job: Job, real_cwd: Path, timeout: int) -> None:
         try:
             if job.approval_id:
-                status = await self.approvals.wait(job.approval_id, timeout=float("inf"))
-                self.approvals.consume(job.approval_id)
-                if status != "approved":
-                    job.status = "denied"
-                    job.message = "実行は拒否されました" if status == "denied" else "承認の期限が切れたため実行しませんでした"
-                    return
-                # The policy or folder may have changed while waiting.
-                self.paths.check_running()
+                await self._await_approval(job)
             job.status, job.message = "running", ""
             await self._execute(job, real_cwd, timeout)
         except ToolError as e:
@@ -205,15 +316,21 @@ class CommandRunner:
         return state
 
     async def _execute(self, job: Job, real_cwd: Path, timeout: int) -> None:
-        policy = self.policy.current()
+        while True:
+            policy = self.policy.current()
+            roots = [Path(folder["path"]) for folder in self.paths.roots()]
+            display = self.paths.display_formatter()
+            root = self.paths.root
+            if root is None:
+                raise ToolError(UNSET_SHARE_MSG)
+            before = await asyncio.to_thread(self._write_area_state, roots, policy, display)
+            # Rules or shares can change while scanning. If a new approval is needed, scan again after it.
+            if not self._check_before_execution(job):
+                break
+            self._request_approval(job)
+            await self._await_approval(job)
+            job.status, job.message = "running", ""
         limits = policy.limits
-        roots = [Path(folder["path"]) for folder in self.paths.roots()]
-        display = self.paths.display_formatter()
-        root = self.paths.root
-        if root is None:
-            raise ToolError(UNSET_SHARE_MSG)
-        before = await asyncio.to_thread(self._write_area_state, roots, policy, display)
-        # The original working directory may have been unshared during approval or scanning.
         self.paths.resolve(real_cwd.as_posix(), "read")
         out_dir = root / OUTPUTS_TOP / "outputs"
         out_dir.mkdir(parents=True, exist_ok=True)

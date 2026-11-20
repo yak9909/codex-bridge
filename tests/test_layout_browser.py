@@ -41,7 +41,7 @@ class Page:
     async def call(self, method, **params):
         self.seq += 1
         await self.ws.send(json.dumps({"id": self.seq, "method": method, "params": params}))
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(15):
             while True:
                 reply = json.loads(await self.ws.recv())
                 if reply.get("id") == self.seq:
@@ -54,7 +54,7 @@ class Page:
         return reply["result"].get("value")
 
     async def wait(self, expression):
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 10
         while not await self.js(f"Boolean({expression})"):
             if time.monotonic() >= deadline:
                 text = await self.js("JSON.stringify({url:location.href, text:document.body.innerText.slice(0,4000), lenders:document.querySelectorAll('[data-slot=lenders] .ent').length, tasks:document.querySelectorAll('.items li').length, events:document.querySelectorAll('.d-log .tl li').length})")
@@ -66,7 +66,7 @@ class Page:
         await self.wait(f"document.querySelector({json.dumps(selector)})")
         await self.js(f"document.querySelector({json.dumps(selector)}).click()")
 
-    async def shot(self, side, selector=None):
+    async def shot(self, side, selector=None, *, delay=0.1):
         if folder := os.environ.get("CODEX_BRIDGE_LAYOUT_SHOTS"):
             path = Path(folder)
             path.mkdir(parents=True, exist_ok=True)
@@ -75,7 +75,7 @@ class Page:
                 await self.js(f"document.querySelector({json.dumps(selector)}).scrollIntoView({{block: \'start\'}})")
             else:
                 await self.js("window.scrollTo(0, 0)")
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(delay)
             result = await self.call("Page.captureScreenshot", format="png", captureBeyondViewport=False)
             (path / f"stress-{side}-{self.width}px-2x.png").write_bytes(base64.b64decode(result["data"]))
 
@@ -205,6 +205,27 @@ async def test_extreme_layout(stress_server, chrome, width, height):
         await page.wait("document.querySelectorAll(\'.d-log .tl li\').length >= 200")
         await check("使う・長い1行の依頼")
         await page.shot("use-multiple")
+        await page.click('.task-exec > summary')
+        await page.wait("document.querySelector('.task-exec[open] [data-act=task-exec-list]')?.value.length > 5000")
+        assert await page.js("document.querySelector('.task-exec summary').textContent.includes('毎回承認')")
+        assert await page.js("""(() => {
+          const pane = document.querySelector('.task-exec').closest('.scroll');
+          const bounds = pane.getBoundingClientRect();
+          return [...pane.querySelectorAll('[data-act=task-exec-list]')].every(field => {
+            const box = field.getBoundingClientRect();
+            return box.top >= bounds.top && box.bottom <= bounds.bottom && box.right <= bounds.right;
+          });
+        })()""")
+        await check("使う・この依頼のコマンド")
+        await page.shot("use-task-command-rules", ".task-exec", delay=2)
+        for mode, label in [("off", "実行しない"), ("ask", "毎回承認")]:
+            await page.js(f"""(() => {{
+              const select = document.querySelector('[data-act=task-exec-mode]');
+              select.value = {json.dumps(mode)};
+              select.dispatchEvent(new Event('change', {{bubbles: true}}));
+            }})()""")
+            await page.wait(f"document.querySelector('.task-exec summary').textContent.includes({json.dumps(label)})")
+        await page.click('.task-exec > summary')
         await page.js("[...document.querySelectorAll('.items li')].find(e => e.textContent.includes('src/module_0/')).click()")
         await page.wait("document.querySelector('.d-head').textContent.includes('src/module_0/')")
         await check("使う・200行の依頼")
@@ -216,11 +237,19 @@ async def test_extreme_layout(stress_server, chrome, width, height):
         await page.shot("use-lender-card")
         await page.click('[data-slot=lenders] .ent:first-child .set-group details summary')
         await page.shot("use-lender-settings", "[data-slot=lenders] .ent:first-child .set-group")
+        assert await page.js("[...document.querySelector('[data-act=exec-mode]').options].map(e => e.value)") == [
+            "off", "allowlist", "ask", "all"]
+        await page.shot("use-lender-exec-mode", "[data-slot=lenders] .ent:first-child", delay=2)
         await page.click('[data-slot=lenders] .ent:first-child [data-act=toggle]')
-        for tab, label in [("folders", "共有フォルダ"), ("allow", "許可リスト")]:
+        for tab, label in [("folders", "共有フォルダ"), ("allow", "コマンドの規則")]:
             await page.click(f'.surface [data-tab={tab}]')
             await page.wait(f"!document.querySelector('[data-panel={tab}]').hidden && document.querySelector('[data-panel={tab}]').childElementCount > 0")
             await check(f"使う・{label}")
+            if tab == "allow":
+                assert await page.js("[...document.querySelectorAll('[data-act=rule-text]')].map(e => e.dataset.key)") == [
+                    "deny", "ask", "allow"]
+                assert await page.js("[...document.querySelectorAll('[data-act=rule-text]')].every(e => e.value.length > 5000)")
+                await page.shot("use-command-rules", "[data-panel=allow]", delay=2)
         await page.click('.surface [data-tab=tasks]')
         await page.click('[data-act=invite-open]')
         await page.wait("document.querySelector('[data-slot=invite] input')")

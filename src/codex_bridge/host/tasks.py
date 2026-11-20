@@ -6,7 +6,7 @@ import asyncio
 import itertools
 import json
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
@@ -18,6 +18,7 @@ from .lenders import (Lender, SendFn, as_protocol, as_text, blocked_until, lende
                       normalize_models,
                       normalize_window, number, pick_lender)
 from .paths import ToolError
+from .policy import EXEC_MODES, Policy, command_patterns
 
 ACTIVE_STATES = ("queued", "running", "agent_offline", "awaiting_lender")  # awaiting_lender: the lender has not approved yet
 NO_THRESHOLDS: dict = {}  # the borrower sets no limit of its own: only the lender's `limits` count
@@ -62,10 +63,24 @@ class TaskRecord:
     actual_effort: str | None = None
     rerouted: dict | None = None
     notified_final: bool = False
+    exec_mode: str | None = None
+    deny: list[str] = field(default_factory=list)
+    ask: list[str] = field(default_factory=list)
 
 
 def _known_state(v) -> str | None:
     return v if isinstance(v, str) and v in TASK_STATES else None
+
+
+def _exec_fields(exec_mode: str | None, deny: list[str] | None, ask: list[str] | None) -> dict:
+    if exec_mode is not None and exec_mode not in EXEC_MODES:
+        raise ValueError("コマンドのモードは off / ask / allowlist / all のどれかです")
+    return {"exec_mode": exec_mode, "deny": command_patterns(deny, "拒否リスト"),
+            "ask": command_patterns(ask, "確認リスト")}
+
+
+def _stored_patterns(value) -> list[str]:
+    return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
 
 
 def _record(raw) -> TaskRecord | None:
@@ -88,7 +103,9 @@ def _record(raw) -> TaskRecord | None:
         origin=as_text(raw.get("origin")), session=as_text(raw.get("session")),
         model=as_text(raw.get("model")), effort=as_text(raw.get("effort")),
         actual_model=as_text(raw.get("actual_model")), actual_effort=as_text(raw.get("actual_effort")),
-        rerouted=rerouted, notified_final=raw.get("notified_final") is True)
+        rerouted=rerouted, notified_final=raw.get("notified_final") is True,
+        exec_mode=raw.get("exec_mode") if raw.get("exec_mode") in EXEC_MODES else None,
+        deny=_stored_patterns(raw.get("deny")), ask=_stored_patterns(raw.get("ask")))
 
 
 def _read_events(path: Path) -> list[dict]:
@@ -110,8 +127,10 @@ def _read_events(path: Path) -> list[dict]:
 
 class TaskManager:
     def __init__(self, data_dir: Path, touched_fn: Callable[[str | None], list[str]], *,
-                 check_start: Callable[[], None] | None = None) -> None:
+                 check_start: Callable[[], None] | None = None,
+                 policy_fn: Callable[[], Policy] = Policy) -> None:
         self.check_start = check_start
+        self.policy_fn = policy_fn
         self.dir = Path(data_dir) / "tasks"
         self.dir.mkdir(parents=True, exist_ok=True)
         self.settings_path = Path(data_dir) / "settings.json"
@@ -156,9 +175,16 @@ class TaskManager:
             self.tasks[rec.task_id] = rec
             self._events[rec.task_id] = _read_events(f.with_suffix(".jsonl"))
 
+    def _write_record(self, rec: TaskRecord) -> None:
+        target = self.dir / f"{rec.task_id}.json"
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(json.dumps(asdict(rec), ensure_ascii=False), encoding="utf-8")
+        tmp.replace(target)
+
     def _save(self, rec: TaskRecord) -> None:
         rec.finished = (rec.finished or time.time()) if rec.state in FINAL_STATES else None
-        (self.dir / f"{rec.task_id}.json").write_text(json.dumps(asdict(rec), ensure_ascii=False), encoding="utf-8")
+        self._write_record(rec)
+        self.tasks[rec.task_id] = rec
         lender = self._lenders.get(rec.lender)
         if lender is not None:
             lender.active_task_ids = self.active_task_ids(lender.name)
@@ -557,7 +583,9 @@ class TaskManager:
 
     async def start(self, prompt: str, continue_task_id: str | None = None, lender: str | None = None, *,
                     model: str | None = None, effort: str | None = None,
-                    origin: str | None = None, session: str | None = None) -> str:
+                    origin: str | None = None, session: str | None = None,
+                    exec_mode: str | None = None, deny: list[str] | None = None,
+                    ask: list[str] | None = None) -> str:
         if self.check_start:
             self.check_start()
         if not self._connected():
@@ -570,6 +598,9 @@ class TaskManager:
                 model, effort = prev.model, prev.effort
             target = self._continue_target(prev, lender, now, model=model, effort=effort)
             thread_id = prev.thread_id
+            exec_mode = prev.exec_mode if exec_mode is None else exec_mode
+            deny = prev.deny if deny is None else deny
+            ask = prev.ask if ask is None else ask
         elif lender is not None:
             target = self._ready(self._resolve(lender))
             reason = lender_accepts(target, model, effort)
@@ -586,10 +617,14 @@ class TaskManager:
             target = self._pick(now, among)
         else:
             target = self._pick(now)
+        try:
+            exec_fields = _exec_fields(exec_mode, deny, ask)
+        except ValueError as e:
+            raise ToolError(str(e)) from e
         task_id = time.strftime("t%Y%m%d-%H%M%S") + f"-{next(self._task_ids)}"
         rec = TaskRecord(task_id=task_id, prompt=prompt, created=now, continue_task_id=continue_task_id,
-                         lender=target.name, origin=origin, session=session, model=model, effort=effort, thread_id=thread_id)
-        self.tasks[task_id] = rec
+                         lender=target.name, origin=origin, session=session, model=model, effort=effort,
+                         thread_id=thread_id, **exec_fields)
         self._events[task_id] = []
         target.last_assigned = now
         self._save(rec)  # also marks the lender as working
@@ -597,6 +632,27 @@ class TaskManager:
         await target.send(protocol.msg("task_start", task_id=task_id, prompt=prompt, continue_thread_id=thread_id, **spec))
         self._say("info", f"{task_id} を {target.name} に送りました")
         return task_id
+
+    def exec_settings(self, task_id: str) -> dict:
+        rec = self._get(task_id)
+        mode = self.policy_fn().effective_exec_mode(rec.lender, rec.exec_mode)
+        return {"exec_mode": rec.exec_mode, "deny": list(rec.deny), "ask": list(rec.ask),
+                "effective_exec_mode": mode}
+
+    def set_task_exec(self, task_id: str, **changes) -> dict:
+        rec = self._get(task_id)
+        if rec.state not in ACTIVE_STATES:
+            raise ToolError("コマンドの指定を変えられるのは作業中の依頼だけです")
+        try:
+            fields = _exec_fields(changes.get("exec_mode", rec.exec_mode), changes.get("deny", rec.deny),
+                                  changes.get("ask", rec.ask))
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+        if changes:
+            self._write_record(replace(rec, **fields))
+            rec.exec_mode, rec.deny, rec.ask = fields["exec_mode"], fields["deny"], fields["ask"]
+            self._changed()
+        return self.exec_settings(task_id)
 
     async def _send_for(self, rec: TaskRecord, m: dict) -> None:
         await self._resolve(rec.lender).send(m)
@@ -632,6 +688,7 @@ class TaskManager:
             "task_id": rec.task_id, "state": rec.state, "lender": rec.lender, "thread_id": rec.thread_id,
             "origin": rec.origin, "model": rec.model, "effort": rec.effort,
             "actual_model": rec.actual_model, "actual_effort": rec.actual_effort, "rerouted": rec.rerouted,
+            **self.exec_settings(task_id),
             "resume_at": iso_local(rec.resume_at), "recent_events": self.events(task_id)[-15:],
             # the agent of this task's own lender; None for a v0.1 record, which names no lender
             "agent": self.agent_info(rec.lender) if rec.lender is not None else None,
@@ -643,6 +700,7 @@ class TaskManager:
             "task_id": rec.task_id, "state": rec.state, "lender": rec.lender, "prompt": rec.prompt,
             "origin": rec.origin, "model": rec.model, "effort": rec.effort,
             "actual_model": rec.actual_model, "actual_effort": rec.actual_effort, "rerouted": rec.rerouted,
+            **self.exec_settings(task_id),
             "report": rec.report, "thread_id": rec.thread_id, "resume_at": iso_local(rec.resume_at),
             "created": rec.created, "finished": rec.finished,
             "changed_files": self.touched_fn(task_id), "event_count": len(self._events.get(task_id, [])),

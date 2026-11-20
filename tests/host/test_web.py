@@ -738,7 +738,8 @@ async def test_admin_send_task_with_model(admin, host, spec, model, effort):
     assert r.status_code == 200, r.text
     rec = host.mgr.tasks[r.json()["task_id"]]
     assert rec.origin == "admin" and rec.model == model and rec.effort == effort
-    assert r.json() == {"task_id": rec.task_id, "lender": "friend", "model": model, "effort": effort}
+    assert r.json() == {"task_id": rec.task_id, "lender": "friend", "model": model, "effort": effort,
+                        "exec_mode": None, "deny": [], "ask": [], "effective_exec_mode": "allowlist"}
     for key, value in (("model", model), ("effort", effort)):
         if value is None:
             assert key not in sent[-1]
@@ -898,6 +899,90 @@ async def test_lenders_api_survives_numbers_that_are_not_json(admin, host):
     assert (await admin.get("/admin/api/usage")).status_code == 200
 
 
+async def test_admin_task_exec_settings_are_guarded_and_partial(admin, host):
+    host.policy.update(lender_exec_modes={"friend": "all"})
+    link = await join(host, "friend")
+    reply = await admin.post("/admin/api/tasks", json={"prompt": "x", "exec_mode": "ask", "deny": ["echo x"]}, headers=H)
+    assert reply.status_code == 200 and reply.json()["effective_exec_mode"] == "ask"
+    task_id = reply.json()["task_id"]
+    url = f"/admin/api/tasks/{task_id}"
+    assert (await admin.put(f"{url}/exec", json={"exec_mode": "off"})).status_code == 403
+    reply = await admin.put(f"{url}/exec", json={"ask": ["echo y"], "exec_mode": None}, headers=H)
+    assert reply.status_code == 200
+    assert reply.json() == {"exec_mode": None, "deny": ["echo x"], "ask": ["echo y"], "effective_exec_mode": "all"}
+    detail = (await admin.get(url)).json()
+    assert all(detail[k] == v for k, v in reply.json().items())
+    invalid = await admin.put(f"{url}/exec", json={"deny": "echo z"}, headers=H)
+    assert invalid.status_code == 409 and (await admin.get(url)).json()["deny"] == ["echo x"]
+    await host.mgr.on_agent_message(link, {"type": "task_state", "task_id": task_id, "state": "completed"})
+    assert (await admin.put(f"{url}/exec", json={"deny": []}, headers=H)).status_code == 409
+
+
+@pytest.mark.parametrize("lender_mode, task_mode", [("all", "ask"), ("ask", "all"), ("allowlist", "ask")])
+async def test_task_exec_uses_stricter_mode(host, monkeypatch, lender_mode, task_mode):
+    host.policy.update(lender_exec_modes={"friend": lender_mode}, exec_allow=["echo *"],
+                       limits={"sync_wait_sec": 0})
+    await join(host, "friend")
+    task_id = await host.mgr.start("x", lender="friend", exec_mode=task_mode)
+    runner = host.services.runner
+    monkeypatch.setattr(runner, "lender_fn", lambda: "friend")
+    monkeypatch.setattr(runner, "task_id_fn", lambda: task_id)
+    reply = await runner.run_command("echo hello")
+    assert reply["status"] == "waiting_approval"
+    approval, = host.approvals.pending()
+    assert approval.task_id == task_id
+    host.approvals.decide(approval.id, False)
+    await runner.jobs[reply["job_id"]].done.wait()
+
+
+@pytest.mark.parametrize("changes", [{"deny": ["echo review"]}, {"exec_mode": "off"}])
+async def test_parallel_task_rules_and_approval_recheck(host, monkeypatch, changes):
+    from codex_bridge.host.codex_mcp import current_lender, current_thread_id
+
+    executed = []
+
+    async def execute(job, cwd, timeout):
+        executed.append((job.task_id, job.command))
+        job.status = "done"
+
+    host.policy.update(lender_exec_modes={"friend": "all"}, exec_deny=["echo shared"], limits={"sync_wait_sec": 0})
+    link = await join(host, "friend", protocol=5, capabilities={"max_parallel": 3})
+    first = await host.mgr.start("first", lender="friend", deny=["echo local"], ask=["echo review"])
+    second = await host.mgr.start("second", lender="friend")
+    for task_id, thread in [(first, "one"), (second, "two")]:
+        await host.mgr.on_agent_message(link, {"type": "task_state", "task_id": task_id, "state": "running",
+                                              "thread_id": thread})
+    runner = host.services.runner
+    monkeypatch.setattr(runner, "_execute", execute)
+
+    async def command(thread, value):
+        lender_token = current_lender.set("friend")
+        thread_token = current_thread_id.set(thread)
+        try:
+            reply = await runner.run_command(value)
+            job = runner.jobs[reply["job_id"]]
+            if job.status != "waiting_approval":
+                await job.done.wait()
+            return job
+        finally:
+            current_lender.reset(lender_token)
+            current_thread_id.reset(thread_token)
+
+    assert (await command("one", "echo local")).status == "denied"
+    assert (await command("two", "echo local")).status == "done"
+    assert (await command(None, "echo local")).status == "done"
+    assert (await command(None, "echo shared")).status == "denied"
+    waiting = await command("one", "echo review")
+    assert waiting.status == "waiting_approval"
+    assert (await command("two", "echo review")).status == "done"
+    host.mgr.set_task_exec(first, **changes)
+    host.approvals.decide(waiting.approval_id, True)
+    await waiting.done.wait()
+    assert waiting.status == "denied"
+    assert ("拒否リスト" if "deny" in changes else "off") in waiting.message
+    assert executed == [(second, "echo local"), (None, "echo local"), (second, "echo review")]
+
+
 async def test_send_task_to_a_chosen_lender(admin, host):
     sent = await two_lenders(host)
     r = await admin.post("/admin/api/tasks", json={"prompt": "one", "lender": "alice"}, headers=H)  # bob has more room
@@ -1016,14 +1101,14 @@ async def test_policy_form_save_keeps_lender_exec_modes(admin, host):
     assert host.policy.current().lender_exec_modes == {"alice": "ask", "bob": "all"}
 
 
-async def test_shared_allowlist_page_has_no_global_lender_settings(admin):
+async def test_shared_command_rules_page_has_no_global_lender_settings(admin):
     response = await admin.get("/app/static/use-pages.js")
     assert response.status_code == 200
-    allow = response.text.split("export function allowHtml(form) {", 1)[1].split("export function", 1)[0]
-    assert 'data-act="allow-text"' in allow
-    assert 'data-act="allow-confirm"' in allow
+    rules = response.text.split("export function rulesHtml(form) {", 1)[1].split("export function", 1)[0]
+    assert 'data-act="rule-text"' in rules
+    assert 'data-act="allow-confirm"' in rules
     for setting in ("exec-mode", "delete-approval", "log-files", "log-result", "threshold"):
-        assert f'data-act="{setting}"' not in allow
+        assert f'data-act="{setting}"' not in rules
 
 
 async def test_admin_overview_lists_every_active_task_and_keeps_first(host, admin):

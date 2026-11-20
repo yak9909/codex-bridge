@@ -267,6 +267,14 @@ def admin_router(host, page_url: str | None = None) -> APIRouter:
         except ToolError as e:
             raise HTTPException(404, str(e))
 
+    @r.put("/api/tasks/{task_id}/exec")
+    async def task_exec(task_id: str, body: dict):
+        changes = {key: body[key] for key in ("exec_mode", "deny", "ask") if key in body}
+        try:
+            return host.mgr.set_task_exec(task_id, **changes)
+        except ToolError as e:
+            raise HTTPException(404 if task_id not in host.mgr.tasks else 409, str(e))
+
     @r.post("/api/tasks")
     async def send_task(body: dict):
         """lender: the invite name of who gets the task; left out (or empty) the host picks by headroom."""
@@ -281,11 +289,13 @@ def admin_router(host, page_url: str | None = None) -> APIRouter:
         try:
             task_id = await host.mgr.start(prompt, body.get("continue_task_id") or None, lender or None,
                                            model=body.get("model") or None, effort=body.get("effort") or None,
-                                           origin="admin")
+                                           origin="admin", exec_mode=body.get("exec_mode"),
+                                           deny=body.get("deny"), ask=body.get("ask"))
         except ToolError as e:
             raise HTTPException(409, str(e))
         rec = host.mgr.tasks[task_id]
-        return {"task_id": task_id, "lender": rec.lender, "model": rec.model, "effort": rec.effort}
+        return {"task_id": task_id, "lender": rec.lender, "model": rec.model, "effort": rec.effort,
+                **host.mgr.exec_settings(task_id)}
 
     @r.post("/api/tasks/{task_id}/followup")
     async def followup(task_id: str, body: dict):

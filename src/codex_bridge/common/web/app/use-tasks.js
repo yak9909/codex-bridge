@@ -2,6 +2,8 @@
 import { esc, fmtTime, fmtDay } from "/app/static/api.js";
 import { icon, elapsed, taskTitle, stateLozenge, ACTIVE } from "/app/static/common.js";
 
+import { EXEC_MODES } from "/app/static/use-lenders.js";
+
 const EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 const COMMAND_TOOLS = /^(run_command|commandExecution|command_execution)$/i;
 const FILE_TOOLS = /^(read_file|write_file|edit_file|move_path|delete_path|fileChange|file_change|apply_patch|patch)$/i;
@@ -49,6 +51,24 @@ export function headHtml(r, readonly = false, side = "use") {
 export function promptHtml(r) {
   const prompt = String(r?.prompt || "");
   return prompt ? `<h3>依頼文</h3><p class="d-prompt">${esc(prompt)}</p>` : "";
+}
+
+export function taskExecModeLabel(mode) {
+  return EXEC_MODES.find(([key]) => key === mode)?.[1] || "指定なし";
+}
+
+export function taskExecHtml(r) {
+  const editable = ACTIVE.includes(r.state);
+  const modes = [["", "指定なし"], ...EXEC_MODES];
+  const options = modes.map(([key, label]) => `<option value="${esc(key)}"${key === (r.exec_mode || "") ? " selected" : ""}>${esc(label)}</option>`).join("");
+  const mode = editable ? `<select data-act="task-exec-mode" data-id="${esc(r.task_id)}">${options}</select>`
+    : `<b>${esc(taskExecModeLabel(r.exec_mode))}</b>`;
+  const lists = [["deny", "拒否リスト"], ["ask", "確認リスト"]].map(([key, label]) => {
+    const value = esc((r[key] || []).join("\n"));
+    return `<label class="field"><span>${esc(label)}</span><textarea class="command-patterns" rows="2" spellcheck="false" ` +
+      `data-act="task-exec-list" data-id="${esc(r.task_id)}" data-key="${esc(key)}"${editable ? "" : " readonly"}>${value}</textarea></label>`;
+  }).join("");
+  return `<label class="field"><span>モードの指定</span>${mode}</label>${lists}`;
 }
 
 function item(cls, iconId, body, ts) {
