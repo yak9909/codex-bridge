@@ -7,7 +7,8 @@ import pytest
 
 from codex_bridge.host.command_rules import inspect_commands, lex
 from codex_bridge.host.paths import ToolError
-from codex_bridge.host.runner import match_allow
+from codex_bridge.host.runner import Job, match_allow
+from codex_bridge.host.tasks import TaskRecord
 
 PY = f'"{sys.executable}"'
 
@@ -211,7 +212,8 @@ async def test_modified_script_is_checked_in_nested_commands(share, monkeypatch,
     monkeypatch.setattr(share.runner, "_execute", execute)
     share.task("t1")
     share.write.write_file("scripts/new.py", "print(1)\n")
-    share.set_policy(exec_mode="all", exec_confirm_modified_scripts=True, limits={"sync_wait_sec": 0})
+    share.set_policy(exec_mode="all", exec_deny=["unrelated"], exec_confirm_modified_scripts=True,
+                     limits={"sync_wait_sec": 0})
     reply = await share.runner.run_command(source)
     job = share.runner.jobs[reply["job_id"]]
     if expected:
@@ -220,6 +222,102 @@ async def test_modified_script_is_checked_in_nested_commands(share, monkeypatch,
         share.approvals.decide(approval.id, False)
     await job.done.wait()
     assert job.status == ("denied" if expected else "done")
+
+
+@pytest.mark.parametrize("mode", ["off", "all", "allowlist", "ask"])
+@pytest.mark.parametrize("source, allowed", [
+    ("show sample 2>&1", False),
+    ("show sample > out/log.txt", False),
+    ("show %SAMPLE%", True),
+    ('powershell -NoProfile -Command "show $env:TEMP"', True),
+    ("show (sample)", True),
+])
+def test_empty_rule_lists_preserve_execution_modes(share, mode, source, allowed):
+    share.set_policy(exec_mode=mode, exec_allow=[source])
+    job = Job("sample", source, ".", None)
+    denied, pending = share.runner._command_decision(job, share.policy.current())
+    assert bool(denied) == (mode == "off")
+    assert pending == (mode == "ask" or mode == "allowlist" and not allowed)
+
+
+@pytest.mark.parametrize("source, state", [
+    ('show blue 2>&1', "denied"),
+    ('show blue 2> "out/log sample.txt"', "denied"),
+    ('show red 2>&1', "done"),
+    ('write item > "show blue"', "done"),
+    ('(show blue)', "denied"),
+    ('write (sample)', "done"),
+    ('show (sample)', "waiting"),
+    ('write %SAMPLE% & show red', "done"),
+    ('write !SAMPLE! & show red', "done"),
+    ('show %SAMPLE%', "waiting"),
+    ('%SAMPLE% blue', "waiting"),
+    ('pwsh /command "write $env:TEMP; show red"', "done"),
+    ('pwsh /c "show $env:TEMP"', "waiting"),
+    ('pwsh /enc sample', "waiting"),
+])
+def test_uncertainty_is_scoped_and_redirection_targets_are_excluded(share, source, state):
+    share.set_policy(exec_mode="all", exec_deny=["show blue"])
+    denied, pending = share.runner._command_decision(Job("sample", source, ".", None), share.policy.current())
+    assert ("denied" if denied else "waiting" if pending else "done") == state
+
+
+@pytest.mark.parametrize("source", [
+    '@show blue',
+    'cmd,/c "show blue"',
+    'cmd;/c "show blue"',
+    'call=show blue',
+    'show^ blue',
+    'sh^\r\now blue',
+    'start /b /wait "" show blue',
+    'start /min "sample window" "show.exe" blue',
+    'pwsh -NoProfile show blue',
+    'pwsh /command "show blue"',
+    'bash -c -- "show blue"',
+])
+@pytest.mark.parametrize("color", ["blue", "red"])
+def test_native_shell_spellings_match_a_sample_rule(share, source, color):
+    share.set_policy(exec_mode="all", exec_deny=["show blue"])
+    decision = share.runner._command_decision(
+        Job("sample", source.replace("blue", color), ".", None), share.policy.current())
+    assert (bool(decision[0]), decision[1]) == (color == "blue", False)
+
+
+@pytest.mark.parametrize("source", [
+    'if exist sample.txt show red',
+    'for %a in (red) do show %a',
+    'pwsh /c "& write sample"',
+    'pwsh /c "iex sample"',
+    'pwsh /c "Invoke-Expression sample"',
+    'pwsh /c "{ write sample }"',
+])
+def test_opaque_shell_constructs_require_approval_only_with_restrictive_rules(share, source):
+    job = Job("sample", source, ".", None)
+    share.set_policy(exec_mode="all")
+    assert share.runner._command_decision(job, share.policy.current()) == (None, False)
+    share.set_policy(exec_deny=["unrelated"])
+    assert share.runner._command_decision(job, share.policy.current()) == (None, True)
+
+
+def test_task_only_rules_enable_contextual_inspection(share, monkeypatch):
+    share.set_policy(exec_mode="all")
+    task = TaskRecord("t1", "sample", 0, ask=["show blue"])
+    monkeypatch.setattr(share.runner, "task_record_fn", lambda task_id: task if task_id == "t1" else None)
+    policy = share.policy.current()
+    for task_id, expected in [("t1", True), ("t2", False), (None, False)]:
+        job = Job("sample", "show %SAMPLE%", ".", task_id)
+        assert share.runner._command_decision(job, policy) == (None, expected)
+
+
+def test_rules_match_options_at_the_written_positions(share):
+    source = "git -C dir push"
+    job = Job("sample", source, ".", None)
+    share.set_policy(exec_mode="all", exec_deny=["git * push *"])
+    assert share.runner._command_decision(job, share.policy.current()) == (None, False)
+    share.set_policy(exec_deny=["git -C * push *"])
+    assert share.runner._command_decision(job, share.policy.current())[0] is not None
+    share.set_policy(exec_deny=["del /q *"])
+    assert share.runner._command_decision(Job("sample", "del /q x", ".", None), share.policy.current())[0] is not None
 
 
 async def test_new_rules_apply_after_the_pre_execution_scan(share, monkeypatch):

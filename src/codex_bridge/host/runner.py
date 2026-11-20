@@ -55,12 +55,16 @@ def match_allow(command: str, patterns: list[str]) -> bool:
     return False
 
 
+def _rule_tokens(pattern: str) -> list[str]:
+    segments, uncertain = lex(pattern, "powershell", pattern=True)
+    return [word.value for word in segments[0]] if segments and not uncertain else []
+
+
 def _matching_rule(commands: list[list[str | None]], patterns: list[str]) -> str | None:
     for pattern in patterns:
-        segments, uncertain = lex(pattern, "powershell", pattern=True)
-        if uncertain or not segments:
+        tokens = _rule_tokens(pattern)
+        if not tokens:
             continue
-        tokens = [word.value for word in segments[0]]
         rest_any = tokens[-1] == "*"
         fixed = tokens[:-1] if rest_any else tokens
         for command in commands:
@@ -140,16 +144,25 @@ class CommandRunner:
             return "実行は許可されていません（実行モードが off です）", False
         deny = [*policy.deny_patterns, *(task.deny if task else [])]
         ask = [] if approved else [*policy.ask_patterns, *(task.ask if task else [])]
-        commands, uncertain = inspect_commands(job.command)
-        if (rule := _matching_rule(commands, deny)) is not None:
-            return f"コマンドの規則の拒否リストに当たるため実行しません: {rule}", False
-        if approved:
+        if approved and not deny:
             return None, False
-        if uncertain or _matching_rule(commands, ask) is not None:
-            return None, True
+        if deny or ask:
+            programs = [tokens[0] for pattern in (*deny, *ask) if (tokens := _rule_tokens(pattern))]
+            commands, uncertain = inspect_commands(
+                job.command, related_program=lambda name: any(_rule_token_match(p, name, True) for p in programs))
+            if (rule := _matching_rule(commands, deny)) is not None:
+                return f"コマンドの規則の拒否リストに当たるため実行しません: {rule}", False
+            if approved:
+                return None, False
+            if uncertain or _matching_rule(commands, ask) is not None:
+                return None, True
+        else:
+            # Retain the legacy modified-script check when there are no restrictive rules.
+            commands = [[token.strip('"') for token in _tokens(job.command)]]
         if policy.confirm_modified_scripts:
-            touched = {normalized_path(path).casefold() for path in self.snapshots.touched(job.task_id)}
-            if any(normalized_path(token).casefold() in touched for words in commands for token in words
+            normalize = normalized_path if deny or ask else normalize_rel
+            touched = {normalize(path).lower() for path in self.snapshots.touched(job.task_id)}
+            if any(normalize(token).lower() in touched for words in commands for token in words
                    if token is not None):
                 return None, True
         if mode == "allowlist":
