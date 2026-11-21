@@ -10,7 +10,6 @@ import os
 import re
 import shutil
 import stat
-import subprocess
 import tempfile
 import time
 import zipfile
@@ -19,6 +18,7 @@ from pathlib import Path
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 from . import __version__
+from .update_process import start_update_process
 
 REPOSITORY = "yak9909/codex-bridge"
 LATEST = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
@@ -246,19 +246,22 @@ def acknowledge_restart(exe: Path, stage_name: str) -> bool:
 
 
 def _launch(exe: Path, stage: Path) -> None:
-    child = subprocess.Popen([str(exe), RESTART_ARG, stage.name, str(os.getpid())], cwd=exe.parent,
-                             env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
-                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    deadline = time.monotonic() + 45
-    while child.poll() is None:
-        if (stage / "ready").is_file():
-            return
-        if time.monotonic() >= deadline:
-            child.terminate()
-            child.wait(timeout=10)
-            raise UpdateError("新しい exe の起動を確認できませんでした")
-        time.sleep(0.1)
-    raise UpdateError("新しい exe が起動直後に終了しました")
+    argv = [str(exe), RESTART_ARG, stage.name, str(os.getpid())]
+    env = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
+    with start_update_process(argv, cwd=exe.parent, env=env) as child:
+        try:
+            deadline = time.monotonic() + 45
+            while child.running():
+                if (stage / "ready").is_file():
+                    return
+                if time.monotonic() >= deadline:
+                    raise UpdateError("新しい exe の起動を確認できませんでした")
+                time.sleep(0.1)
+            raise UpdateError("新しい exe が起動直後に終了しました")
+        except BaseException:
+            # A bootloader can exit while an inner process still has the executable open.
+            child.stop_tree()
+            raise
 
 
 def install_release(exe: Path, package: Path, launch=None, *, before_launch=None) -> None:
@@ -336,11 +339,25 @@ def install_release(exe: Path, package: Path, launch=None, *, before_launch=None
             shutil.rmtree(staging, ignore_errors=True)
 
 
-def clean_up(exe: Path, data_dir: Path) -> None:
+def clean_old_exes(exe: Path) -> None:
+    name = EXE + ".old"
     try:
-        _free_old_exe(exe.with_suffix(".exe.old"), preserve=any(exe.parent.glob(INSTALL_STAGE + "*")))
+        backups = list(exe.parent.glob(name + "*"))
     except OSError:
-        pass  # The onefile bootloader may still be exiting.
+        return
+    for backup in backups:
+        candidate = backup.name.lower()
+        if candidate != name and not (candidate.startswith(name + "-") and len(candidate) > len(name) + 1):
+            continue
+        try:
+            if not backup.is_symlink() and backup.is_file():
+                backup.unlink(missing_ok=True)
+        except OSError:
+            pass  # A running bootloader can still hold the file for a while.
+
+
+def clean_up(exe: Path, data_dir: Path) -> None:
+    clean_old_exes(exe)
     root = data_dir / "updates"
     if root.is_symlink() or root.is_junction():
         return

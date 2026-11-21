@@ -1,14 +1,18 @@
 """Exercise release updates with in-memory downloads and temporary installations."""
 
+from contextlib import contextmanager
+import ctypes
 import hashlib
 import io
+import sys
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
-from codex_bridge import updater
+from codex_bridge import update_process, updater
 
 
 @pytest.mark.parametrize(("tag", "current", "newer"), [
@@ -171,15 +175,18 @@ def test_restart_requires_child_acknowledgement(monkeypatch, tmp_path, ready):
     exe.write_bytes(b"old exe")
     package = updater.prepare_release(fake_download(monkeypatch), tmp_path / "data")
 
+    stopped = []
+
+    @contextmanager
     def spawn(argv, **kwargs):
         assert argv[:2] == [str(exe), updater.RESTART_ARG]
         assert kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
         assert not updater.acknowledge_restart(exe, "../outside")
         if ready:
             assert updater.acknowledge_restart(exe, argv[2])
-        return SimpleNamespace(poll=lambda: None if ready else 1)
+        yield SimpleNamespace(running=lambda: ready, stop_tree=lambda: stopped.append(True))
 
-    monkeypatch.setattr(updater.subprocess, "Popen", spawn)
+    monkeypatch.setattr(updater, "start_update_process", spawn)
     if ready:
         updater.install_release(exe, package)
         assert exe.read_bytes() == b"new codex-bridge.exe"
@@ -187,6 +194,7 @@ def test_restart_requires_child_acknowledgement(monkeypatch, tmp_path, ready):
         with pytest.raises(updater.UpdateError, match="起動直後"):
             updater.install_release(exe, package)
         assert exe.read_bytes() == b"old exe"
+    assert stopped == ([] if ready else [True])
     assert not list(tmp_path.glob(updater.INSTALL_STAGE + "*"))
 
 
@@ -195,7 +203,7 @@ def test_unreadable_installed_version_disables_update():
 
 
 @pytest.mark.parametrize("at_startup", [True, False])
-def test_locked_old_exe_is_renamed(monkeypatch, tmp_path, at_startup):
+def test_locked_old_exe_is_retried_at_startup_or_renamed_at_install(monkeypatch, tmp_path, at_startup):
     exe = tmp_path / updater.EXE
     exe.write_bytes(b"current")
     old = exe.with_suffix(".exe.old")
@@ -210,13 +218,14 @@ def test_locked_old_exe_is_renamed(monkeypatch, tmp_path, at_startup):
     monkeypatch.setattr(Path, "unlink", unlink)
     if at_startup:
         updater.clean_up(exe, tmp_path / "data")
-        assert not old.exists()
+        assert old.read_bytes() == b"previous"
+        assert not list(tmp_path.glob("codex-bridge.exe.old-*"))
     else:
         package = updater.prepare_release(fake_download(monkeypatch), tmp_path / "data")
         updater.install_release(exe, package, launch=lambda path: None)
         assert old.read_bytes() == b"current"
         assert exe.read_bytes() == b"new codex-bridge.exe"
-    assert [file.read_bytes() for file in tmp_path.glob("codex-bridge.exe.old-*")] == [b"previous"]
+        assert [file.read_bytes() for file in tmp_path.glob("codex-bridge.exe.old-*")] == [b"previous"]
 
 
 def test_restart_timeout_restores_install_and_retains_backups_until_failure(monkeypatch, tmp_path):
@@ -227,17 +236,21 @@ def test_restart_timeout_restores_install_and_retains_backups_until_failure(monk
     monkeypatch.setattr(updater, "time", SimpleNamespace(monotonic=lambda: next(update_clock)))
     calls = []
 
+    @contextmanager
     def spawn(argv, **kwargs):
         stage = tmp_path / argv[2]
         assert stage.is_dir()
         assert exe.with_suffix(".exe.old").read_bytes() == b"current"
-        return SimpleNamespace(poll=lambda: None, terminate=lambda: calls.append("terminate"),
-                               wait=lambda timeout: calls.append("wait"))
+        def stop_tree():
+            assert exe.read_bytes() == b"new codex-bridge.exe"
+            calls.append("tree stopped before rollback")
 
-    monkeypatch.setattr(updater.subprocess, "Popen", spawn)
+        yield SimpleNamespace(running=lambda: True, stop_tree=stop_tree)
+
+    monkeypatch.setattr(updater, "start_update_process", spawn)
     with pytest.raises(updater.UpdateError, match="起動を確認できません"):
         updater.install_release(exe, package)
-    assert calls == ["terminate", "wait"]
+    assert calls == ["tree stopped before rollback"]
     assert exe.read_bytes() == b"current"
     assert not list(tmp_path.glob(updater.INSTALL_STAGE + "*"))
 
@@ -274,4 +287,72 @@ def test_install_can_use_unique_backup_if_previous_exe_cannot_be_renamed(tmp_pat
     assert exe.read_bytes() == b"new codex-bridge.exe"
     assert old.read_bytes() == b"previous"
     assert [file.read_bytes() for file in tmp_path.glob("codex-bridge.exe.old-*")] == [b"current"]
+
+
+def test_cleanup_retries_only_matching_regular_files(tmp_path, monkeypatch):
+    exe = tmp_path / updater.EXE
+    exe.write_bytes(b"current")
+    old = tmp_path / (exe.name + ".old")
+    renamed = tmp_path / (old.name + "-123")
+    locked = tmp_path / (old.name + "-456")
+    untouched = [exe, tmp_path / (old.name + "er"), tmp_path / "other.exe.old-123"]
+    directory = tmp_path / (old.name + "-directory")
+    directory.mkdir()
+    for path in [old, renamed, locked, *untouched]:
+        path.write_bytes(b"data")
+
+    original_unlink = Path.unlink
+
+    def unlink(path, *args, **kwargs):
+        if path == locked:
+            raise PermissionError("still in use")
+        return original_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", unlink)
+        updater.clean_up(exe, tmp_path / "data")
+    assert not old.exists() and not renamed.exists() and locked.exists()
+    updater.clean_old_exes(exe)
+    assert not locked.exists()
+    assert all(path.is_file() for path in untouched)
+    assert directory.is_dir()
+
+
+def test_replacement_is_assigned_before_resume_and_waits_for_whole_job(tmp_path, monkeypatch):
+    events = []
+    remaining = iter([1, 0])  # the bootloader is gone, then the inner process exits
+
+    def create(application, command, *args):
+        assert args[3] & update_process.CREATE_SUSPENDED
+        events.append("create suspended")
+        return 11, 12, 1001, 1002
+
+    def query(job, kind, pointer, size, returned):
+        assert job == 13 and kind == update_process.BASIC_ACCOUNTING_INFORMATION
+        accounting = ctypes.cast(pointer, ctypes.POINTER(update_process._JobAccounting)).contents
+        accounting.active_processes = next(remaining)
+        events.append(("active", accounting.active_processes))
+        return True
+
+    api = SimpleNamespace(CreateProcess=create, WAIT_TIMEOUT=258, WaitForSingleObject=lambda handle, ms: 0,
+                          CloseHandle=lambda handle: events.append(("close", handle)))
+    kernel = SimpleNamespace(
+        CreateJobObjectW=Mock(return_value=13),
+        AssignProcessToJobObject=Mock(side_effect=lambda job, pid: events.append(("assign", job, pid)) or True),
+        ResumeThread=Mock(side_effect=lambda handle: events.append(("resume", handle)) or 1),
+        TerminateJobObject=Mock(side_effect=lambda job, code: events.append(("terminate", job)) or True),
+        QueryInformationJobObject=Mock(side_effect=query),
+    )
+    monkeypatch.setitem(sys.modules, "_winapi", api)
+    monkeypatch.setattr(update_process.ctypes, "WinDLL", lambda *args, **kwargs: kernel, raising=False)
+    monkeypatch.setattr(update_process.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
+    monkeypatch.setattr(update_process.subprocess, "STARTUPINFO", lambda: None, raising=False)
+
+    with update_process.start_update_process(["fake.exe"], cwd=tmp_path, env={}) as process:
+        assert not process.running()
+        process.stop_tree()
+
+    assert events == ["create suspended", ("assign", 13, 11), ("resume", 12), ("close", 12),
+                      ("terminate", 13), ("active", 1), ("active", 0), ("close", 11), ("close", 13)]
+
 

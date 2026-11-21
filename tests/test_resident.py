@@ -1252,3 +1252,97 @@ async def test_old_resident_waits_for_handover_and_recovers_if_child_fails(tmp_p
         await asyncio.wait_for(run, 5)
 
 
+async def test_backup_cleanup_retries_after_start_and_at_release_check(tmp_path, res, monkeypatch):
+    res.update_exe = tmp_path / updater.EXE
+    events = []
+    monkeypatch.setattr(resident, "BACKUP_CLEANUP_DELAY", 0)
+    monkeypatch.setattr(updater, "CHECK_INTERVAL", 0)
+    monkeypatch.setattr(updater, "clean_old_exes", lambda exe: events.append(("cleanup", exe)))
+
+    await res._retry_old_exes_after_start()
+    assert events == [("cleanup", res.update_exe)]
+
+    def check():
+        if events[-1] == ("cleanup", res.update_exe) and len(events) > 1:
+            raise asyncio.CancelledError
+        events.append("check")
+
+    monkeypatch.setattr(res, "check_update", check)
+    with pytest.raises(asyncio.CancelledError):
+        await res._periodic_update()
+    assert events == [("cleanup", res.update_exe), "check", ("cleanup", res.update_exe)]
+    res._installing = asyncio.create_task(asyncio.sleep(0))
+    await res._installing
+    res._clean_old_exes()
+    assert len(events) == 3
+
+
+@pytest.mark.parametrize("ready", [True, False])
+def test_handover_crash_reporting_begins_after_readiness(tmp_path, monkeypatch, ready):
+    from codex_bridge.agent import setup
+
+    notices = []
+    monkeypatch.setattr(setup, "data_root", lambda: tmp_path)
+    monkeypatch.setattr(agent_main, "ensure_std_streams", lambda: None)
+    monkeypatch.setattr(agent_main, "show_info", lambda text, **kw: notices.append((text, kw)))
+    monkeypatch.setattr(agent_main, "AgentRole", lambda *args, **kw: FakeAgent())
+    monkeypatch.setattr("codex_bridge.host.role.HostRole", lambda *args, **kw: FakeHostRole())
+    monkeypatch.setattr(resident, "host_config_path", lambda: tmp_path / "host.yaml")
+
+    async def notify_ready():
+        if not ready:
+            raise RuntimeError("before readiness")
+
+    def run(self, *, check_updates, update_ready):
+        if update_ready is not None:
+            asyncio.run(update_ready())
+        raise RuntimeError("resident crash")
+
+    monkeypatch.setattr(Resident, "run", run)
+    log = tmp_path / "logs" / "crash.log"
+    if ready:
+        assert resident.main(update_ready=notify_ready) == 0
+        first = log.read_text(encoding="utf-8")
+        assert re.match(r"--- \d{4}-\d\d-\d\d \d\d:\d\d:\d\d \(agent [^)]+\)", first)
+        assert "RuntimeError: resident crash" in first
+        assert len(notices) == 1 and notices[0][1] == {"error": True}
+        assert str(log) in notices[0][0]
+        assert resident.main() == 0
+        assert log.read_text(encoding="utf-8").count("RuntimeError: resident crash") == 2
+    else:
+        with pytest.raises(RuntimeError, match="before readiness"):
+            resident.main(update_ready=notify_ready)
+        assert not log.exists() and not notices
+
+
+@pytest.mark.parametrize("port_free", [True, False])
+async def test_mutex_recovery_is_bounded_keeps_app_alive_and_reports_failure(res, monkeypatch, port_free):
+    res.stop_event = asyncio.Event()
+    res._handover = True
+    res.update_phase = "failed"
+    res.update_message = "新しい exe の起動を確認できませんでした"
+    res.tray = FakeTray()
+    res.update_exe = res.config_path.with_name(updater.EXE)
+    monkeypatch.setattr(entry, "claim_agent_instance", lambda: False)
+    monkeypatch.setattr(resident, "HANDOVER_RECOVERY_TIMEOUT", 0)
+    attempts = []
+
+    def start_ui():
+        attempts.append("screen")
+        if not port_free:
+            raise RuntimeError("port taken")
+
+    monkeypatch.setattr(res, "_start_ui", start_ui)
+    await asyncio.wait_for(res._restore_update_handover(), 1)
+
+    status = res.update_status()
+    assert attempts == ["screen"]
+    assert not res.stop_event.is_set() and not res._handover
+    assert not status["can_install"] and status["phase"] == "failed"
+    assert "ミューテックスを取り直せませんでした" in status["message"]
+    assert ("画面の待ち受けを再開できませんでした" in status["message"]) is not port_free
+    assert "ミューテックス" in res.applog.entries()[0]["text"]
+    assert "ミューテックス" in res.tray.notices[0][1]
+
+
+

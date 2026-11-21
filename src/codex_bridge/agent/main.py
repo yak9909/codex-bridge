@@ -556,11 +556,13 @@ def ensure_std_streams() -> None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 
-def run_guarded(fn, home: Path):
+def run_guarded(fn, home: Path, *, should_report: Callable[[], bool] | None = None):
     """Run fn and return its result; on an unexpected error write logs/crash.log and tell the user in Japanese."""
     try:
         return fn()
     except Exception:
+        if should_report is not None and not should_report():
+            raise
         log = Path(home) / "logs" / "crash.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         with open(log, "a", encoding="utf-8") as f:

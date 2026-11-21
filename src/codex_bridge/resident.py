@@ -29,6 +29,8 @@ from .host.role import HostStartError, bind_socket
 from .host.web.app import APP_PAGE, _guard, admin_router
 
 UI_PORT = 8766
+HANDOVER_RECOVERY_TIMEOUT = 60.0
+BACKUP_CLEANUP_DELAY = 60.0
 TITLE = "codex-bridge"
 DEFAULT_MUTEX = r"Local\codex-bridge-agent"
 CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'"
@@ -339,6 +341,7 @@ class Resident:
         self._installing: asyncio.Task | None = None
         self._cancel_requested = False
         self._handover = False
+        self._recovery_failed = False
         self.starting_from_update = False
         self._ui_server: UiServer | None = None
         self._ui_serving: asyncio.Task | None = None
@@ -351,11 +354,13 @@ class Resident:
     def update_status(self) -> dict:
         return {"version": __version__, "latest": self.update_release.version if self.update_release else None,
                 "phase": self.update_phase, "message": self.update_message, "mode": self.update_mode,
-                "can_install": self.update_exe is not None,
+                "can_install": self.update_exe is not None and not self._recovery_failed,
                 "suppressed": bool(self.update_release and self.update_release.version == self._cancelled_version),
                 "can_cancel": self.update_waiting and self._installing is None and not self._cancel_requested}
 
     def check_update(self, *, manual: bool = False) -> None:
+        if self._recovery_failed:
+            return
         if self._update_job is None or self._update_job.done():
             if manual and self._cancelled_version is not None:
                 self._remember_cancelled_version(None)
@@ -386,7 +391,8 @@ class Resident:
             self.notify("codex-bridge", f"新しい版 v{self.update_release.version} があります")
 
     def prepare_update(self) -> bool:
-        if (self.update_phase not in ("available", "failed") or not self.update_release or self.update_exe is None
+        if (self._recovery_failed or self.update_phase not in ("available", "failed")
+                or not self.update_release or self.update_exe is None
                 or self.update_release.version == self._cancelled_version
                 or (self._update_job is not None and not self._update_job.done())):
             return False
@@ -484,27 +490,53 @@ class Resident:
     async def _restore_update_handover(self) -> None:
         from .entry import claim_agent_instance
 
-        while not self.stop_event.is_set():
-            if claim_agent_instance():
-                break
-            await asyncio.sleep(0.25)
-        self._handover = False
-        if self.stop_event.is_set():
-            return
-        if self.config_path.exists() and not self.host_role.running:
-            await self.start_host()
-        while not self.stop_event.is_set():
-            try:
-                self._start_ui()
-                return
-            except (OSError, RuntimeError) as e:
-                self.applog.add("use", "error", str(e))
-                await asyncio.sleep(1)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + HANDOVER_RECOVERY_TIMEOUT
+        reasons = []
+        try:
+            while not self.stop_event.is_set():
+                if claim_agent_instance():
+                    break
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    reasons.append("二重起動を防ぐミューテックスを取り直せませんでした")
+                    break
+                await asyncio.sleep(min(0.25, remaining))
+
+            # The original port is exclusive. Try it even if the mutex could not be recovered.
+            while not self.stop_event.is_set():
+                try:
+                    self._start_ui()
+                    break
+                except (OSError, RuntimeError) as e:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        reasons.append(f"画面の待ち受けを再開できませんでした（{e}）")
+                        break
+                    await asyncio.sleep(min(1.0, remaining))
+        finally:
+            self._handover = False
+        if reasons:
+            self._recovery_failed = True
+            reason = "。".join(reasons)
+            self.update_message = f"{self.update_message}。{reason}" if self.update_message else reason
+            self.applog.add("use", "error", reason)
+            self.notify("codex-bridge", reason)
+
+    def _clean_old_exes(self) -> None:
+        if self.update_exe is not None and self._installing is None and not self._recovery_failed:
+            updater.clean_old_exes(self.update_exe)
+
+    async def _retry_old_exes_after_start(self) -> None:
+        await asyncio.sleep(BACKUP_CLEANUP_DELAY)
+        self._clean_old_exes()
 
     async def _periodic_update(self) -> None:
+        self.check_update()
         while True:
-            self.check_update()
             await asyncio.sleep(updater.CHECK_INTERVAL)
+            self._clean_old_exes()
+            self.check_update()
 
     # -- what the screen and the tray read
     @property
@@ -714,6 +746,8 @@ class Resident:
             self._background.append(asyncio.create_task(self._refresh_tray()))
             if check_updates:
                 self._background.append(asyncio.create_task(self._periodic_update()))
+                if self.update_exe is not None:
+                    self._background.append(asyncio.create_task(self._retry_old_exes_after_start()))
             await self.stop_event.wait()
         finally:
             await self._shutdown()
@@ -750,6 +784,12 @@ def main(*, update_ready: Callable[[], Awaitable[None]] | None = None) -> int:
 
     ensure_std_streams()
     home = data_root()
+    handover_complete = False
+
+    async def finish_handover() -> None:
+        nonlocal handover_complete
+        await update_ready()
+        handover_complete = True
 
     def run() -> bool:
         applog = AppLog(home / "logs" / "app.jsonl")
@@ -760,10 +800,10 @@ def main(*, update_ready: Callable[[], Awaitable[None]] | None = None) -> int:
         resident.append(Resident(applog=applog, agent=agent, host_role=host_role,
                                  config_path=host_config_path(), port=port))
         app = resident[0]
-        return app.run(check_updates=True, update_ready=update_ready)
+        return app.run(check_updates=True, update_ready=finish_handover if update_ready is not None else None)
 
     if update_ready is not None:
-        moved = run()
+        moved = run_guarded(run, home, should_report=lambda: handover_complete)
     else:
         moved = run_guarded(run, home)
     if moved:
