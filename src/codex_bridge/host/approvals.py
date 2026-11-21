@@ -21,6 +21,7 @@ class Approval:
     task_id: str | None
     created_at: float
     key: str | None = None
+    cwd: str | None = None
     decided: Status = "pending"
     consumed: bool = False
     _timeout: float = 1800.0
@@ -34,7 +35,7 @@ class Approval:
 
     def to_dict(self) -> dict:
         return {"id": self.id, "kind": self.kind, "summary": self.summary, "task_id": self.task_id,
-                "status": self.status, "age_sec": int(time.monotonic() - self.created_at)}
+                "cwd": self.cwd, "status": self.status, "age_sec": int(time.monotonic() - self.created_at)}
 
 
 class Approvals:
@@ -43,6 +44,13 @@ class Approvals:
         self._items: dict[str, Approval] = {}
         self._ids = itertools.count(1)
         self.on_change: list[Callable[[], None]] = []
+        self.log: Callable[[str, str], None] = lambda level, text: None  # (level, text); set by the app
+
+    def _say(self, level: str, text: str) -> None:
+        try:
+            self.log(level, text)
+        except Exception:
+            pass
 
     def _changed(self) -> None:
         for cb in list(self.on_change):
@@ -51,15 +59,17 @@ class Approvals:
             except Exception:
                 pass
 
-    def request(self, kind: str, summary: str, task_id: str | None, key: str | None = None) -> Approval:
+    def request(self, kind: str, summary: str, task_id: str | None, key: str | None = None,
+                cwd: str | None = None) -> Approval:
         if key is not None:
             for a in self._items.values():
                 if a.key == key and not a.consumed and a.status != "expired":
                     return a
         a = Approval(id=f"a{next(self._ids)}", kind=kind, summary=summary, task_id=task_id,
-                     created_at=time.monotonic(), key=key,
+                     created_at=time.monotonic(), key=key, cwd=cwd,
                      _timeout=self.policy.current().limits.approval_timeout_sec)
         self._items[a.id] = a
+        self._say("warn", f"承認待ち: {kind} {summary}（{task_id}）")
         self._changed()
         return a
 
@@ -72,6 +82,7 @@ class Approvals:
             raise KeyError(approval_id)
         a.decided = "approved" if approve else "denied"
         a._event.set()
+        self._say("info", f"{'許可' if approve else '拒否'}: {a.kind} {a.summary}（{a.task_id}）")
         self._changed()
 
     def consume(self, approval_id: str) -> None:

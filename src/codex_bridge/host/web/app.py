@@ -8,10 +8,11 @@ from pathlib import Path, PureWindowsPath
 
 import yaml
 from fastapi import APIRouter, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from ...common.invite import make_invite
+from ..notify import WAIT_DEFAULT, WAIT_MAX
 from ..paths import ToolError, UNSET_SHARE_MSG
 from ..policy import OUTPUTS_TOP, normalize_rel
 from ..policy_form import _abs, form_from_raw, save_form
@@ -23,8 +24,7 @@ from ..share import (ShareBusy, add_shared_folder, change_share_root, pick_folde
                      remove_shared_folder, set_main_shared_folder)
 from .. import share as share_ops
 
-STATIC = Path(__file__).parent / "static"
-COMMON = Path(__file__).parents[2] / "common" / "web"  # UI parts shared with the lender's page
+APP_PAGE = Path(__file__).parents[2] / "common" / "web" / "app"
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 
@@ -34,17 +34,20 @@ def _guard(request: Request) -> None:
     host = (request.headers.get("host") or "").rsplit(":", 1)[0]
     if host not in LOCAL_HOSTS:
         raise HTTPException(403, "forbidden host")
-    if request.method not in SAFE_METHODS and request.headers.get("x-codex-bridge") != "1":
+    consumes_notices = request.url.path == "/admin/api/notify/wait"
+    if (request.method not in SAFE_METHODS or consumes_notices) and request.headers.get("x-codex-bridge") != "1":
         raise HTTPException(403, "missing X-Codex-Bridge header")
 
 
-def admin_router(host) -> APIRouter:
+def admin_router(host, page_url: str | None = None) -> APIRouter:
     from fastapi import Depends
     r = APIRouter(prefix="/admin", dependencies=[Depends(_guard)])
 
     @r.get("/")
     async def index():
-        return FileResponse(STATIC / "index.html")
+        if page_url:
+            return RedirectResponse(page_url, status_code=302)
+        return FileResponse(APP_PAGE / "index.html")
 
     @r.get("/api/overview")
     async def overview():
@@ -54,10 +57,10 @@ def admin_router(host) -> APIRouter:
             "share_root": str(root) if root else None, "share_root_message": None if root else UNSET_SHARE_MSG,
             "folders": host.paths.roots(), "public_bind": host.config.public_bind,
             "paused": p.paused, "exec_mode": p.exec_mode, "policy_error": host.policy.last_error,
+            "lender_exec_modes": p.lender_exec_modes,
             "policy_problem": host.policy.problems(),
-            "agent": host.mgr.agent_info(), "current_task": host.mgr.current_task_id(),
+            "agent": host.mgr.agent_info(), "current_task": host.mgr.current_task_id(), "active_task_ids": host.mgr.active_task_ids(),
             "pending_approvals": len(host.approvals.pending()), "usage": host.mgr.usage(),
-            "log_visibility": host.mgr.settings["log_visibility"],
         }
 
     @r.get("/api/policy")
@@ -185,14 +188,15 @@ def admin_router(host) -> APIRouter:
         host.events.notify()
         return {"paused": host.policy.current().paused}
 
-    @r.put("/api/exec-mode")
-    async def exec_mode(body: dict):
-        try:
-            host.policy.update(exec_mode=body.get("mode"))
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        host.events.notify()
-        return {"ok": True}
+    @r.get("/api/notify/wait")
+    async def notify_wait(request: Request, task_id: str | None = None, origin: str | None = None,
+                          any: bool = False, session: str | None = None, timeout: float = WAIT_DEFAULT):
+        if not task_id and not origin:
+            raise HTTPException(400, "task_id か origin を指定してください")
+        options = {"session": session} if session is not None else {}
+        return await host.notifier.wait(task_id=task_id, origin=origin, any_unwatched=any,
+                                        timeout=max(1, min(WAIT_MAX, timeout)),
+                                        disconnected=request.is_disconnected, **options)
 
     @r.get("/api/approvals")
     async def approvals():
@@ -210,7 +214,46 @@ def admin_router(host) -> APIRouter:
     async def lenders():
         """One row per lender: connection, versions, usage, own limits, capabilities (disposable sessions,
         pre-approval) and the task in progress. Invited names that have not connected are listed too."""
-        return host.mgr.lenders(i["name"] for i in host.tokens.list())
+        policy = host.policy.current()
+        invites = host.tokens.list()
+        created = {i["name"]: i["created"] for i in invites}
+        return [{**row, "exec_mode": policy.exec_mode_for(row["name"]),
+                 "delete_approval": policy.delete_approval_for(row["name"]),
+                 "log_visibility": host.mgr.log_visibility_for(row["name"]),
+                 "invite_created": created.get(row["name"])}
+                for row in host.mgr.lenders(created) if row["name"] in created]
+
+    def _known_lender(name: str) -> None:
+        if name not in {i["name"] for i in host.tokens.list()}:
+            raise HTTPException(404, f"その名前の招待コードがありません: {name}")
+
+    @r.put("/api/lenders/{name}/delete-approval")
+    async def lender_delete_approval(name: str, body: dict):
+        _known_lender(name)
+        if not isinstance(body.get("value"), bool):
+            raise HTTPException(400, "value は true か false です")
+        host.policy.set_lender_delete_approval(name, body["value"])
+        host.events.notify()
+        return {"ok": True}
+
+    @r.put("/api/lenders/{name}/log-visibility")
+    async def lender_log_visibility(name: str, body: dict):
+        _known_lender(name)
+        try:
+            await host.mgr.set_log_visibility(body.get("value"), name)
+        except ToolError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True}
+
+    @r.put("/api/lenders/{name}/exec-mode")
+    async def lender_exec_mode(name: str, body: dict):
+        _known_lender(name)
+        try:
+            host.policy.set_lender_exec_mode(name, body.get("mode"))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        host.events.notify()
+        return {"ok": True}
 
     @r.get("/api/tasks")
     async def tasks():
@@ -224,9 +267,21 @@ def admin_router(host) -> APIRouter:
         except ToolError as e:
             raise HTTPException(404, str(e))
 
+    @r.put("/api/tasks/{task_id}/exec")
+    async def task_exec(task_id: str, body: dict):
+        changes = {key: body[key] for key in ("exec_mode", "deny", "ask") if key in body}
+        if changes.get("exec_mode") == "inherit":
+            changes["exec_mode"] = None
+        try:
+            return host.mgr.set_task_exec(task_id, **changes)
+        except ToolError as e:
+            raise HTTPException(404 if task_id not in host.mgr.tasks else 409, str(e))
+
     @r.post("/api/tasks")
     async def send_task(body: dict):
         """lender: the invite name of who gets the task; left out (or empty) the host picks by headroom."""
+        if any(k in body and not isinstance(body[k], str) for k in ("model", "effort")):
+            raise HTTPException(400, "モデルと推論の強さは名前で指定してください")
         prompt = str(body.get("prompt") or "").strip()
         if not prompt:
             raise HTTPException(400, "依頼の内容を書いてください")
@@ -234,10 +289,15 @@ def admin_router(host) -> APIRouter:
         if lender is not None and not isinstance(lender, str):  # 0, false, [] ... are not "automatic"
             raise HTTPException(400, "送り先は名前で指定してください")
         try:
-            task_id = await host.mgr.start(prompt, body.get("continue_task_id") or None, lender or None)
+            task_id = await host.mgr.start(prompt, body.get("continue_task_id") or None, lender or None,
+                                           model=body.get("model") or None, effort=body.get("effort") or None,
+                                           origin="admin", exec_mode=body.get("exec_mode"),
+                                           deny=body.get("deny"), ask=body.get("ask"))
         except ToolError as e:
             raise HTTPException(409, str(e))
-        return {"task_id": task_id, "lender": host.mgr.tasks[task_id].lender}
+        rec = host.mgr.tasks[task_id]
+        return {"task_id": task_id, "lender": rec.lender, "model": rec.model, "effort": rec.effort,
+                **host.mgr.exec_settings(task_id)}
 
     @r.post("/api/tasks/{task_id}/followup")
     async def followup(task_id: str, body: dict):
@@ -273,21 +333,6 @@ def admin_router(host) -> APIRouter:
     async def usage():
         return host.mgr.usage()
 
-    @r.put("/api/thresholds")
-    async def thresholds(body: dict):
-        try:
-            return await host.mgr.set_thresholds(body.get("five_hour"), body.get("weekly"))
-        except ToolError as e:
-            raise HTTPException(400, str(e))
-
-    @r.put("/api/log-visibility")
-    async def log_visibility(body: dict):
-        try:
-            await host.mgr.set_log_visibility(body.get("value"))
-        except ToolError as e:
-            raise HTTPException(400, str(e))
-        return {"ok": True}
-
     @r.get("/api/invites")
     async def invites():
         return host.tokens.list()
@@ -295,7 +340,18 @@ def admin_router(host) -> APIRouter:
     @r.post("/api/invites")
     async def issue(body: dict):
         name = str(body.get("name") or "friend").strip()
+        if name not in host.policy.current().lender_exec_modes:
+            host.policy.set_lender_exec_mode(name, "ask")  # a new lender starts at "ask every time"
+            host.events.notify()
         token = host.tokens.issue(name)
+        return {"code": make_invite(f"http://{host.config.public_bind}", token, name)}
+
+    @r.post("/api/invites/{name}/reissue")
+    async def reissue(name: str):
+        try:
+            token = host.tokens.reissue(name)
+        except KeyError:
+            raise HTTPException(404, f"その名前の招待コードがありません: {name}")
         return {"code": make_invite(f"http://{host.config.public_bind}", token, name)}
 
     @r.delete("/api/invites/{name}")
@@ -330,6 +386,6 @@ def admin_router(host) -> APIRouter:
     return r
 
 
-def mount_static(app: FastAPI) -> None:
-    app.mount("/admin/static", StaticFiles(directory=STATIC), name="static")
-    app.mount("/admin/common", StaticFiles(directory=COMMON), name="common")
+def mount_static(app: FastAPI, page: bool = False) -> None:
+    if page:  # console way: the page's files come from here, there is no resident app
+        app.mount("/app/static", StaticFiles(directory=APP_PAGE), name="app-static")

@@ -201,7 +201,7 @@ async def apply_patch(write: WriteTools, text: str) -> dict:
     # File work runs in a thread so big patches do not stall the event loop.
     planned = await asyncio.to_thread(_validate, write, ops)
     deletes = [p[1] for p in planned if p[0] == "delete"]
-    if deletes and write.policy.current().delete_needs_approval:
+    if deletes and write.policy.current().delete_approval_for(write.lender_fn()):
         decision = await write.approve_fn("delete", "削除（apply_patch）: " + ", ".join(normalize_rel(d) for d in deletes))
         if decision == "pending":
             return {"status": "waiting_approval", "changed": [],

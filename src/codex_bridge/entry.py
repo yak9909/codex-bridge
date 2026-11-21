@@ -1,16 +1,14 @@
-"""Dispatch the single executable to the host or lender's existing entry point."""
+"""Dispatch the single executable: the resident app (both roles), `host ...` commands, and the hook."""
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import ctypes
 from ctypes import wintypes
 import os
 from pathlib import Path
 import sys
-import traceback
 import webbrowser
-
-from .launcher import choose_role
 
 _agent_handle: int | None = None
 
@@ -63,15 +61,16 @@ def attach_console() -> bool:
 
 
 def acquire_agent_instance() -> tuple[bool, int | None]:
-    """Hold a per-login Windows marker throughout the lender's lifetime, including setup."""
+    """Hold a per-login Windows marker for as long as the resident app runs."""
     if sys.platform != "win32":
         return True, None
+    from .resident import mutex_name
     kernel = ctypes.windll.kernel32
     kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
     kernel.CreateMutexW.restype = wintypes.HANDLE
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel.CloseHandle.restype = wintypes.BOOL
-    handle = kernel.CreateMutexW(None, False, r"Local\codex-bridge-agent")
+    handle = kernel.CreateMutexW(None, False, mutex_name())
     if not handle:
         raise ctypes.WinError()
     if kernel.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
@@ -88,80 +87,100 @@ def release_agent_instance() -> None:
         _agent_handle = None
 
 
-def _run_agent() -> int:
+def claim_agent_instance() -> bool:
     global _agent_handle
+    if _agent_handle is not None:
+        return True
     acquired, handle = acquire_agent_instance()
-    if not acquired:
-        webbrowser.open("http://127.0.0.1:8766/")
-        return 0
-    _agent_handle = handle
+    if acquired:
+        _agent_handle = handle
+    return acquired
+
+
+@contextmanager
+def _previous_process(pid: int):
+    """Keep a handle to the old process so that waiting cannot follow a reused PID."""
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.OpenProcess(0x100000, False, pid)  # SYNCHRONIZE
+    if not handle:
+        error = ctypes.get_last_error()
+        if error != 87:  # The process has already exited.
+            raise ctypes.WinError(error)
+        yield lambda: None
+        return
+
+    def wait():
+        if kernel.WaitForSingleObject(handle, 0xFFFFFFFF) != 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+
     try:
-        from .agent.main import main
-        main()
+        yield wait
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _run_resident(*, after_update: tuple[str, int] | None = None) -> int:
+    if not claim_agent_instance():
+        if after_update is not None:
+            return 1
+        from .resident import ui_port
+        webbrowser.open(f"http://127.0.0.1:{ui_port()}/")
+        return 0
+    try:
+        from . import resident
+        if after_update is None:
+            resident.main()
+        else:
+            from .updater import UpdateError, acknowledge_restart
+            stage_name, previous_pid = after_update
+            with _previous_process(previous_pid) as wait:
+                async def ready():
+                    if not acknowledge_restart(Path(sys.executable).resolve(), stage_name):
+                        raise UpdateError("新しい exe の起動を通知できませんでした")
+                return resident.main(update_ready=ready, wait_for_previous=wait)
     finally:
         release_agent_instance()
     return 0
 
 
-def _wait_before_close() -> None:
-    try:
-        input("Enter キーを押すと閉じます。")
-    except (EOFError, OSError):
-        pass  # unavailable input must not replace the host's error status
-
-
-def _run_host(argv: list[str], directory: Path | None = None, *, from_dialog: bool = False) -> int:
-    owned = attach_console()
-    pause_on_error = from_dialog and owned
+def _run_host(argv: list[str]) -> int:
+    attach_console()
     previous_argv = sys.argv
-    previous_cwd = Path.cwd()
     try:
-        if directory is not None:
-            os.chdir(directory)
         # The existing development entry reads argparse's arguments from sys.argv.
         sys.argv = [previous_argv[0], *argv]
         from .host.main import main
         main()
-    except SystemExit as error:
-        if pause_on_error and error.code:
-            if not isinstance(error.code, int):
-                print(error.code, file=sys.stderr)
-            _wait_before_close()
-        raise
-    except Exception:
-        if not pause_on_error:
-            raise
-        traceback.print_exc()
-        _wait_before_close()
-        return 1
     finally:
         sys.argv = previous_argv
-        if directory is not None:
-            os.chdir(previous_cwd)
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv:
-        role = choose_role()
-        if role is None:
-            return 0
-        if role == "host":
-            directory = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
-                         else Path.cwd())
-            if (directory / "host.yaml").exists():
-                command = ["start", "--config", "host.yaml"]
-            else:
-                command = ["setup", "--then-start", "--config", "host.yaml"]
-            return _run_host(command, directory, from_dialog=True)
-        return _run_agent()
+    if argv and argv[0] == "hook":
+        from .hook import main as hook_main
+        return hook_main(argv[1:])
+    if not argv or argv == ["agent"]:
+        return _run_resident()
+    if len(argv) == 3 and argv[0] == "--after-update" and getattr(sys, "frozen", False):
+        try:
+            previous_pid = int(argv[2])
+        except ValueError:
+            return 1
+        if not 0 < previous_pid <= 0xFFFFFFFF or previous_pid == os.getpid():
+            return 1
+        return _run_resident(after_update=(argv[1], previous_pid))
     if argv[0] == "host":
         return _run_host(argv[1:])
-    if argv == ["agent"]:
-        return _run_agent()
     attach_console()
-    print("使い方: codex-bridge.exe [host <cmd> --config host.yaml | agent]", file=sys.stderr)
+    print("使い方: codex-bridge.exe [host <cmd> --config host.yaml]", file=sys.stderr)
     return 2
 
 

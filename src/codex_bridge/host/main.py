@@ -53,6 +53,12 @@ def ensure_config(path: Path) -> bool:
     return created
 
 
+def stop_servers(host, *servers) -> None:
+    host.notifier.close()
+    for server in servers:
+        server.should_exit = True
+
+
 async def serve(config_path: Path) -> None:
     cfg = load_host_config(config_path)
     for root in (cfg.share_root, effective_share_root(cfg)):
@@ -63,7 +69,7 @@ async def serve(config_path: Path) -> None:
     public = uvicorn.Server(uvicorn.Config(create_public_app(host), host=pub_host, port=int(pub_port),
                                            log_level="warning", ws_max_size=64 * 1024 * 1024))
     local = uvicorn.Server(uvicorn.Config(create_local_app(host), host="127.0.0.1", port=cfg.local_port,
-                                          log_level="warning"))
+                                          log_level="warning", timeout_graceful_shutdown=5))
     print("codex-bridge を起動しました。")
     print(f"  管理画面:           http://127.0.0.1:{cfg.local_port}/admin/")
     print(f"  共有フォルダ: {host.paths.root or '未設定（管理画面で選んでください）'}")
@@ -73,7 +79,7 @@ async def serve(config_path: Path) -> None:
     async def watch_shutdown() -> None:
         await host.shutdown.wait()
         print("停止の依頼を受けたので止めます…")
-        public.should_exit = local.should_exit = True
+        stop_servers(host, public, local)
 
     watcher = asyncio.create_task(watch_shutdown())
     await asyncio.gather(public.serve(), local.serve())
@@ -86,11 +92,13 @@ def main() -> None:
     ap.add_argument("command", nargs="?", default="serve", choices=["serve", "setup", "start", "stop", "install-mcp"])
     ap.add_argument("--config", default="host.yaml", type=Path)
     ap.add_argument("--then-start", action="store_true",
-                    help="setup のあと、同じ画面でそのまま起動する（exe の「使う側」用）")
+                    help="setup のあと、同じ画面でそのまま起動する（旧: exe の「使う側」用）")
+    ap.add_argument("--from-app", action="store_true",
+                    help="常駐アプリから開いた setup（終わったら画面に戻る案内を出し、起動はしない）")
     args = ap.parse_args()
     if args.command == "setup":
         from .setup_cli import run_setup
-        run_setup(args.config, then_start=args.then_start)
+        run_setup(args.config, then_start=args.then_start, from_app=args.from_app)
         return
     if args.command == "start":
         from .setup_cli import run_start

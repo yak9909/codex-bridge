@@ -21,7 +21,9 @@ import threading
 from pathlib import Path
 from typing import Awaitable, Callable
 
-PROTOCOL = 2
+from ..common.protocol import EFFORT_ORDER, PROTOCOL
+from .models import offered_models
+
 FEATURES = ("web_search", "image_generation", "multi_agent", "goals")
 # Shown on the settings page. Sub-agents cannot really be switched off in Codex 0.167 (`--disable multi_agent`
 # and `agents.max_depth=0` still let a normal thread spawn them): the setting is a request, and says so.
@@ -40,15 +42,16 @@ LOCATION_FILE = "location.txt"
 WORKDIR_MEMO = "workdir.txt"
 MAX_TIMEOUT_MIN = 24 * 60
 MAX_RETENTION_DAYS = 3650
-SHARED_KEYS = frozenset({"limits", "workdir", "log_retention_days"})
-CONNECTION_KEYS = frozenset({"features", "pre_approval", "disposable", "log_visibility"})
+SHARED_KEYS = frozenset({"limits", "workdir", "log_retention_days", "max_parallel"})
+CONNECTION_KEYS = frozenset({"features", "pre_approval", "disposable", "log_visibility", "allowed_models", "max_effort"})
 
 
 def defaults() -> dict:
     return {"limits": {"five_hour": 80, "weekly": 80, "force": False},
             "features": {f: False for f in FEATURES},  # False = stopped
-            "pre_approval": {"enabled": False, "timeout_min": 30},
-            "disposable": False, "workdir": None, "log_retention_days": 30}
+            "pre_approval": {"new_task": False, "followup": False, "timeout_min": 30},
+            "disposable": False, "workdir": None, "log_retention_days": 30,
+            "allowed_models": None, "max_effort": "xhigh", "max_parallel": 3}
 
 
 # ---- validation: each returns the value to keep, or raises ValueError --------------------------------
@@ -88,13 +91,43 @@ def _folder(v):
     return v.strip()
 
 
+def _models(v):
+    if v is None:
+        return None
+    if (not isinstance(v, list) or len(v) > 200
+            or any(not isinstance(model, str) or not model for model in v) or len(set(v)) != len(v)):
+        raise ValueError("使わせるモデルは、モデルの名前の一覧で指定してください")
+    return list(v)
+
+
+def _effort(v):
+    if not isinstance(v, str) or v not in EFFORT_ORDER:
+        raise ValueError("推論の強さの上限は、" + "・".join(EFFORT_ORDER) + " のどれかです")
+    return v
+
+
 SECTIONS = {
     "limits": {"five_hour": _percent, "weekly": _percent, "force": _flag},
     "features": {f: _flag for f in FEATURES},
-    "pre_approval": {"enabled": _flag, "timeout_min": _timeout_min},
+    "pre_approval": {"new_task": _flag, "followup": _flag, "timeout_min": _timeout_min},
 }
-SCALARS = {"disposable": _flag, "workdir": _folder,
-           "log_retention_days": _whole(1, MAX_RETENTION_DAYS, "記録の保管日数")}
+
+
+def expand_legacy_pre_approval(value):
+    """A pre_approval object with the v0.2 `enabled` flag turned into `new_task` and `followup` (an explicit new key
+    wins). Anything that is not an object is returned as it is, for the caller to refuse or skip."""
+    if not isinstance(value, dict) or "enabled" not in value:
+        return value
+    out = {k: v for k, v in value.items() if k != "enabled"}
+    if not isinstance(value["enabled"], bool):
+        out["new_task"] = out["followup"] = value["enabled"]  # not a flag: validated (and refused) as such below
+        return out
+    out.setdefault("new_task", value["enabled"])
+    out.setdefault("followup", value["enabled"])
+    return out
+SCALARS = {"max_parallel": _whole(1, 8, "同時に受ける依頼の数"), "disposable": _flag, "workdir": _folder,
+           "log_retention_days": _whole(1, MAX_RETENTION_DAYS, "記録の保管日数"),
+           "allowed_models": _models, "max_effort": _effort}
 
 
 def _merge(base: dict, patch, strict: bool) -> dict:
@@ -110,6 +143,8 @@ def _merge(base: dict, patch, strict: bool) -> dict:
                 if strict:
                     raise ValueError(f"{key} は object で指定してください")
                 continue
+            if key == "pre_approval":
+                value = expand_legacy_pre_approval(value)
             for name, v in value.items():
                 _put(out[key], name, v, SECTIONS[key].get(name), f"{key}.{name}", strict)
         else:
@@ -161,7 +196,7 @@ class SettingsStore:
         """Validated as a whole before anything is written; returns all the settings."""
         with self._lock:
             if self.shared and (not isinstance(patch, dict) or set(patch) - SHARED_KEYS):
-                raise ValueError("共通の設定は limits、workdir、log_retention_days だけです")
+                raise ValueError("共通の設定は limits、workdir、log_retention_days、max_parallel だけです")
             new = _merge({**defaults(), **self._load()}, patch, strict=True)
             if self.shared:
                 new = {k: new[k] for k in SHARED_KEYS}
@@ -194,12 +229,36 @@ def feature_instructions(features: dict | None = None) -> str:
     return "" if (features or {}).get("multi_agent") else MULTI_AGENT_NOTE
 
 
-def hello_fields(settings: dict) -> dict:
+def lender_view(settings: dict, catalog: list[dict] | None) -> dict:
+    """The lender's own settings as the borrower's screen shows them (read-only): what hello and lender_models carry."""
+    allowed = settings["allowed_models"]
+    return {"features": {f: bool(settings["features"][f]) for f in FEATURES},
+            "pre_approval": {"new_task": settings["pre_approval"]["new_task"],
+                             "followup": settings["pre_approval"]["followup"],
+                             "timeout_min": settings["pre_approval"]["timeout_min"]},
+            "resumable": not settings["disposable"],
+            "over_limit": "stop" if settings["limits"]["force"] else "report",
+            "max_effort": settings["max_effort"], "max_parallel": settings["max_parallel"],
+            "models_all": None if catalog is None else
+            [{"model": m["model"], "allowed": allowed is None or m["model"] in allowed,
+              "is_default": m["is_default"] is True} for m in catalog]}
+
+
+def capabilities(settings: dict) -> dict:
+    return {"resumable": not settings["disposable"],
+            "pre_approval": settings["pre_approval"]["new_task"] or settings["pre_approval"]["followup"],
+            "model_select": True, "max_parallel": settings["max_parallel"]}
+
+
+def models_fields(settings: dict, catalog: list[dict] | None) -> dict:
+    return {"capabilities": capabilities(settings), "models": offered_models(catalog, settings["allowed_models"], settings["max_effort"]),
+            "max_effort": settings["max_effort"], "lender_view": lender_view(settings, catalog)}
+
+
+def hello_fields(settings: dict, catalog: list[dict] | None = None) -> dict:
     """What `hello` says about this agent (design 6): the host reads capabilities before routing a task."""
     return {"protocol": PROTOCOL,
-            "capabilities": {"resumable": not settings["disposable"],
-                             "pre_approval": settings["pre_approval"]["enabled"]},
-            "limits": dict(settings["limits"])}
+            "limits": dict(settings["limits"]), **models_fields(settings, catalog)}
 
 
 # ---- the work folder (design 4.8) ----------------------------------------------------------------------

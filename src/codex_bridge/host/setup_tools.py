@@ -7,8 +7,12 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import tomllib
 from pathlib import Path
 from typing import Callable
+
+from .. import hook
 
 FIREWALL_RULE = "codex-bridge (Tailscale)"
 MCP_NAME = "codex-bridge"
@@ -154,6 +158,10 @@ def cli_command(path: str) -> list[str]:
     return ["cmd.exe", "/d", "/c", path] if str(path).lower().endswith((".cmd", ".bat")) else [path]
 
 
+def codex_mcp_url(port: int) -> str:
+    return f"http://127.0.0.1:{port}/claude/mcp?client=codex"
+
+
 def register_codex(run=subprocess.run, codex: str | None = "auto", local_port: int = 8770) -> str:
     """Register the same control endpoint in the owner's own Codex CLI. Returns missing / already / added / failed."""
     if codex == "auto":
@@ -163,13 +171,52 @@ def register_codex(run=subprocess.run, codex: str | None = "auto", local_port: i
     base = cli_command(codex)
     if run([*base, "mcp", "get", MCP_NAME], capture_output=True, text=True, encoding="utf-8", errors="replace").returncode == 0:
         return "already"
-    r = run([*base, "mcp", "add", MCP_NAME, "--url", f"http://127.0.0.1:{local_port}/claude/mcp"],
+    r = run([*base, "mcp", "add", MCP_NAME, "--url", codex_mcp_url(local_port)],
             capture_output=True, text=True, encoding="utf-8", errors="replace")
     return "added" if r.returncode == 0 else "failed"
 
 
 def codex_config_path() -> Path:
     return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+
+
+def codex_set_url(url: str, config: Path | None = None) -> bool:
+    """Update only codex-bridge's MCP URL, keeping the rest of config.toml."""
+    path = Path(config or codex_config_path())
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+    header = f"[mcp_servers.{MCP_NAME}]"
+    m = re.search(rf"^{re.escape(header)}[ \t]*(?:#.*)?$", text, flags=re.MULTILINE)
+    if not m:
+        return False
+    nxt = re.search(r"^[ \t]*\[", text[m.end():], flags=re.MULTILINE)
+    end = m.end() + nxt.start() if nxt else len(text)
+    table = text[m.end():end]
+    line = f"url = {json.dumps(url, ensure_ascii=False)}"
+    old = re.search(r"^[ \t]*url[ \t]*=.*$", table, flags=re.MULTILINE)
+    table = table[:old.start()] + line + table[old.end():] if old else "\n" + line + table
+    updated = text[:m.end()] + table + text[end:]
+    if updated == text:
+        return False
+    path.write_text(updated, encoding="utf-8")
+    return True
+
+
+def codex_current_url(config: Path | None = None) -> str | None:
+    path = Path(config or codex_config_path())
+    try:
+        text = path.read_text(encoding="utf-8")
+        header = f"[mcp_servers.{MCP_NAME}]"
+        m = re.search(rf"^{re.escape(header)}[ \t]*(?:#.*)?$", text, flags=re.MULTILINE)
+        if not m:
+            return None
+        nxt = re.search(r"^[ \t]*\[", text[m.end():], flags=re.MULTILINE)
+        end = m.end() + nxt.start() if nxt else len(text)
+        return tomllib.loads(text[m.end():end]).get("url")
+    except (OSError, UnicodeError, ValueError):
+        return None
 
 
 def codex_auto_approve(config: Path | None = None) -> bool:
@@ -192,6 +239,95 @@ def codex_auto_approve(config: Path | None = None) -> bool:
     text = text[:m.end()] + '\ndefault_tools_approval_mode = "approve"' + text[m.end():]
     path.write_text(text, encoding="utf-8")
     return True
+
+
+# ---- notification hooks -----------------------------------------------------
+def hook_command(kind: str, port: int, *, frozen: bool | None = None,
+                 executable: str | None = None) -> str:
+    if frozen is None:
+        frozen = getattr(sys, "frozen", False)
+    executable = (sys.executable if executable is None else executable).replace("\\", "/")
+    prefix = "& " if kind == "codex" else ""
+    module = "" if frozen else " -m codex_bridge"
+    return f'{prefix}"{executable}"{module} hook {kind} --port {port}'
+
+
+def claude_settings_path() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "settings.json"
+
+
+def codex_hooks_path() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "hooks.json"
+
+
+def _install_hook(kind: str, command: str, path: Path) -> str:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        existed = True
+    except FileNotFoundError:
+        data, existed = {}, False
+    except (OSError, ValueError):
+        return "failed"
+    if not isinstance(data, dict):
+        return "failed"
+    event = "PostToolUse" if kind == "claude" else "Stop"
+    hooks = data.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return "failed"
+    groups = hooks.get(event, [])
+    if not isinstance(groups, list):
+        return "failed"
+
+    handler = {"type": "command", "command": command}
+    entry = {"hooks": [handler]}
+    if kind == "claude":
+        entry["matcher"] = "mcp__codex-bridge__.*"
+        handler["asyncRewake"] = True
+    handler["timeout"] = hook.HOOK_TIMEOUT
+
+    def ours(candidate) -> bool:
+        cmd = candidate.get("command") if isinstance(candidate, dict) else None
+        return (isinstance(cmd, str) and f" hook {kind}" in cmd
+                and ("codex-bridge" in cmd or "codex_bridge" in cmd))
+
+    found = []
+    kept = []
+    for group in groups:
+        handlers = group.get("hooks") if isinstance(group, dict) else None
+        if not isinstance(handlers, list):
+            kept.append(group)
+            continue
+        remaining = []
+        for candidate in handlers:
+            if ours(candidate):
+                found.append((group, candidate))
+            else:
+                remaining.append(candidate)
+        if len(remaining) == len(handlers):
+            kept.append(group)
+        elif remaining:
+            kept.append({**group, "hooks": remaining})
+    if (len(found) == 1 and found[0][1] == handler
+            and found[0][0].get("matcher") == entry.get("matcher")):
+        return "already"
+    hooks[event] = [*kept, entry]
+    data["hooks"] = hooks
+    try:
+        if existed:
+            shutil.copyfile(path, path.with_name(path.name + ".bak"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        return "failed"
+    return "updated" if found else "added"
+
+
+def install_claude_hook(command: str, path: Path | None = None) -> str:
+    return _install_hook("claude", command, Path(path or claude_settings_path()))
+
+
+def install_codex_hook(command: str, path: Path | None = None) -> str:
+    return _install_hook("codex", command, Path(path or codex_hooks_path()))
 
 
 # ---- stop ------------------------------------------------------------------

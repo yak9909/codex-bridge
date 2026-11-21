@@ -151,7 +151,7 @@ def run_login(codex_cmd: list[str]) -> int:
 def make_guard(auth_mode: str, thresholds: dict | None = None):
     """Quota guard; usage windows only exist for ChatGPT sign-in, so it is off otherwise."""
     from .usage import QuotaGuard
-    guard = QuotaGuard(thresholds or {"five_hour": 90, "weekly": 95})
+    guard = QuotaGuard(thresholds or {})  # no limit but the lender's own (the borrower sets none)
     guard.enabled = auth_mode == "chatgpt"
     return guard
 

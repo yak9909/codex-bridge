@@ -1,9 +1,12 @@
 """Unified entry point; no test may open a real window, console or browser."""
 
 import ast
+import asyncio
+from contextlib import contextmanager
 import io
 import sys
 import runpy
+import subprocess
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,9 +14,29 @@ from unittest.mock import Mock
 
 import pytest
 
-from codex_bridge import entry
+from codex_bridge import entry, resident
 from codex_bridge.agent import main as agent_main
 from codex_bridge.host import main as host_main
+
+
+def test_entry_hook_dispatch_skips_console(monkeypatch):
+    from codex_bridge import hook
+
+    unexpected = Mock(side_effect=AssertionError("hook must skip the console and dialog"))
+    monkeypatch.setattr(entry, "attach_console", unexpected)
+    hook_main = Mock(return_value=7)
+    monkeypatch.setattr(hook, "main", hook_main)
+    assert entry.main(["hook", "codex"]) == 7
+    hook_main.assert_called_once_with(["codex"])
+    unexpected.assert_not_called()
+
+
+def test_python_m_codex_bridge_hook():
+    result = subprocess.run([sys.executable, "-m", "codex_bridge", "hook", "codex", "--port", "1"],
+                            input=b"{}", capture_output=True, timeout=20)
+    assert result.returncode == 0
+    assert result.stdout == b""
+    assert result.stderr == b""
 
 
 @pytest.fixture
@@ -25,124 +48,81 @@ def launch(tmp_path, monkeypatch):
     monkeypatch.chdir(elsewhere)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(install / "codex-bridge.exe"))
-    dialog = Mock(return_value=None)
     console = Mock(return_value=False)
-    agent = Mock()
+    resident_main = Mock()
     browser = Mock()
     calls = []
     host = Mock(side_effect=lambda: calls.append((sys.argv[1:], Path.cwd())))
-    monkeypatch.setattr(entry, "choose_role", dialog)
     monkeypatch.setattr(entry, "attach_console", console)
     monkeypatch.setattr(entry, "acquire_agent_instance", Mock(return_value=(True, None)))
     monkeypatch.setattr(host_main, "main", host)
-    monkeypatch.setattr(agent_main, "main", agent)
+    monkeypatch.setattr(resident, "main", resident_main)
     monkeypatch.setattr(entry.webbrowser, "open", browser)
     monkeypatch.setattr(entry, "input", Mock(side_effect=AssertionError("unexpected pause")), raising=False)
-    return SimpleNamespace(install=install, elsewhere=elsewhere, dialog=dialog, console=console,
-                           agent=agent, host=host, browser=browser, calls=calls)
+    return SimpleNamespace(install=install, elsewhere=elsewhere, console=console,
+                           resident=resident_main, host=host, browser=browser, calls=calls)
 
 
-@pytest.mark.parametrize("configured,command", [
-    (False, ["setup", "--then-start", "--config", "host.yaml"]),
-    (True, ["start", "--config", "host.yaml"]),
-])
-def test_no_args_host_uses_config_next_to_exe(launch, configured, command):
-    if configured:
-        (launch.install / "host.yaml").write_text("# test only", encoding="utf-8")
-    # A config in the caller's directory must not affect the choice.
-    (launch.elsewhere / "host.yaml").write_text("# wrong location", encoding="utf-8")
-    launch.dialog.return_value = "host"
-    previous_argv = sys.argv
+def test_no_args_runs_resident(launch):
     assert entry.main([]) == 0
-    launch.dialog.assert_called_once_with()
-    launch.console.assert_called_once_with()
-    assert launch.calls == [(command, launch.install)]
-    assert Path.cwd() == launch.elsewhere
-    assert sys.argv is previous_argv
-    launch.agent.assert_not_called()
+    launch.resident.assert_called_once_with()
+    launch.console.assert_not_called()  # no console window, no role dialog
+    launch.host.assert_not_called()
+    launch.browser.assert_not_called()
 
 
-def test_no_args_agent_uses_existing_runner(launch):
-    launch.dialog.return_value = "agent"
-    assert entry.main([]) == 0
-    launch.dialog.assert_called_once_with()
-    launch.agent.assert_called_once_with()
+def test_agent_arg_runs_resident(launch):
+    assert entry.main(["agent"]) == 0
+    launch.resident.assert_called_once_with()
     launch.console.assert_not_called()
     launch.host.assert_not_called()
 
 
-def test_cancel_exits_without_starting_anything(launch):
+def test_second_launch_opens_browser(launch, monkeypatch):
+    monkeypatch.setattr(entry, "acquire_agent_instance", Mock(return_value=(False, None)))
     assert entry.main([]) == 0
-    launch.dialog.assert_called_once_with()
-    launch.host.assert_not_called()
-    launch.agent.assert_not_called()
-    launch.console.assert_not_called()
+    launch.browser.assert_called_once_with("http://127.0.0.1:8766/")
+    launch.resident.assert_not_called()
 
 
-def test_explicit_host_passes_remaining_args_without_dialog(launch):
+def test_second_launch_follows_the_ui_port_override(launch, monkeypatch):
+    monkeypatch.setenv("CODEX_BRIDGE_UI_PORT", "18766")
+    monkeypatch.setattr(entry, "acquire_agent_instance", Mock(return_value=(False, None)))
+    assert entry.main(["agent"]) == 0
+    launch.browser.assert_called_once_with("http://127.0.0.1:18766/")
+
+
+def test_host_cli_unchanged(launch):
     argv = ["host", "start", "--config", "host.yaml"]
     previous_argv = sys.argv
     assert entry.main(argv) == 0
     assert launch.calls == [(["start", "--config", "host.yaml"], launch.elsewhere)]
     assert argv == ["host", "start", "--config", "host.yaml"]
     assert sys.argv is previous_argv
-    launch.dialog.assert_not_called()
     launch.console.assert_called_once_with()
-
-
-def test_explicit_agent_skips_role_dialog(launch):
-    assert entry.main(["agent"]) == 0
-    launch.agent.assert_called_once_with()
-    launch.dialog.assert_not_called()
-    launch.console.assert_not_called()
+    launch.resident.assert_not_called()
 
 
 def test_console_script_reads_process_args(launch, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["codex-bridge", "host", "stop", "--config", "other.yaml"])
     assert entry.main() == 0
     assert launch.calls == [(["stop", "--config", "other.yaml"], launch.elsewhere)]
-    launch.dialog.assert_not_called()
-
-
-def test_source_dialog_host_uses_working_directory(launch, monkeypatch):
-    monkeypatch.setattr(sys, "frozen", False)
-    launch.dialog.return_value = "host"
-    assert entry.main([]) == 0
-    assert launch.calls == [(["setup", "--then-start", "--config", "host.yaml"], launch.elsewhere)]
-
-
-def test_dialog_host_without_config_runs_setup_then_start(launch, monkeypatch):
-    launch.dialog.return_value = "host"
-    run_host = Mock(return_value=0)
-    monkeypatch.setattr(entry, "_run_host", run_host)
-    assert entry.main([]) == 0
-    run_host.assert_called_once_with(["setup", "--then-start", "--config", "host.yaml"],
-                                     launch.install, from_dialog=True)
-
-
-def test_running_agent_opens_existing_page(launch, monkeypatch):
-    monkeypatch.setattr(entry, "acquire_agent_instance", Mock(return_value=(False, None)))
-    launch.dialog.return_value = "agent"
-    assert entry.main([]) == 0
-    launch.browser.assert_called_once_with("http://127.0.0.1:8766/")
-    launch.agent.assert_not_called()
+    launch.resident.assert_not_called()
 
 
 @pytest.mark.parametrize("argv", [["foo"], ["agent", "unexpected"]])
 def test_invalid_args_show_usage_and_return_two(launch, capsys, argv):
     assert entry.main(argv) == 2
     assert "使い方" in capsys.readouterr().err
-    launch.dialog.assert_not_called()
-    launch.agent.assert_not_called()
+    launch.resident.assert_not_called()
     launch.host.assert_not_called()
 
 
 def test_host_error_restores_process_state(launch):
-    launch.dialog.return_value = "host"
     launch.host.side_effect = SystemExit(3)
     previous_argv = sys.argv
     with pytest.raises(SystemExit) as error:
-        entry.main([])
+        entry.main(["host", "start"])
     assert error.value.code == 3
     assert sys.argv is previous_argv
     assert Path.cwd() == launch.elsewhere
@@ -253,9 +233,7 @@ def test_windowless_inherited_console_keeps_pipes_and_is_not_owned(windowless_co
 @pytest.mark.parametrize("argv,code", [(["foo"], 2), (["host", "--help"], 0)])
 def test_windowless_console_preserves_cli_exit_codes(windowless_console, monkeypatch, argv, code):
     windowless_console.redirect_streams()
-    dialog = Mock(side_effect=AssertionError("unexpected dialog"))
     pause = Mock(side_effect=AssertionError("unexpected pause"))
-    monkeypatch.setattr(entry, "choose_role", dialog)
     monkeypatch.setattr(entry, "input", pause, raising=False)
     if argv[0] == "host":
         with pytest.raises(SystemExit) as error:
@@ -265,23 +243,8 @@ def test_windowless_console_preserves_cli_exit_codes(windowless_console, monkeyp
     else:
         assert entry.main(argv) == code
         assert "使い方" in sys.stderr.getvalue()
-    dialog.assert_not_called()
     pause.assert_not_called()
     windowless_console.opened.assert_not_called()
-
-
-def test_windowless_console_never_pauses_on_dialog_host_error(windowless_console, tmp_path, monkeypatch):
-    windowless_console.redirect_streams()
-    monkeypatch.setattr(sys, "executable", str(tmp_path / "codex-bridge.exe"))
-    monkeypatch.setattr(entry, "choose_role", Mock(return_value="host"))
-    monkeypatch.setattr(host_main, "main", Mock(side_effect=SystemExit(3)))
-    pause = Mock(side_effect=AssertionError("nobody can press Enter"))
-    monkeypatch.setattr(entry, "input", pause, raising=False)
-    with pytest.raises(SystemExit) as error:
-        entry.main([])
-    assert error.value.code == 3
-    pause.assert_not_called()
-    windowless_console.user.ShowWindow.assert_not_called()
 
 
 def test_console_allocation_other_error_is_preserved(windowless_console):
@@ -310,60 +273,6 @@ def test_only_invalid_standard_streams_are_reopened(console_api, monkeypatch, in
     assert sys.stdin is console_api.streams[2]
 
 
-@pytest.mark.parametrize("from_dialog,owned,waits", [(True, True, True), (True, False, False),
-                                                   (False, True, False), (False, False, False)])
-def test_host_error_pauses_only_for_dialog_with_owned_console(launch, monkeypatch, from_dialog, owned, waits):
-    launch.console.return_value = owned
-    launch.dialog.return_value = "host"
-    launch.host.side_effect = SystemExit(3)
-    pause = Mock(return_value="")
-    monkeypatch.setattr(entry, "input", pause)
-    with pytest.raises(SystemExit) as error:
-        entry.main([] if from_dialog else ["host", "start"])
-    assert error.value.code == 3
-    if waits:
-        pause.assert_called_once_with("Enter キーを押すと閉じます。")
-    else:
-        pause.assert_not_called()
-
-
-@pytest.mark.parametrize("exit_code", [None, 0])
-def test_successful_host_exit_does_not_pause(launch, exit_code):
-    launch.dialog.return_value = "host"
-    launch.console.return_value = True
-    launch.host.side_effect = SystemExit(exit_code)
-    with pytest.raises(SystemExit):
-        entry.main([])
-
-
-def test_dialog_traceback_is_visible_before_waiting(launch, monkeypatch, capsys):
-    launch.dialog.return_value = "host"
-    launch.console.return_value = True
-    launch.host.side_effect = RuntimeError("host failed")
-
-    def wait(prompt):
-        assert prompt == "Enter キーを押すと閉じます。"
-        assert "RuntimeError: host failed" in capsys.readouterr().err
-
-    pause = Mock(side_effect=wait)
-    monkeypatch.setattr(entry, "input", pause)
-    previous_argv = sys.argv
-    assert entry.main([]) == 1
-    pause.assert_called_once()
-    assert sys.argv is previous_argv
-    assert Path.cwd() == launch.elsewhere
-
-
-def test_dialog_pause_eof_keeps_original_exit_status(launch, monkeypatch):
-    launch.dialog.return_value = "host"
-    launch.console.return_value = True
-    launch.host.side_effect = SystemExit(3)
-    monkeypatch.setattr(entry, "input", Mock(side_effect=EOFError))
-    with pytest.raises(SystemExit) as error:
-        entry.main([])
-    assert error.value.code == 3
-
-
 @pytest.mark.parametrize("argument,code,stream", [("--help", 0, "out"), ("bad-command", 2, "err")])
 def test_host_help_and_errors_use_unified_command(monkeypatch, capsys, argument, code, stream):
     monkeypatch.setattr(sys, "argv", ["codex-bridge.exe", argument])
@@ -390,7 +299,7 @@ def test_agent_instance_handle_closes_on_runner_failure(launch, monkeypatch):
     monkeypatch.setattr(entry, "acquire_agent_instance", Mock(return_value=(True, 123)))
     monkeypatch.setattr(entry.ctypes, "windll", SimpleNamespace(kernel32=SimpleNamespace(CloseHandle=closed)),
                         raising=False)
-    launch.agent.side_effect = RuntimeError("test failure")
+    launch.resident.side_effect = RuntimeError("test failure")
     with pytest.raises(RuntimeError, match="test failure"):
         entry.main(["agent"])
     closed.assert_called_once_with(123)
@@ -453,7 +362,8 @@ def test_build_makes_one_zip(tmp_path, monkeypatch):
         readme = archive.read("codex-bridge-v0.2.0/はじめにお読みください.txt")
     assert readme.startswith(b"\xef\xbb\xbf") and b"\r\n" not in readme
     text = readme.decode("utf-8-sig")
-    assert "知人（貸す側）の方へ" in text and "依頼主（使う側）の方へ" in text
+    assert "貸す人の方へ" in text and "依頼主の方へ" in text
+    assert "http://127.0.0.1:8766/" in text and "タスクトレイ" in text
     assert "friend-kit" not in text and "v0.2.0" in text
     assert "docs\\friend-guide.md" in text and "docs\\operation-guide.md" in text
     assert "\x0c" not in text
@@ -484,3 +394,40 @@ def test_build_removes_same_version_split_zips_only(tmp_path, monkeypatch):
     for name in keep:
         assert (tmp_path / name).read_bytes() == name.encode("utf-8")
     assert (tmp_path / "release" / "codex-bridge-v0.2.0.zip").exists()
+
+
+@pytest.mark.parametrize("acquired", [True, False])
+def test_update_acknowledges_only_after_claim_and_resident_start(launch, monkeypatch, acquired):
+    from codex_bridge import updater
+
+    events = []
+    stage = launch.install / (updater.INSTALL_STAGE + "abcdefgh")
+    stage.mkdir()
+
+    def claim():
+        events.append("mutex")
+        return acquired, None
+
+    @contextmanager
+    def previous_process(pid):
+        assert pid == 1234
+        def wait():
+            assert (stage / "ready").is_file()
+            events.append("old process exited")
+        yield wait
+
+    def start(*, update_ready, wait_for_previous):
+        assert not (stage / "ready").exists()
+        events.append("screen listening")
+        asyncio.run(update_ready())
+        wait_for_previous()
+        return 0
+
+    monkeypatch.setattr(entry, "acquire_agent_instance", claim)
+    monkeypatch.setattr(entry, "_previous_process", previous_process)
+    launch.resident.side_effect = start
+    assert entry.main([updater.RESTART_ARG, stage.name, "1234"]) == (0 if acquired else 1)
+    assert events == (["mutex", "screen listening", "old process exited"] if acquired else ["mutex"])
+    assert (stage / "ready").exists() is acquired
+    launch.browser.assert_not_called()
+

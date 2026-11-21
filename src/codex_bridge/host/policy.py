@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import threading
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -12,10 +13,13 @@ from typing import Literal
 
 import yaml
 
+from .command_rules import lex
+
 Level = Literal["hidden", "read", "write"]
 ExecMode = Literal["off", "allowlist", "ask", "all"]
 LEVELS = ("hidden", "read", "write")
 EXEC_MODES = ("off", "allowlist", "ask", "all")
+EXEC_MODE_STRICTNESS = ("all", "allowlist", "ask", "off")
 OUTPUTS_TOP = ".codex-bridge"
 DATA_SHARE_MSG = "codex-bridge のデータフォルダ（記録や合言葉の置き場）を含むフォルダは共有できません"
 
@@ -106,14 +110,30 @@ class Policy:
     default: Level = "read"
     rules: tuple[Rule, ...] = ()  # v1: relative rules; v2: advanced (wildcard) rules relative to main
     exec_mode: ExecMode = "allowlist"
+    lender_exec_modes: dict[str, str] = field(default_factory=dict)
     allow_patterns: list[str] = field(default_factory=list)
     paused: bool = False
     confirm_modified_scripts: bool = False
     delete_needs_approval: bool = True
+    lender_delete_approval: dict[str, bool] = field(default_factory=dict)
     limits: Limits = Limits()
     folders: tuple[Folder, ...] = ()  # v2: absolute folders
     main: Path | None = None          # v2: relative paths are resolved from here
     v2: bool = False
+    deny_patterns: list[str] = field(default_factory=list)
+    ask_patterns: list[str] = field(default_factory=list)
+
+    def exec_mode_for(self, lender: str | None) -> str:
+        return self.lender_exec_modes.get(lender, self.exec_mode) if lender is not None else self.exec_mode
+
+    def effective_exec_mode(self, lender: str | None, task_mode: str | None) -> str:
+        mode = self.exec_mode_for(lender)
+        return max(mode, task_mode, key=EXEC_MODE_STRICTNESS.index) if task_mode is not None else mode
+
+    def delete_approval_for(self, lender: str | None) -> bool:
+        """Whether a delete by this lender waits for approval (the global value when it has none of its own)."""
+        return self.lender_delete_approval.get(lender, self.delete_needs_approval) if lender is not None \
+            else self.delete_needs_approval
 
     def level_for_abs(self, p: Path) -> Level | None:
         """v2: the level of an absolute path, or None if no registered folder contains it."""
@@ -166,6 +186,17 @@ class Policy:
         return level if level is not None else self.default
 
 
+def command_patterns(value, label: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{label} はコマンドの型の並びで指定してください")
+    for item in value:
+        if lex(item, "powershell", pattern=True)[1]:
+            raise ValueError(f"{label} の型の引用符が閉じていません: {item}")
+    return list(value)
+
+
 def parse_policy(data: dict | None) -> Policy:
     if data is None:
         data = {}
@@ -200,9 +231,31 @@ def parse_policy(data: dict | None) -> Policy:
         mode = "off"
     if mode not in EXEC_MODES:
         raise ValueError(f"exec.mode must be one of {EXEC_MODES}")
+    lender_modes = data.get("lender_exec_modes")
+    if lender_modes is None:
+        lender_modes = {}
+    if not isinstance(lender_modes, dict):
+        raise ValueError("lender_exec_modes は 名前: モード の形で書いてください")
+    lender_exec_modes = {}
+    for name, value in lender_modes.items():
+        value = "off" if value is False else value
+        if not isinstance(name, str) or value not in EXEC_MODES:
+            raise ValueError(f"lender_exec_modes の値は {EXEC_MODES} のどれかです: {name}")
+        lender_exec_modes[name] = value
+    approvals = data.get("lender_delete_approval")
+    if approvals is None:
+        approvals = {}
+    if not isinstance(approvals, dict) or not all(isinstance(n, str) and isinstance(v, bool)
+                                                  for n, v in approvals.items()):
+        raise ValueError("lender_delete_approval は 名前: true/false の形で書いてください")
     allow = ex.get("allow") or []
     if not isinstance(allow, list) or not all(isinstance(a, str) for a in allow):
         raise ValueError("exec.allow must be a list of strings")
+    for pattern in allow:
+        try:
+            shlex.split(pattern, posix=False)
+        except ValueError as e:
+            raise ValueError(f"exec.allow の型の引用符が閉じていません: {pattern}") from e
     lim = data.get("limits") or {}
     try:
         limits = Limits(**{k: int(v) for k, v in lim.items()})
@@ -212,10 +265,14 @@ def parse_policy(data: dict | None) -> Policy:
         default=default,
         rules=tuple(rules),
         exec_mode=mode,
+        lender_exec_modes=lender_exec_modes,
         allow_patterns=list(allow),
+        deny_patterns=command_patterns(ex.get("deny"), "exec.deny"),
+        ask_patterns=command_patterns(ex.get("ask"), "exec.ask"),
         paused=bool(data.get("paused", False)),
         confirm_modified_scripts=bool(ex.get("confirm_modified_scripts", False)),
         delete_needs_approval=bool(data.get("delete_needs_approval", True)),
+        lender_delete_approval=dict(approvals),
         limits=limits,
         folders=tuple(folders),
         main=main,
@@ -324,3 +381,25 @@ class PolicyStore:
             else:
                 raw[k] = v
         self.save(raw)
+
+    def set_lender_exec_mode(self, name: str, mode: str) -> None:
+        if mode not in (*EXEC_MODES, "inherit"):
+            raise ValueError(f"mode は {', '.join((*EXEC_MODES, 'inherit'))} のどれかです")
+        if mode == "inherit":
+            self.drop_lender(name)
+            return
+        self.update(lender_exec_modes={**self.current().lender_exec_modes, name: mode})
+
+    def set_lender_delete_approval(self, name: str, value: bool) -> None:
+        self.update(lender_delete_approval={**self.current().lender_delete_approval, name: bool(value)})
+
+    def drop_lender(self, name: str) -> None:
+        current = self.current()
+        changes = {}
+        if name in current.lender_exec_modes:
+            changes["lender_exec_modes"] = {k: v for k, v in current.lender_exec_modes.items() if k != name}
+        if name in current.lender_delete_approval:
+            changes["lender_delete_approval"] = {k: v for k, v in current.lender_delete_approval.items()
+                                                 if k != name}
+        if changes:
+            self.update(**changes)

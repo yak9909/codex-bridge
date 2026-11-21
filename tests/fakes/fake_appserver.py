@@ -4,7 +4,7 @@ Usage: python -I fake_appserver.py <script.json> [ignored codex args...]
 
 script.json:
   record:    path of a JSON Lines file; gets {"argv"...}, {"env"...} and every received message
-  responses: {method: result}            (default {} ; built-ins for thread/start, turn/start)
+  responses: {method: result}            (or a list of successive results; built-ins below)
   errors:    {method: {"code":..,"message":..}}
   after:     {method: [message, ...]}    messages to emit after answering that method
              (a message with "id" is a server->client request)
@@ -16,8 +16,14 @@ import sys
 
 DEFAULTS = {
     "initialize": {"userAgent": "fake"},
-    "thread/start": {"thread": {"id": "th1"}},
-    "thread/resume": {"thread": {"id": "th1"}},
+    "config/read": {"config": {"model": None, "model_reasoning_effort": None}, "origins": {}},
+    "model/list": {"data": [{"id": "gpt-fake", "model": "gpt-fake", "displayName": "GPT Fake", "hidden": False,
+                             "isDefault": True, "defaultReasoningEffort": "medium",
+                             "supportedReasoningEfforts": [{"reasoningEffort": e, "description": ""}
+                                                           for e in ("low", "medium", "high", "xhigh", "max")]}],
+                   "nextCursor": None},
+    "thread/start": {"thread": {"id": "th1"}, "model": "gpt-fake", "reasoningEffort": "medium"},
+    "thread/resume": {"thread": {"id": "th1"}, "model": "gpt-fake", "reasoningEffort": "medium"},
     "thread/read": {"thread": {"id": "th1", "turns": []}},
     "turn/start": {"turn": {"id": "u1", "status": "inProgress"}},
     "turn/steer": {"turnId": "u1"},
@@ -60,7 +66,10 @@ def main() -> None:
             if err:
                 emit({"jsonrpc": "2.0", "id": msg["id"], "error": err})
             else:
-                emit({"jsonrpc": "2.0", "id": msg["id"], "result": responses.get(method, {})})
+                result = responses.get(method, {})
+                if isinstance(result, list):
+                    result = result.pop(0) if len(result) > 1 else result[0]
+                emit({"jsonrpc": "2.0", "id": msg["id"], "result": result})
         for out in script.get("after", {}).get(method, []):
             emit({"jsonrpc": "2.0", **out})
 

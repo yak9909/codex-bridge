@@ -105,7 +105,7 @@ def build_share(tmp_path: Path) -> Share:
     share = Share(root=root, outside=outside, data_dir=data_dir, policy=policy, audit=audit,
                   paths=paths, read=ReadTools(paths, policy))
     share.search = SearchTools(paths, policy, RG_PATH)
-    share.snapshots = Snapshots(data_dir)
+    share.snapshots = Snapshots(data_dir, paths)
     share.decision = "approved"
 
     async def approve_fn(kind: str, summary: str) -> str:

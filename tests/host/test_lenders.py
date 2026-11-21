@@ -4,6 +4,7 @@ import time
 
 import pytest
 
+from codex_bridge.host import lenders
 from codex_bridge.host.lenders import (Lender, normalize_capabilities, normalize_limits, normalize_window,
                                        pick_lender)
 from codex_bridge.host.paths import ToolError
@@ -26,7 +27,7 @@ async def test_busy_elsewhere_lender_is_skipped_by_auto_routing(mgr):
 async def test_named_busy_elsewhere_lender_gets_busy_answer(mgr):
     alice = await FakeAgent.join(mgr, "alice")
     await alice.push("lender_status", busy_elsewhere=True)
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("one", lender="alice")
     assert not alice.all("task_start")
     await alice.push("lender_status", busy_elsewhere="false")
@@ -76,7 +77,7 @@ def test_pick_uses_lower_of_host_and_friend_limits():
 
 
 def test_pick_skips_busy_offline_blocked():
-    busy = lender("busy", five_hour=0, current_task_id="t1")
+    busy = lender("busy", five_hour=0, current_task_id="t1", active_task_ids=["t1"])
     offline = lender("offline", five_hour=0, connected=False)
     blocked = lender("blocked", five_hour=85)
     blocked_by_own_limit = lender("own", five_hour=50, limits={"five_hour": 40, "weekly": None, "force": False})
@@ -150,15 +151,127 @@ def test_normalize_window(raw, expected):
 
 
 @pytest.mark.parametrize("raw, expected", [
-    ({"resumable": False, "pre_approval": True}, {"resumable": False, "pre_approval": True}),
-    ({"resumable": False}, {"resumable": False, "pre_approval": False}),
-    ({"resumable": "no", "pre_approval": 1, "extra": float("nan")}, {"resumable": True, "pre_approval": False}),
-    ({}, {"resumable": True, "pre_approval": False}),
-    (None, {"resumable": True, "pre_approval": False}),   # a v0.1 agent sends none
-    ("all", {"resumable": True, "pre_approval": False}),
+    ({"resumable": False, "pre_approval": True}, {"resumable": False, "pre_approval": True, "model_select": False, "max_parallel": 1}),
+    ({"resumable": False}, {"resumable": False, "pre_approval": False, "model_select": False, "max_parallel": 1}),
+    ({"resumable": "no", "pre_approval": 1, "extra": float("nan")},
+     {"resumable": True, "pre_approval": False, "model_select": False, "max_parallel": 1}),
+    ({}, {"resumable": True, "pre_approval": False, "model_select": False, "max_parallel": 1}),
+    (None, {"resumable": True, "pre_approval": False, "model_select": False, "max_parallel": 1}),   # a v0.1 agent sends none
+    ("all", {"resumable": True, "pre_approval": False, "model_select": False, "max_parallel": 1}),
 ])
-def test_normalize_capabilities_keeps_the_two_known_flags(raw, expected):
-    assert normalize_capabilities(raw) == expected
+def test_normalize_capabilities_keeps_the_known_flags(raw, expected):
+    assert normalize_capabilities(raw) == {**expected, "max_parallel": 1}
+
+
+def test_capabilities_keep_model_select():
+    assert normalize_capabilities({"model_select": True})["model_select"] is True
+    assert normalize_capabilities(None)["model_select"] is False
+    for value in (False, 1, "true", None):
+        assert normalize_capabilities({"model_select": value})["model_select"] is False
+
+
+def test_lender_model_data_starts_unknown():
+    lender = Lender(name="a")
+    assert lender.models is None and lender.max_effort is None
+    assert lender.capabilities["model_select"] is False
+
+
+def test_normalize_models_keeps_valid_entries():
+    raw = [{"model": "m1", "name": "M1", "efforts": ["low", "low", 3, "high"],
+            "default_effort": "low", "is_default": True}, {"model": ""}, "x"]
+    assert lenders.normalize_models(raw) == [
+        {"model": "m1", "name": "M1", "efforts": ["low", "high"], "default_effort": "low", "is_default": True}]
+
+
+def test_normalize_models_not_a_list_is_none():
+    assert lenders.normalize_models({"a": 1}) is None
+    for raw in (None, "m1", 1, True, ()):
+        assert lenders.normalize_models(raw) is None
+
+
+def test_normalize_models_fills_defaults_and_checks_field_types():
+    raw = [{"model": "m1"}, {"model": "m2", "name": 7, "efforts": "low", "default_effort": 7, "is_default": 1},
+           {"model": "m3", "name": "", "efforts": ["future", None, "", "future", False], "default_effort": "future"},
+           {}, {"model": None}, {"model": 3}, {"model": False}, None]
+    assert lenders.normalize_models(raw) == [
+        {"model": "m1", "name": "m1", "efforts": [], "default_effort": None, "is_default": False},
+        {"model": "m2", "name": "m2", "efforts": [], "default_effort": None, "is_default": False},
+        {"model": "m3", "name": "m3", "efforts": ["future", ""], "default_effort": "future", "is_default": False},
+    ]
+    assert lenders.normalize_models([]) == []
+
+
+def test_normalize_models_stops_after_200_items():
+    models = lenders.normalize_models([{"model": f"m{i}"} for i in range(201)])
+    assert [entry["model"] for entry in models] == [f"m{i}" for i in range(200)]
+
+
+def test_normalize_effort_keeps_only_known_values():
+    for effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
+        assert lenders.normalize_effort(effort) == effort
+    for value in (None, "", "HIGH", "future", 1, True, [], {}):
+        assert lenders.normalize_effort(value) is None
+
+
+def test_describe_models():
+    assert lenders.describe_models(None) == "なし"
+    assert lenders.describe_models([]) == "なし"
+    assert lenders.describe_models([{"model": "gpt-a", "efforts": ["low", "medium"]},
+                                   {"model": "gpt-b", "efforts": ["high"]}]) == "gpt-a（low・medium）、gpt-b（high）"
+
+
+def test_accepts_nothing_specified_even_v02():
+    assert lenders.lender_accepts(Lender(name="a"), None, None) is None
+
+
+@pytest.mark.parametrize("model, effort", [("m1", None), (None, "low"), ("m1", "low")])
+def test_accepts_v02_refuses_any_choice(model, effort):
+    reason = lenders.lender_accepts(Lender(name="a"), model, effort)
+    assert "v0.2 以前" in reason
+    assert reason == "「a」の exe は v0.2 以前のため、モデルと推論の強さを指定できません。"
+
+
+def test_accepts_no_list_yet():
+    lender = Lender(name="a", capabilities={"model_select": True}, models=None)
+    reason = lenders.lender_accepts(lender, "m1", None)
+    assert "まだ届いていません" in reason
+    assert reason == ("「a」のモデルの一覧がまだ届いていません（その人の Codex が起動すると届きます）。"
+                      "少し待つか、モデルと推論の強さを指定せずに依頼してください。")
+
+
+def test_accepts_unknown_model_lists_offer():
+    lender = Lender(name="a", capabilities={"model_select": True},
+                    models=[{"model": "m1", "efforts": ["low", "high"]}])
+    reason = lenders.lender_accepts(lender, "m2", None)
+    assert "m1（low・high）" in reason
+    assert reason == ("「a」は、指定のモデルと推論の強さを使わせていません。"
+                      "この人が使えるモデルと推論の強さ: m1（low・high）")
+    assert lenders.lender_accepts(lender, "m1", None) is None
+    assert lenders.lender_accepts(lender, "m1", "high") is None
+    assert lenders.lender_accepts(lender, "m1", "medium") == reason
+
+
+def test_accepts_effort_only_uses_default_model():
+    lender = Lender(name="a", capabilities={"model_select": True},
+                    models=[{"model": "m1", "efforts": ["low"]},
+                            {"model": "m2", "efforts": ["high"], "is_default": True}])
+    assert lenders.lender_accepts(lender, None, "high") is None
+    assert lenders.lender_accepts(lender, None, "low") is not None
+
+
+def test_accepts_effort_only_falls_back_to_first_model():
+    lender = Lender(name="a", capabilities={"model_select": True},
+                    models=[{"model": "m1", "efforts": ["low"]}, {"model": "m2", "efforts": ["high"]}])
+    assert lenders.lender_accepts(lender, None, "low") is None
+    assert lenders.lender_accepts(lender, None, "high") is not None
+
+
+def test_accepts_empty_offer_refuses_a_choice():
+    lender = Lender(name="a", capabilities={"model_select": True}, models=[])
+    for model, effort in (("m1", None), (None, "low")):
+        assert lenders.lender_accepts(lender, model, effort) == (
+            "「a」は、指定のモデルと推論の強さを使わせていません。この人が使えるモデルと推論の強さ: なし")
+    assert lenders.lender_accepts(lender, None, None) is None
 
 
 # ---- TaskManager with several lenders -----------------------------------
@@ -197,9 +310,7 @@ class FakeAgent:
 
 @pytest.fixture
 def mgr(tmp_path):
-    m = TaskManager(tmp_path / "data", touched_fn=lambda tid: [])
-    m.settings["thresholds"] = dict(TH)
-    return m
+    return TaskManager(tmp_path / "data", touched_fn=lambda tid: [])
 
 
 async def test_two_lenders_work_in_parallel(mgr):
@@ -212,7 +323,7 @@ async def test_two_lenders_work_in_parallel(mgr):
     assert mgr.tasks[t1].lender == "alice" and mgr.tasks[t2].lender == "bob"
     assert mgr.current_task_id("alice") == t1 and mgr.current_task_id("bob") == t2
     assert mgr.current_task_id() in (t1, t2)
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("three")
 
     await mgr.followup(t2, "more")
@@ -235,7 +346,7 @@ async def test_explicit_lender_is_used(mgr):
     await bob.push("usage", **usage(five_hour=50))
     tid = await mgr.start("one", lender="bob")
     assert bob.last("task_start")["task_id"] == tid and not alice.all("task_start")
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("two", lender="bob")
     with pytest.raises(ToolError, match="接続されていません"):
         await mgr.start("two", lender="carol")
@@ -245,7 +356,8 @@ async def test_explicit_lender_is_used(mgr):
 
 
 async def test_explicit_lender_over_its_limit_is_refused(mgr):
-    alice, bob = await FakeAgent.join(mgr, "alice"), await FakeAgent.join(mgr, "bob")
+    alice = await FakeAgent.join(mgr, "alice", limits=TH)
+    bob = await FakeAgent.join(mgr, "bob", limits=TH)
     await alice.push("usage", **usage(five_hour=10))
     await bob.push("usage", **usage(five_hour=95))
     with pytest.raises(ToolError, match="再開可能"):
@@ -294,7 +406,7 @@ async def test_continue_goes_to_same_lender(mgr):
     assert alice.last("task_start")["task_id"] == t2 and alice.last("task_start")["continue_thread_id"] == "thA"
     assert not bob.all("task_start") and mgr.tasks[t2].lender == "alice"
 
-    with pytest.raises(ToolError, match=RETRY_ADVICE):  # alice is working
+    with pytest.raises(ToolError, match="会話は作業中"):  # The same conversation is still active.
         await mgr.start("again", continue_task_id=t1)
     await alice.finish(t2, seq=2, thread_id="thA")
     with pytest.raises(ToolError, match=RETRY_ADVICE):  # someone else was named
@@ -322,7 +434,7 @@ async def test_v1_agent_without_capabilities_is_resumable(mgr):
     await alice.push("hello", agent_version="0.1.0", codex_version="x", auth_mode="chatgpt", current_task_id=None)
     info = mgr.lenders()[0]
     assert info["name"] == "alice" and info["protocol"] == 1
-    assert info["capabilities"] == {"resumable": True, "pre_approval": False}
+    assert info["capabilities"] == {"resumable": True, "pre_approval": False, "model_select": False, "max_parallel": 1}
     t1 = await mgr.start("one")
     await alice.finish(t1, seq=1, thread_id="thA")
     await mgr.start("more", continue_task_id=t1)
@@ -335,7 +447,7 @@ async def test_hello_v2_records_capabilities_and_limits(mgr):
                      capabilities={"resumable": True, "pre_approval": True},
                      limits={"five_hour": 50, "weekly": 60, "force": False}, current_task_id=None)
     info = mgr.lenders()[0]
-    assert info["protocol"] == 2 and info["capabilities"] == {"resumable": True, "pre_approval": True}
+    assert info["protocol"] == 2 and info["capabilities"] == {"resumable": True, "pre_approval": True, "model_select": False, "max_parallel": 1}
     assert info["limits"] == {"five_hour": 50, "weekly": 60, "force": False}
     await alice.push("usage", **usage(five_hour=55))  # over alice's own limit, under the host's
     with pytest.raises(ToolError, match="再開可能"):
@@ -376,7 +488,8 @@ async def test_nothing_a_lender_sends_keeps_the_lists_from_being_json(mgr):
                      ts=NAN, friend_limits={"five_hour": INF, "weekly": NAN, "force": NAN}, extra=NAN)
     row = json.loads(json.dumps(mgr.lenders(), allow_nan=False))[0]
     assert (row["agent_version"], row["codex_version"], row["auth_mode"], row["protocol"]) == (None, None, None, 1)
-    assert row["capabilities"] == {"resumable": True, "pre_approval": False} and row["limits"] == NO_LIMITS
+    assert row["capabilities"] == {"resumable": True, "pre_approval": False, "model_select": False, "max_parallel": 1}
+    assert row["limits"] == NO_LIMITS
     assert row["usage"]["five_hour"] == {"used_percent": 10, "resets_at": None, "resets_at_local": None}
     assert set(row["usage"]["weekly"]) == {"used_percent", "resets_at", "resets_at_local"}
     assert row["usage"]["ts"] is None
@@ -389,7 +502,8 @@ async def test_nothing_a_lender_sends_keeps_the_lists_from_being_json(mgr):
 
 
 async def test_a_bogus_percent_does_not_put_a_lender_first(mgr):
-    alice, bob = await FakeAgent.join(mgr, "alice"), await FakeAgent.join(mgr, "bob")
+    alice = await FakeAgent.join(mgr, "alice", limits=TH)
+    bob = await FakeAgent.join(mgr, "bob", limits=TH)
     await alice.push("usage", five_hour={"used_percent": -500, "resets_at": int(time.time()) + 60}, weekly=None, ts=0)
     await bob.push("usage", **usage(five_hour=70))
     assert mgr.usage()["lenders"]["alice"]["five_hour"] is None
@@ -406,7 +520,7 @@ async def test_invited_names_are_listed_even_before_they_connect(mgr):
     assert carol["connected"] is False and carol["ready"] is False and carol["since"] is None
     assert carol["capabilities"] is None and carol["limits"] is None and carol["current_task_id"] is None
     assert carol["usage"]["five_hour"] is None and carol["usage"]["weekly"] is None
-    assert carol["usage"]["blocked_until"] is None and carol["usage"]["thresholds"] == TH
+    assert carol["usage"]["blocked_until"] is None and "thresholds" not in carol["usage"]
     assert [r["name"] for r in mgr.lenders()] == ["alice"]  # without the invite list: as before
     with pytest.raises(ToolError, match="接続されていません"):  # being listed does not make one reachable
         await mgr.start("one", lender="carol")
@@ -423,13 +537,14 @@ async def test_limits_that_are_not_an_object_leave_the_known_ones_in_place(mgr):
 
 async def test_usage_and_lenders_are_per_lender(mgr):
     assert mgr.lenders() == [] and mgr.usage()["lenders"] == {} and mgr.agent_info() == {"connected": False}
-    alice, bob = await FakeAgent.join(mgr, "alice"), await FakeAgent.join(mgr, "bob")
+    alice = await FakeAgent.join(mgr, "alice", limits=TH)
+    bob = await FakeAgent.join(mgr, "bob", limits=TH)
     await alice.push("usage", **usage(five_hour=10))
     await bob.push("usage", **usage(five_hour=95))
     u = mgr.usage()
     assert u["lenders"]["alice"]["five_hour"]["used_percent"] == 10 and u["lenders"]["alice"]["blocked_until"] is None
     assert u["lenders"]["bob"]["five_hour"]["used_percent"] == 95 and u["lenders"]["bob"]["blocked_until"]
-    assert u["five_hour"]["used_percent"] == 95 and u["thresholds"] == TH  # top level: the latest connection
+    assert u["five_hour"]["used_percent"] == 95  # top level: the latest connection
     tid = await mgr.start("one")
     rows = {r["name"]: r for r in mgr.lenders()}
     assert rows["alice"]["connected"] and rows["alice"]["current_task_id"] == tid
@@ -550,7 +665,7 @@ async def test_automatic_routing_skips_a_lender_before_its_hello(mgr):
     await bob.push("usage", **usage(five_hour=70))
     tid = await mgr.start("one")
     assert mgr.tasks[tid].lender == "bob" and not alice.all("task_start")
-    with pytest.raises(ToolError, match="作業中"):  # bob works; alice still cannot be chosen
+    with pytest.raises(ToolError, match="上限"):  # bob works; alice still cannot be chosen
         await mgr.start("two")
 
 
@@ -570,3 +685,14 @@ async def test_continuation_waits_for_the_hello_of_a_new_connection(mgr):
     with pytest.raises(ToolError, match=RETRY_ADVICE):
         await mgr.start("more", continue_task_id=t1)
     assert not again.all("task_start") and len(mgr.tasks) == 1
+
+
+async def test_named_lender_at_its_own_capacity_reports_the_capacity(mgr):
+    alice = await FakeAgent.join(mgr, "alice")
+    await alice.push("hello", protocol=5, capabilities={"max_parallel": 2})
+    ids = [await mgr.start("first", lender="alice"), await mgr.start("second", lender="alice")]
+    await alice.push("lender_status", busy_elsewhere=True)
+    with pytest.raises(ToolError) as error:
+        await mgr.start("third", lender="alice")
+    assert str(error.value) == "同時に受ける依頼の上限（2 件）に達しています"
+    assert "ほかの依頼主" not in str(error.value) and mgr.active_task_ids("alice") == ids

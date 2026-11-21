@@ -32,6 +32,7 @@ def auth(tok: str) -> dict:
 
 @pytest.fixture
 async def mcp(share):
+    share.task("mcp-task")
     tokens = {TOKEN: "friend"}  # token -> invite name
     services = HostServices(paths=share.paths, policy=share.policy, read=share.read, search=share.search,
                             write=share.write, runner=share.runner, approvals=share.approvals,
@@ -205,7 +206,7 @@ async def test_other_oserror_is_reported_and_audited(mcp, share, monkeypatch):
     assert result["content"][0]["text"] == "ファイルの操作に失敗しました: No space left on device"
     last = json.loads(share.audit.path.read_text(encoding="utf-8").splitlines()[-1])
     assert last["ok"] is False and last["tool"] == "write_file"
-    assert share.snapshots.touched(None) == []
+    assert share.snapshots.touched(share.task_id) == []
 
 
 async def test_oserror_does_not_expose_internal_snapshot_path(mcp, share, monkeypatch):
@@ -229,7 +230,7 @@ async def test_move_permission_error_names_the_destination(mcp, share, monkeypat
     result = await call(mcp, "move_path", {"src": "raw/a.txt", "dst": "out/moved.txt"})
     assert result.get("isError")
     assert result["content"][0]["text"].endswith(": out/moved.txt")
-    assert share.snapshots.touched(None) == []
+    assert share.snapshots.touched(share.task_id) == []
 
 
 async def test_partial_delete_keeps_original_for_undo(mcp, share, monkeypatch):
@@ -249,9 +250,9 @@ async def test_partial_delete_keeps_original_for_undo(mcp, share, monkeypatch):
     monkeypatch.setattr(writes.shutil, "rmtree", partially_delete)
     result = await call(mcp, "delete_path", {"path": "out/partial"})
     assert result.get("isError")
-    assert share.snapshots.touched(None) == ["out/partial"]
+    assert share.snapshots.touched(share.task_id) == ["out/partial"]
     monkeypatch.undo()
-    assert share.snapshots.undo(None) == ["out/partial"]
+    assert share.snapshots.undo(share.task_id) == ["out/partial"]
     assert (folder / "first.txt").read_bytes() == b"first"
     assert (folder / "second.txt").read_bytes() == b"second"
 
@@ -262,12 +263,12 @@ async def test_readonly_write_can_be_retried_after_permission_is_fixed(mcp, shar
     try:
         result = await call(mcp, "write_file", {"path": "raw/a.txt", "content": "denied"})
         assert result.get("isError") and "Windows がこの操作を断りました" in result["content"][0]["text"]
-        assert share.snapshots.touched(None) == []
+        assert share.snapshots.touched(share.task_id) == []
     finally:
         target.chmod(stat.S_IREAD | stat.S_IWRITE)
     result = await call(mcp, "write_file", {"path": "raw/a.txt", "content": "allowed"})
     assert not result.get("isError"), result
-    assert share.snapshots.undo(None) == ["raw/a.txt"]
+    assert share.snapshots.undo(share.task_id) == ["raw/a.txt"]
     assert target.read_text(encoding="utf-8") == ORIGINAL_A
 
 
@@ -387,9 +388,11 @@ async def test_command_result_is_visible_only_to_the_lender_that_started_it(two)
 async def test_lender_without_a_task_does_not_write_into_another_lenders_task(two):
     await two.host.mgr.on_agent_message(
         two.link["bob"], {"type": "task_state", "task_id": two.task["bob"], "state": "completed"})
-    await call_as(two, "bob", "write_file", {"path": "out/late.txt", "content": "x"})
+    res = await call(two.client, "write_file", {"path": "out/late.txt", "content": "x"}, token=two.token["bob"])
+    assert res["isError"] and "どの依頼" in res["content"][0]["text"]
     assert two.host.snapshots.touched(two.task["alice"]) == []
-    assert two.host.snapshots.touched(None) == ["out/late.txt"]
+    assert two.host.snapshots.touched(None) == []
+    assert not (two.root / "out/late.txt").exists()
 
 
 async def test_a_call_with_no_known_lender_belongs_to_no_task(two):
@@ -432,3 +435,157 @@ async def test_bearer_auth_puts_the_matched_name_in_the_request_state():
                     None, None)
     assert seen == [{"kept": 1, "lender": "alice"}, {"kept": 1, "lender": "bob"}]
     assert shared == {"kept": 1}
+
+
+@pytest.fixture
+async def parallel(two):
+    await two.host.mgr.on_agent_message(two.link["alice"], {
+        "type": "hello", "protocol": 5, "capabilities": {"max_parallel": 2}})
+    one = two.task["alice"]
+    second = await two.host.mgr.start("second task", lender="alice")
+    for task, thread in [(one, "thread-one"), (second, "thread-two")]:
+        await two.host.mgr.on_agent_message(two.link["alice"], {
+            "type": "task_state", "task_id": task, "thread_id": thread, "state": "running"})
+    two.ids = [one, second]
+    return two
+
+
+async def thread_call(env, thread, name, args):
+    params = {"name": name, "arguments": args}
+    if thread is not None:
+        params["_meta"] = {"threadId": thread, "sessionId": thread}
+    return (await rpc(env.client, "tools/call", params, token=env.token["alice"]))["result"]
+
+
+async def test_parallel_threads_write_and_undo_only_their_own_files(parallel):
+    e = parallel
+    results = await asyncio.gather(*(
+        thread_call(e, thread, "write_file", {"path": f"out/{i}.txt", "content": thread})
+        for i, thread in enumerate(("thread-one", "thread-two"))))
+    assert all(not r.get("isError") for r in results)
+    assert [e.host.mgr.result(t)["changed_files"] for t in e.ids] == [["out/0.txt"], ["out/1.txt"]]
+    assert e.host.snapshots.touched(None) == []
+    e.host.snapshots.undo(e.ids[0])
+    assert not (e.root / "out/0.txt").exists()
+    assert (e.root / "out/1.txt").read_text(encoding="utf-8") == "thread-two"
+
+
+@pytest.mark.parametrize("thread", [None, "", "unmatched", 7, {"thread": "thread-one"}])
+@pytest.mark.parametrize("name,args", [
+    ("write_file", {"path": "out/ambiguous.txt", "content": "x"}),
+    ("delete_path", {"path": "raw/a.txt"}),
+    ("run_command", {"command": "echo ambiguous"}),
+    ("apply_patch", {"patch": "*** Begin Patch\n*** Add File: out/ambiguous.txt\n+x\n*** End Patch\n"}),
+])
+async def test_parallel_mutations_without_an_identified_task_are_refused(parallel, thread, name, args):
+    res = await thread_call(parallel, thread, name, args)
+    assert res["isError"] and "どの依頼の操作か分からない" in res["content"][0]["text"]
+    assert not parallel.host.approvals.pending() and not parallel.host.services.runner.jobs
+    assert all(parallel.host.snapshots.touched(t) == [] for t in [None, *parallel.ids])
+    read = await thread_call(parallel, thread, "read_file", {"path": "raw/a.txt"})
+    assert not read.get("isError")
+
+
+@pytest.mark.parametrize("thread", [None, "unmatched"])
+async def test_one_remaining_task_keeps_legacy_fallback(parallel, thread):
+    e = parallel
+    await e.host.mgr.on_agent_message(e.link["alice"], {
+        "type": "task_state", "task_id": e.ids[1], "state": "completed"})
+    res = await thread_call(e, thread, "write_file", {"path": "out/fallback.txt", "content": "x"})
+    if thread is None:
+        assert not res.get("isError")
+        assert e.host.snapshots.touched(e.ids[0]) == ["out/fallback.txt"]
+    else:
+        assert res["isError"] and "どの依頼" in res["content"][0]["text"]
+        assert not e.host.snapshots.touched(e.ids[0])
+
+
+async def test_parallel_delete_approvals_keep_their_thread_even_after_task_completion(parallel):
+    e = parallel
+    for i in range(2):
+        (e.root / f"out/delete-{i}.txt").write_text(str(i), encoding="utf-8")
+    deleting = [asyncio.create_task(thread_call(e, thread, "delete_path", {"path": f"out/delete-{i}.txt"}))
+                for i, thread in enumerate(("thread-one", "thread-two"))]
+    approvals = await pending(e, 2)
+    assert {a.task_id for a in approvals} == set(e.ids)
+    # The in-flight call keeps its original task after an await, even when it has since ended.
+    await e.host.mgr.on_agent_message(e.link["alice"], {
+        "type": "task_state", "task_id": e.ids[0], "state": "completed"})
+    for approval in approvals:
+        e.host.approvals.decide(approval.id, True)
+    results = await asyncio.gather(*deleting)
+    assert all(not res.get("isError") for res in results)
+    assert [e.host.snapshots.touched(t) for t in e.ids] == [["out/delete-0.txt"], ["out/delete-1.txt"]]
+    audit = [json.loads(line) for line in e.host.audit.path.read_text(encoding="utf-8").splitlines()]
+    calls = [row for row in audit if row["kind"] == "tool_call" and row["tool"] == "delete_path"]
+    assert {row["args"]["path"]: row["task_id"] for row in calls} == dict(zip(("out/delete-0.txt", "out/delete-1.txt"), e.ids))
+
+
+async def test_parallel_command_approvals_and_results_do_not_mix(parallel):
+    e = parallel
+    running = [asyncio.create_task(thread_call(e, thread, "run_command", {"command": f"echo {i}"}))
+               for i, thread in enumerate(("thread-one", "thread-two"))]
+    approvals = await pending(e, 2)
+    assert {a.summary: a.task_id for a in approvals} == dict(zip(("echo 0", "echo 1"), e.ids))
+    for approval in approvals:
+        e.host.approvals.decide(approval.id, approval.task_id == e.ids[0])
+    results = await asyncio.gather(*running)
+    jobs = [json.loads(res["content"][0]["text"]) for res in results]
+    assert [job["status"] for job in jobs] == ["done", "denied"]
+    wrong = await thread_call(e, "thread-two", "get_command_result", {"job_id": jobs[0]["job_id"]})
+    assert wrong["isError"] and "ジョブが見つかりません" in wrong["content"][0]["text"]
+    own = await thread_call(e, "thread-one", "get_command_result", {"job_id": jobs[0]["job_id"]})
+    assert json.loads(own["content"][0]["text"])["stdout"].strip() == "0"
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("write_file", {"path": "out/late.txt", "content": "late"}),
+    ("delete_path", {"path": "out/late.txt"}),
+    ("run_command", {"command": "echo late"}),
+])
+async def test_cancelled_thread_cannot_mutate_the_remaining_tasks_files(parallel, tool, args):
+    e = parallel
+    target = e.root / "out/late.txt"
+    target.write_text("original", encoding="utf-8")
+    await e.host.mgr.cancel(e.ids[0])
+    await e.host.mgr.on_agent_message(e.link["alice"], {
+        "type": "task_state", "task_id": e.ids[0], "state": "cancelled", "thread_id": "thread-one"})
+    assert e.host.mgr.active_task_ids("alice") == [e.ids[1]]
+    result = await thread_call(e, "thread-one", tool, args)
+    assert result["isError"] and "どの依頼" in result["content"][0]["text"]
+    assert target.read_text(encoding="utf-8") == "original"
+    assert not e.host.snapshots.touched(e.ids[1]) and not e.host.snapshots.touched(None)
+    assert not e.host.approvals.pending() and not e.host.services.runner.jobs
+
+
+async def test_single_task_without_a_known_thread_keeps_startup_fallback(two):
+    task = two.task["alice"]
+    assert two.host.mgr.tasks[task].thread_id is None
+    result = await thread_call(two, "new-thread-not-announced-yet", "write_file",
+                               {"path": "out/startup.txt", "content": "x"})
+    assert not result.get("isError")
+    assert two.host.snapshots.touched(task) == ["out/startup.txt"]
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("write_file", {"path": "out/late-startup.txt", "content": "late"}),
+    ("delete_path", {"path": "out/late-startup.txt"}),
+    ("run_command", {"command": "echo late"}),
+])
+async def test_ended_thread_cannot_mutate_a_queued_task_without_a_known_thread(two, tool, args):
+    e = two
+    first = e.task["alice"]
+    await e.host.mgr.on_agent_message(e.link["alice"], {
+        "type": "task_state", "task_id": first, "state": "running", "thread_id": "thread-1"})
+    await e.host.mgr.cancel(first)
+    await e.host.mgr.on_agent_message(e.link["alice"], {
+        "type": "task_state", "task_id": first, "state": "cancelled", "thread_id": "thread-1"})
+    second = await e.host.mgr.start("waiting for thread", lender="alice")
+    assert e.host.mgr.tasks[second].state == "queued" and e.host.mgr.tasks[second].thread_id is None
+    target = e.root / "out/late-startup.txt"
+    target.write_text("original", encoding="utf-8")
+    result = await thread_call(e, "thread-1", tool, args)
+    assert result["isError"] and "どの依頼" in result["content"][0]["text"]
+    assert target.read_text(encoding="utf-8") == "original"
+    assert not e.host.snapshots.touched(second) and not e.host.snapshots.touched(None)
+    assert not e.host.approvals.pending() and not e.host.services.runner.jobs

@@ -10,3 +10,6 @@ __pycache__/
 host.yaml
 friend-kit/
 release/
+
+/.layout-shots/
+/.task-temp/

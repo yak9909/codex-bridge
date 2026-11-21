@@ -5,7 +5,7 @@ import yaml
 
 from codex_bridge.host.policy import PolicyStore, parse_policy
 from codex_bridge.host.policy_form import (add_folder, form_from_raw, remove_folder, set_folder_level,
-                                           set_main_folder, yaml_from_form)
+                                           save_form, set_main_folder, yaml_from_form)
 
 
 def make_form(tmp_path: Path) -> dict:
@@ -58,6 +58,27 @@ def test_form_roundtrip(tmp_path):
         ((tmp_path / "work" / "locked").as_posix(), "read"), ((tmp_path / "tools").as_posix(), "read")}
 
 
+@pytest.mark.parametrize("key", ["allow", "deny", "ask"])
+def test_policy_rejects_unclosed_pattern_quotes(tmp_path, key):
+    store = store_with(tmp_path)
+    with pytest.raises(ValueError, match="引用符"):
+        store.update(**{f"exec_{key}": ['show "unfinished']})
+    assert parse_policy(store.as_dict()).exec_mode == "allowlist"
+
+
+def test_command_rule_lists_roundtrip_through_folder_edits(tmp_path):
+    store = store_with(tmp_path)
+    assert store.current().deny_patterns == store.current().ask_patterns == []
+    store.update(exec_deny=["git push *"], exec_ask=['git commit "two words" *'])
+    set_folder_level(store, (tmp_path / "tools").as_posix(), "write")
+    assert store.current().deny_patterns == ["git push *"]
+    assert store.current().ask_patterns == ['git commit "two words" *']
+    assert store.current().allow_patterns == ["python scripts/**/*.py *", "git status"]
+    for key in ("deny", "ask"):
+        with pytest.raises(ValueError, match=rf"exec\.{key}"):
+            store.update(**{f"exec_{key}": "echo *"})
+
+
 def test_advanced_rules_survive(tmp_path):
     form = make_form(tmp_path)
     form["advanced_rules"] = [{"path": "**/*.lock", "level": "hidden"}]
@@ -97,3 +118,55 @@ def test_add_rejects_missing_and_relative(tmp_path):
         add_folder(store, "rel/dir", "read")
     with pytest.raises(ValueError):
         set_main_folder(store, (tmp_path / "work" / "private").as_posix())  # hidden can't be main
+
+
+def test_form_round_trip_keeps_lender_exec_modes(tmp_path):
+    raw = make_form(tmp_path)
+    raw["lender_exec_modes"] = {"a": False, '友人 "b"': "all"}
+    form = form_from_raw(raw)
+    modes = {"a": "off", '友人 "b"': "all"}
+    assert form["lender_exec_modes"] == modes
+    text = yaml_from_form(form)
+    assert '# Codex を貸している人ごとのコマンド実行のモード（書いていない人は、上の exec.mode と同じ）' in text
+    assert '  "a": "off"' in text
+    assert text.index("lender_exec_modes:") < text.index("# 削除するときは承認待ちにする")
+    assert parse_policy(yaml.safe_load(text)).lender_exec_modes == modes
+    assert form_from_raw(yaml.safe_load(text))["lender_exec_modes"] == modes
+    assert form_from_raw({"lender_exec_modes": None})["lender_exec_modes"] == {}
+
+
+def test_save_form_without_key_keeps_modes(tmp_path):
+    store = store_with(tmp_path)
+    store.update(lender_exec_modes={"a": "off", "b": "ask"})
+    form = form_from_raw(store.as_dict())
+    form.pop("lender_exec_modes", None)
+    form["exec"]["mode"] = "all"
+    save_form(store, form)
+    assert store.current().lender_exec_modes == {"a": "off", "b": "ask"}
+    assert store.current().exec_mode == "all"
+    assert store.current().confirm_modified_scripts is True
+    assert "lender_exec_modes" not in form
+    save_form(store, {**form, "lender_exec_modes": {}})
+    assert store.current().lender_exec_modes == {}
+
+
+@pytest.mark.parametrize("operation", ["level", "inherit", "add", "remove", "main"])
+def test_set_folder_level_keeps_lender_modes(tmp_path, operation):
+    store = store_with(tmp_path)
+    store.update(lender_exec_modes={"a": "off", "b": "all"})
+    tools = (tmp_path / "tools").as_posix()
+    if operation in ("level", "inherit"):
+        set_folder_level(store, tools, "hidden" if operation == "level" else "inherit")
+    elif operation == "add":
+        add_folder(store, (tmp_path / "work" / "locked").as_posix(), "read")
+    elif operation == "remove":
+        remove_folder(store, tools)
+    else:
+        set_main_folder(store, tools)
+    assert PolicyStore(store.path).current().lender_exec_modes == {"a": "off", "b": "all"}
+
+
+@pytest.mark.parametrize("modes", [{"a": "bad"}, {"a": "inherit"}, {1: "all"}, [], False])
+def test_yaml_from_form_rejects_bad_lender_modes(modes):
+    with pytest.raises(ValueError, match="lender_exec_modes"):
+        yaml_from_form({"lender_exec_modes": modes})

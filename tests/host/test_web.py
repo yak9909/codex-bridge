@@ -94,27 +94,101 @@ async def test_admin_api_not_served_on_public_bind(public):
     assert (await public.get("/admin/")).status_code == 404
 
 
+async def test_notify_wait_requires_target(admin):
+    r = await admin.get("/admin/api/notify/wait", headers=H)
+    assert r.status_code == 400
+    assert r.json()["detail"] == "task_id か origin を指定してください"
+
+
+async def test_notify_wait_requires_header_without_consuming(admin, host):
+    await join(host, "friend")
+    tid = await host.mgr.start("work", origin="codex")
+    host.mgr.tasks[tid].state = "completed"
+    for headers in ({}, {"X-Codex-Bridge": "wrong"}):
+        r = await admin.get("/admin/api/notify/wait", params={"task_id": tid}, headers=headers)
+        assert r.status_code == 403
+        assert r.json()["detail"] == "missing X-Codex-Bridge header"
+        assert not host.mgr.tasks[tid].notified_final
+    r = await admin.get("/admin/api/notify/wait", params={"task_id": tid}, headers=H)
+    assert r.status_code == 200 and r.json()["status"] == "notice"
+    assert host.mgr.tasks[tid].notified_final
+
+
+async def test_notify_wait_returns_notice(admin, host):
+    link = await join(host, "friend")
+    tid = await host.mgr.start("work")
+    await host.mgr.on_agent_message(link, {"type": "task_state", "task_id": tid,
+                                           "state": "completed", "report": "done"})
+    r = await admin.get("/admin/api/notify/wait", params={"task_id": tid, "timeout": 1}, headers=H)
+    assert r.status_code == 200 and r.json()["status"] == "notice"
+    assert r.json()["notices"][0]["task_id"] == tid
+
+
+async def test_notify_wait_not_served_on_public_bind(public):
+    r = await public.get("/admin/api/notify/wait", params={"task_id": "t1", "timeout": 1})
+    assert r.status_code == 404
+
+
+@pytest.mark.parametrize("timeout, expected", [(None, 3300), (0, 1), (-5, 1), (9999, 3600)])
+async def test_notify_wait_passes_clamped_timeout_and_disconnect(admin, host, monkeypatch, timeout, expected):
+    calls = []
+
+    async def wait(**kwargs):
+        calls.append(kwargs)
+        assert await kwargs["disconnected"]() is False
+        return {"status": "timeout", "notices": []}
+
+    monkeypatch.setattr(host.notifier, "wait", wait)
+    params = {"origin": "claude", "any": 1}
+    if timeout is not None:
+        params["timeout"] = timeout
+    r = await admin.get("/admin/api/notify/wait", params=params, headers=H)
+    assert r.status_code == 200 and r.json()["status"] == "timeout"
+    assert calls[0]["timeout"] == expected and calls[0]["any_unwatched"] is True
+    assert "session" not in calls[0]
+
+
+async def test_notify_wait_passes_codex_session(admin, host):
+    link = await join(host, "friend")
+    tid = await host.mgr.start("work", origin="codex", session="s1")
+    await host.mgr.on_agent_message(link, {"type": "task_state", "task_id": tid, "state": "completed"})
+    for session, status in (("s2", "none"), ("s1", "notice")):
+        r = await admin.get("/admin/api/notify/wait", params={"origin": "codex", "session": session, "timeout": 1}, headers=H)
+        assert r.status_code == 200 and r.json()["status"] == status
+
+
 async def test_admin_page_served(admin):
     r = await admin.get("/admin/")
     assert r.status_code == 200 and "codex-bridge" in r.text
 
 
+async def test_admin_page_has_model_and_exec_controls(admin):
+    page = (await admin.get("/admin/")).text
+    assert "/app/static/app.js" in page
+    tasks = await admin.get("/app/static/use-tasks.js")
+    assert tasks.status_code == 200
+    assert 'aria-label="モデル"' in tasks.text and 'aria-label="推論の強さ"' in tasks.text
+    lenders = await admin.get("/app/static/use-lenders.js")
+    assert lenders.status_code == 200 and 'data-act="exec-mode"' in lenders.text
+    assert "毎回承認" in lenders.text
+
+
 async def test_invite_copy_feedback_is_served(admin):
-    r = await admin.get("/admin/static/app.js")
+    r = await admin.get("/app/static/use.js")
     assert r.status_code == 200
     assert "コピーしました" in r.text
 
 
-async def test_shared_ui_parts_are_served_next_to_the_admin_page(admin, public):
-    for name in ("ui.js", "ui.css", "demo.html"):
-        assert (await admin.get(f"/admin/common/{name}")).status_code == 200, name
-    js = (await admin.get("/admin/common/ui.js")).text
-    for part in ("meter", "stateBadge", "approvals", "taskList", "taskDetail", "choiceCards"):
-        assert part in js
-    assert "awaiting_lender" in js and "rejected_by_lender" in js
+async def test_app_assets_are_local_only_and_old_mounts_are_gone(admin, public):
     page = (await admin.get("/admin/")).text
-    assert "/admin/common/ui.js" in page and "/admin/common/ui.css" in page
-    assert (await public.get("/admin/common/ui.js")).status_code == 404
+    for name in ("ui.js", "ui.css", "app.js"):
+        path = f"/app/static/{name}"
+        assert path in page
+        assert (await admin.get(path)).status_code == 200
+        assert (await public.get(path)).status_code == 404
+    for prefix in ("/admin/static", "/admin/common"):
+        for name in ("index.html", "app.js", "ui.js", "ui.css", "app/index.html"):
+            assert (await admin.get(f"{prefix}/{name}")).status_code == 404
 
 
 async def test_mutation_requires_custom_header(admin):
@@ -151,13 +225,123 @@ async def test_invite_issue_and_revoke(admin, host):
     assert host.tokens.hashes() == set()
 
 
-async def test_pause_and_thresholds_and_visibility(admin, host):
+@pytest.mark.parametrize("connected", [False, True])
+async def test_revoked_lender_leaves_list_even_before_disconnect(admin, host, connected):
+    link = await join(host, "alice")
+    host.tokens.issue("bob")
+    tid = await host.mgr.start("残す依頼", lender="alice")
+    if not connected:
+        host.mgr.detach(link)
+    assert {r["name"] for r in (await admin.get("/admin/api/lenders")).json()} == {"alice", "bob"}
+    assert (await admin.delete("/admin/api/invites/alice", headers=H)).status_code == 200
+    rows = (await admin.get("/admin/api/lenders")).json()
+    assert [r["name"] for r in rows] == ["bob"]
+    assert host.mgr.result(tid)["lender"] == "alice"
+
+
+async def test_invite_policy_is_written_before_token_is_issued(admin, host, monkeypatch):
+    host.policy.update(exec_mode="all")
+    issue = host.tokens.issue
+
+    def checked_issue(name):
+        assert host.policy.current().exec_mode_for(name) == "ask"
+        return issue(name)
+
+    monkeypatch.setattr(host.tokens, "issue", checked_issue)
+    r = await admin.post("/admin/api/invites", json={"name": "alice"}, headers=H)
+    assert r.status_code == 200 and host.tokens.match(parse_invite(r.json()["code"]).token) == "alice"
+
+
+async def test_failed_invite_policy_write_does_not_issue_token(admin, host, monkeypatch):
+    host.policy.update(exec_mode="all")
+
+    def fail(*args):
+        raise OSError("policy write failed")
+
+    monkeypatch.setattr(host.policy, "set_lender_exec_mode", fail)
+    with pytest.raises(OSError, match="policy write failed"):
+        await admin.post("/admin/api/invites", json={"name": "alice"}, headers=H)
+    assert host.tokens.list() == []
+    assert host.policy.current().lender_exec_modes == {}
+
+
+async def test_pause(admin, host):
     await admin.post("/admin/api/pause", json={"paused": True}, headers=H)
     assert host.policy.current().paused is True
-    await admin.put("/admin/api/thresholds", json={"five_hour": 70}, headers=H)
-    assert (await admin.get("/admin/api/usage")).json()["thresholds"]["five_hour"] == 70
-    assert (await admin.put("/admin/api/log-visibility", json={"value": "all"}, headers=H)).status_code == 200
-    assert (await admin.put("/admin/api/log-visibility", json={"value": "x"}, headers=H)).status_code == 400
+
+
+async def test_removed_endpoints_404(admin):
+    for path, body in (("thresholds", {"five_hour": 70}), ("exec-mode", {"mode": "off"}),
+                       ("log-visibility", {"value": "all"})):
+        r = await admin.put(f"/admin/api/{path}", json=body, headers=H)
+        assert r.status_code == 404, path
+
+
+async def test_invite_sets_ask(admin, host):
+    await admin.post("/admin/api/invites", json={"name": "alice"}, headers=H)
+    assert host.policy.current().lender_exec_modes == {"alice": "ask"}
+    row = (await admin.get("/admin/api/lenders")).json()[0]
+    assert row["exec_mode"] == "ask"
+
+
+async def test_invite_keeps_existing_mode(admin, host):
+    host.policy.update(lender_exec_modes={"alice": "all"})
+    await admin.post("/admin/api/invites", json={"name": "alice"}, headers=H)
+    assert host.policy.current().lender_exec_modes == {"alice": "all"}
+
+
+async def test_reissue_invalidates_old_code(admin, host):
+    old = parse_invite((await admin.post("/admin/api/invites", json={"name": "alice"}, headers=H)).json()["code"])
+    r = await admin.post("/admin/api/invites/alice/reissue", headers=H)
+    assert r.status_code == 200
+    new = parse_invite(r.json()["code"])
+    assert new.token != old.token and new.name == "alice"
+    assert host.tokens.match(old.token) is None and host.tokens.match(new.token) == "alice"
+    assert host.policy.current().lender_exec_modes == {"alice": "ask"}  # settings are kept
+
+
+async def test_reissue_unknown_404(admin, host):
+    r = await admin.post("/admin/api/invites/nobody/reissue", headers=H)
+    assert r.status_code == 404
+    assert (await admin.post("/admin/api/invites/nobody/reissue")).status_code == 403
+
+
+async def test_lender_rows_have_new_fields(admin, host):
+    host.policy.update(lender_exec_modes={"alice": "all"}, lender_delete_approval={"alice": False})
+    host.tokens.issue("alice")
+    host.tokens.issue("bob")
+    host.policy.update(exec_mode="off")
+    assert (await admin.put("/admin/api/lenders/alice/log-visibility", json={"value": "files"}, headers=H)).status_code == 200
+    rows = {r["name"]: r for r in (await admin.get("/admin/api/lenders")).json()}
+    created = {i["name"]: i["created"] for i in host.tokens.list()}
+    assert rows["alice"]["exec_mode"] == "all" and rows["bob"]["exec_mode"] == "off"  # the effective mode
+    assert (rows["alice"]["delete_approval"], rows["bob"]["delete_approval"]) == (False, True)
+    assert (rows["alice"]["log_visibility"], rows["bob"]["log_visibility"]) == ("files", "summary")
+    assert rows["alice"]["invite_created"] == created["alice"] and isinstance(rows["bob"]["invite_created"], float)
+
+
+async def test_put_lender_delete_approval(admin, host):
+    host.tokens.issue("alice")
+    r = await admin.put("/admin/api/lenders/alice/delete-approval", json={"value": False}, headers=H)
+    assert r.status_code == 200 and host.policy.current().delete_approval_for("alice") is False
+    assert host.policy.current().delete_approval_for("bob") is True
+    for body in ({"value": "no"}, {"value": 0}, {}):
+        assert (await admin.put("/admin/api/lenders/alice/delete-approval", json=body, headers=H)).status_code == 400
+    assert (await admin.put("/admin/api/lenders/nobody/delete-approval", json={"value": True}, headers=H)).status_code == 404
+
+
+async def test_put_lender_log_visibility(admin, host):
+    host.tokens.issue("alice")
+    sent = []
+    async def send(m):
+        sent.append(m)
+    link = host.mgr.attach("alice", send)
+    await host.mgr.on_agent_message(link, {"type": "hello"})
+    r = await admin.put("/admin/api/lenders/alice/log-visibility", json={"value": "all"}, headers=H)
+    assert r.status_code == 200 and sent[-1]["type"] == "settings" and sent[-1]["log_visibility"] == "all"
+    assert (await admin.put("/admin/api/lenders/alice/log-visibility", json={"value": "x"}, headers=H)).status_code == 400
+    assert (await admin.put("/admin/api/lenders/nobody/log-visibility", json={"value": "all"}, headers=H)).status_code == 404
+    assert host.mgr.log_visibility_for("alice") == "all"
 
 
 async def test_overview(admin):
@@ -174,12 +358,16 @@ def store_bad_folder(host):
     return bad.as_posix()
 
 
-async def claude_call(admin, name, args):
+async def claude_result(admin, name, args):
     response = await admin.post("/claude/mcp", headers={"Accept": "application/json, text/event-stream"},
                                 json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                                       "params": {"name": name, "arguments": args}})
     assert response.status_code == 200, response.text
-    result = response.json()["result"]
+    return response.json()["result"]
+
+
+async def claude_call(admin, name, args):
+    result = await claude_result(admin, name, args)
     assert not result.get("isError"), result
     return json.loads(result["content"][0]["text"])
 
@@ -194,7 +382,7 @@ async def test_overview_reports_policy_problem(admin, host):
                 await claude_call(admin, "remove_shared_folder", {"path": bad})
 
 
-@pytest.mark.parametrize("operation", ["remove", "hidden", "inherit", "pause", "exec_mode"])
+@pytest.mark.parametrize("operation", ["remove", "hidden", "inherit", "pause", "exec_mode"])  # exec_mode: per lender
 async def test_bad_folder_can_be_removed_or_hidden(admin, host, operation):
     bad = store_bad_folder(host)
     if operation == "remove":
@@ -206,7 +394,8 @@ async def test_bad_folder_can_be_removed_or_hidden(admin, host, operation):
     elif operation == "pause":
         response = await admin.post("/admin/api/pause", headers=H, json={"paused": True})
     else:
-        response = await admin.put("/admin/api/exec-mode", headers=H, json={"mode": "off"})
+        host.tokens.issue("alice")
+        response = await admin.put("/admin/api/lenders/alice/exec-mode", headers=H, json={"mode": "off"})
     assert response.status_code == 200, response.text
 
 
@@ -262,16 +451,20 @@ def test_folder_write_probe_returns_quickly_when_acl_denies_writing(tmp_path, de
         # A child process lets the timeout kill the old retry loop without leaving
         # a spinning thread behind, even if an assertion fails before ACL cleanup.
         result = subprocess.run(
-            [sys.executable, "-c", "from pathlib import Path; import sys; "
+            [sys.executable, "-c", "from pathlib import Path; import json, sys, time; "
              "from codex_bridge.host.share import folder_is_writable; "
-             "print(folder_is_writable(Path(sys.argv[1])))", str(folder)],
-            capture_output=True, text=True, check=True, timeout=3)
+             "started = time.monotonic(); writable = folder_is_writable(Path(sys.argv[1])); "
+             "print(json.dumps([writable, time.monotonic() - started]))", str(folder)],
+            capture_output=True, text=True, check=True, timeout=20)
+        # Time the probe itself, independently of interpreter/import startup under Windows load.
+        writable, elapsed = json.loads(result.stdout)
+        assert elapsed < 3, f"folder write probe took {elapsed:.2f}s"
         if denied_rights == "W":
-            assert result.stdout.strip() == "False"
+            assert writable is False
         else:
             # A newly opened DELETE_ON_CLOSE handle can clean itself up even if
             # ordinary deletion is denied. Either result must leave no probe.
-            assert result.stdout.strip() in ("True", "False")
+            assert isinstance(writable, bool)
     finally:
         restored = subprocess.run([icacls, str(folder), "/remove:d", f"*{sid}"],
                                   capture_output=True, text=True, errors="replace", timeout=10)
@@ -332,107 +525,6 @@ def test_folder_write_probe_cleans_up_after_close_error(tmp_path, monkeypatch):
     monkeypatch.setattr("codex_bridge.host.share.os.close", failed_close)
     assert not folder_is_writable(tmp_path)
     assert list(tmp_path.iterdir()) == []
-
-
-async def test_policy_problem_and_write_warning_banners(admin):
-    page = (await admin.get("/admin/")).text
-    assert 'class="banner" id="policy-problem" role="alert" hidden' in page
-    assert 'class="banner warn" id="folder-warning" role="status" hidden' in page
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("Node.js is required to exercise the admin JavaScript without a browser")
-    script = r'''
-const fs = require("node:fs"), vm = require("node:vm"), assert = require("node:assert/strict");
-const elements = new Map(), calls = [];
-let confirmed = false, warning = "";
-const element = (id) => {
-  if (!elements.has(id)) elements.set(id, {hidden: true, textContent: "", innerHTML: "", addEventListener() {}});
-  return elements.get(id);
-};
-const context = vm.createContext({
-  document: {getElementById: element, querySelectorAll: () => []},
-  localStorage: {getItem: () => null},
-  UI: {esc: (s) => String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}[c]))},
-  confirm: () => confirmed,
-  fetch: async (url, options) => { calls.push([url, JSON.parse(options.body)]); return {ok:true, json: async () => ({warning})}; },
-  console, setTimeout, clearTimeout,
-});
-vm.runInContext(fs.readFileSync(process.argv[2], "utf8").split("// ---- start ")[0], context);
-vm.runInContext(`
-  permForm = {folders: []}; collectForm = () => permForm; permSaved = JSON.stringify(permForm);
-  loadPermissions = async () => {}; refreshTop = async () => {};
-`, context);
-(async () => {
-  const problems = [{folder:'C:/work/<img src=x onerror="oops">', reason:'contains_data_dir'},
-                    {folder:'D:/other', reason:'contains_data_dir'}];
-  context.problems = problems;
-  vm.runInContext("renderPolicyProblems(problems)", context);
-  const banner = element("policy-problem");
-  assert.equal(banner.hidden, false);
-  assert.ok(banner.innerHTML.includes("共有フォルダの設定に、codex-bridge 自身のデータ（設定と記録）を含むフォルダがあります: "));
-  assert.ok(banner.innerHTML.includes("。このままでは安全のため一部の操作ができないことがあります。"));
-  assert.equal((banner.innerHTML.match(/このフォルダを共有から外す/g) || []).length, 2);
-  assert.ok(!banner.innerHTML.includes("<img"));
-  const click = {target:{closest: () => ({dataset:{removeFolder:problems[1].folder}})}};
-  await banner.onclick(click);
-  assert.equal(calls.length, 0);
-  confirmed = true;
-  await banner.onclick(click);
-  assert.equal(calls[0][0], "/admin/api/folders/remove");
-  assert.equal(calls[0][1].path, problems[1].folder);
-  vm.runInContext("renderPolicyProblems([])", context);
-  assert.equal(banner.hidden, true);
-  assert.equal(banner.innerHTML, "");
-  warning = "このフォルダは、今のユーザーの権限では書き込めません。Codex が書こうとしても Windows に断られます。";
-  await vm.runInContext('folderOp("add", {path:"D:/other", level:"write"})', context);
-  assert.equal(element("folder-warning").hidden, false);
-  assert.equal(element("folder-warning").textContent, warning);
-  assert.equal(element("fd-msg").textContent, warning + ": D:/other");
-  warning = "";
-  await vm.runInContext('folderOp("add", {path:"D:/safe", level:"write"})', context);
-  assert.equal(element("folder-warning").hidden, true);
-  assert.equal(element("fd-msg").textContent, "");
-})().catch((e) => { console.error(e); process.exitCode = 1; });
-'''
-    source = Path(__file__).resolve().parents[2] / "src/codex_bridge/host/web/static/app.js"
-    result = subprocess.run([node, "-", str(source)], input=script, text=True, encoding="utf-8",
-                            capture_output=True, timeout=20)
-    assert result.returncode == 0, result.stderr
-
-
-def test_task_detail_requester_label_preserves_host_default_and_escaping():
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("Node.js is required to exercise the shared task detail without a browser")
-    script = r'''
-const fs = require("node:fs"), vm = require("node:vm"), assert = require("node:assert/strict");
-const element = () => {
-  const parts = new Map();
-  return {classList: {add() {}, toggle() {}}, innerHTML: "", textContent: "", scrollHeight: 0, clientHeight: 0,
-    setAttribute() {}, querySelectorAll: () => [],
-    querySelector(selector) {
-      if (!parts.has(selector)) parts.set(selector, element());
-      return parts.get(selector);
-    }};
-};
-const context = vm.createContext({});
-vm.runInContext(fs.readFileSync(process.argv[2], "utf8") + "; globalThis.sharedUI = UI;", context);
-const el = element(), task = {task_id:"t", state:"completed", lender:'<img src=x>', prompt:'<script>remote</script>', events:[]};
-const sum = () => el.querySelector('[data-td="sum"]').innerHTML;
-context.sharedUI.taskDetail(el, task, {showLender:true});
-assert.ok(sum().includes("<b>担当</b>"));
-assert.ok(sum().includes("&lt;img src=x&gt;"));
-context.sharedUI.taskDetail(el, task, {showLender:true, lenderLabel:"依頼主"});
-assert.ok(sum().includes("<b>依頼主</b>"));
-assert.ok(!sum().includes("<b>担当</b>"));
-assert.equal(el.querySelector('[data-td="prompt"]').textContent, task.prompt);
-context.sharedUI.taskDetail(el, task, {showLender:true, lenderLabel:"<script>label</script>"});
-assert.ok(!sum().includes("<script>"));
-'''
-    source = Path(__file__).resolve().parents[2] / "src/codex_bridge/common/web/ui.js"
-    result = subprocess.run([node, "-", str(source)], input=script, text=True, encoding="utf-8",
-                            capture_output=True, timeout=20)
-    assert result.returncode == 0, result.stderr
 
 
 def test_first_run_writes_sample_configs(tmp_path):
@@ -505,6 +597,83 @@ async def test_folder_add_remove_main_api(admin, host, tmp_path):
     assert (await admin.post("/admin/api/folders/add", json={"path": str(tmp_path), "level": "read"}, headers=H)).status_code == 400
 
 
+async def test_folder_api_during_task(admin, host, tmp_path):
+    from codex_bridge.host.tasks import TaskRecord
+
+    host.mgr.tasks["t1"] = TaskRecord(task_id="t1", prompt="p", created=0, state="running")
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    body = {"path": str(extra)}
+    assert (await admin.post("/admin/api/folders/add", json=body, headers=H)).status_code == 200
+    response = await admin.post("/admin/api/folders/main", json=body, headers=H)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "作業中はメインのフォルダを切り替えられません。終わってから切り替えてください"
+    assert (await admin.post("/admin/api/folders/remove", json=body, headers=H)).status_code == 200
+
+
+@pytest.mark.parametrize("via", ["api", "mcp"])
+async def test_main_removal_during_task_reports_busy(admin, host, tmp_path, via):
+    from codex_bridge.host.share import add_shared_folder
+    from codex_bridge.host.tasks import TaskRecord
+
+    original = host.paths.root
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    add_shared_folder(host, extra.as_posix())
+    folders = host.paths.roots()
+    host.mgr.tasks["t1"] = task = TaskRecord(task_id="t1", prompt="p", created=0, state="running")
+
+    async def remove(path):
+        body = {"path": path.as_posix()}
+        if via == "api":
+            return await admin.post("/admin/api/folders/remove", headers=H, json=body)
+        return await claude_result(admin, "remove_shared_folder", body)
+
+    async with running(host.claude_ep):
+        response = await remove(original)
+        message = "作業中はメインのフォルダを外せません（メインのフォルダが共有から外れるため）。終わってから外してください"
+        if via == "api":
+            assert response.status_code == 409
+            assert response.json()["detail"] == message
+        else:
+            assert response["isError"]
+            assert response["content"][0]["text"] == message
+        assert host.paths.root == original
+        assert host.paths.roots() == folders
+
+        spare = tmp_path / "spare"
+        spare.mkdir()
+        add_shared_folder(host, spare.as_posix())
+        response = await remove(spare)
+        assert (response.status_code == 200 if via == "api" else not response.get("isError"))
+        assert host.paths.level_of(spare) is None
+        assert host.paths.root == original
+
+        task.state = "completed"
+        response = await remove(original)
+        assert (response.status_code == 200 if via == "api" else not response.get("isError"))
+    assert host.paths.root == extra.resolve()
+
+
+async def test_undo_api_reports_removed_share(admin, host, tmp_path):
+    from codex_bridge.host.share import add_shared_folder, remove_shared_folder
+    from codex_bridge.host.tasks import TaskRecord
+
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    add_shared_folder(host, str(extra), "write")
+    target = extra / "changed.txt"
+    host.snapshots.before_change("t1", target.as_posix(), target)
+    target.write_text("changed", encoding="utf-8")
+    host.mgr.tasks["t1"] = TaskRecord(task_id="t1", prompt="p", created=0, state="completed")
+    remove_shared_folder(host, str(extra))
+
+    response = await admin.post("/admin/api/tasks/t1/undo", headers=H)
+    assert response.status_code == 400
+    assert response.json()["detail"] == f"書き込めない場所のファイルは元に戻せません（共有を外した・読むだけや見せないに変えた）: {target}"
+    assert target.read_text(encoding="utf-8") == "changed"
+
+
 async def test_change_share_root_rejects_bad_paths(admin, host, tmp_path):
     assert (await admin.put("/admin/api/share-root", json={"path": str(tmp_path / "nope")}, headers=H)).status_code == 400
     # the data folder must stay outside the share
@@ -552,6 +721,39 @@ async def test_send_followup_and_cancel_from_admin(admin, host):
                                            "thread_id": "th", "report": "ok"})
     r = await admin.post("/admin/api/tasks", json={"prompt": "next", "continue_task_id": tid}, headers=H)
     assert r.status_code == 200 and sent[-1]["continue_thread_id"] == "th"
+
+
+@pytest.mark.parametrize("spec, model, effort", [({"model": "m1"}, "m1", None),
+                                                ({"effort": "high"}, None, "high"),
+                                                ({"model": "m1", "effort": "high"}, "m1", "high"),
+                                                ({"model": "", "effort": ""}, None, None)])
+async def test_admin_send_task_with_model(admin, host, spec, model, effort):
+    sent = []
+
+    async def send(msg):
+        sent.append(msg)
+    await join(host, "friend", send, protocol=3, capabilities={"model_select": True},
+               models=[{"model": "m1", "efforts": ["low", "high"], "is_default": True}], max_effort="xhigh")
+    r = await admin.post("/admin/api/tasks", json={"prompt": "x", **spec}, headers=H)
+    assert r.status_code == 200, r.text
+    rec = host.mgr.tasks[r.json()["task_id"]]
+    assert rec.origin == "admin" and rec.model == model and rec.effort == effort
+    assert r.json() == {"task_id": rec.task_id, "lender": "friend", "model": model, "effort": effort,
+                        "exec_mode": None, "deny": [], "ask": [], "effective_exec_mode": "allowlist"}
+    for key, value in (("model", model), ("effort", effort)):
+        if value is None:
+            assert key not in sent[-1]
+        else:
+            assert sent[-1][key] == value
+
+
+@pytest.mark.parametrize("field", ["model", "effort"])
+@pytest.mark.parametrize("value", [3, None, False, [], {}])
+async def test_admin_send_task_bad_model_type(admin, host, field, value):
+    r = await admin.post("/admin/api/tasks", json={"prompt": "x", field: value}, headers=H)
+    assert r.status_code == 400
+    assert r.json()["detail"] == "モデルと推論の強さは名前で指定してください"
+    assert host.mgr.tasks == {}
 
 
 async def test_task_detail_has_what_the_page_shows(admin, host):
@@ -659,9 +861,9 @@ async def test_lenders_api_lists_each_lender(admin, host):
     # everything the table of lenders shows (design 3.2)
     assert a["connected"] is True and a["ready"] is True and a["current_task_id"] == tid
     assert a["usage"]["five_hour"]["used_percent"] == 60 and a["usage"]["weekly"] is None
-    assert a["usage"]["thresholds"] == {"five_hour": 90, "weekly": 95} and a["usage"]["blocked_until"] is None
+    assert "thresholds" not in a["usage"] and a["usage"]["blocked_until"] is None
     assert a["limits"] == {"five_hour": 70, "weekly": None, "force": True}
-    assert a["capabilities"] == {"resumable": True, "pre_approval": False}
+    assert a["capabilities"] == {"resumable": True, "pre_approval": False, "model_select": False, "max_parallel": 1}
     assert (a["agent_version"], a["codex_version"], a["auth_mode"]) == ("0.2.0", "x", "chatgpt")
     assert b["current_task_id"] is None and b["capabilities"]["resumable"] is False
     assert (await admin.get("/admin/api/lenders", headers={"Host": "evil.example:8770"})).status_code == 403
@@ -697,6 +899,90 @@ async def test_lenders_api_survives_numbers_that_are_not_json(admin, host):
     assert (await admin.get("/admin/api/usage")).status_code == 200
 
 
+async def test_admin_task_exec_settings_are_guarded_and_partial(admin, host):
+    host.policy.update(lender_exec_modes={"friend": "all"})
+    link = await join(host, "friend")
+    reply = await admin.post("/admin/api/tasks", json={"prompt": "x", "exec_mode": "ask", "deny": ["echo x"]}, headers=H)
+    assert reply.status_code == 200 and reply.json()["effective_exec_mode"] == "ask"
+    task_id = reply.json()["task_id"]
+    url = f"/admin/api/tasks/{task_id}"
+    assert (await admin.put(f"{url}/exec", json={"exec_mode": "off"})).status_code == 403
+    reply = await admin.put(f"{url}/exec", json={"ask": ["echo y"], "exec_mode": "inherit"}, headers=H)
+    assert reply.status_code == 200
+    assert reply.json() == {"exec_mode": None, "deny": ["echo x"], "ask": ["echo y"], "effective_exec_mode": "all"}
+    detail = (await admin.get(url)).json()
+    assert all(detail[k] == v for k, v in reply.json().items())
+    invalid = await admin.put(f"{url}/exec", json={"deny": "echo z"}, headers=H)
+    assert invalid.status_code == 409 and (await admin.get(url)).json()["deny"] == ["echo x"]
+    await host.mgr.on_agent_message(link, {"type": "task_state", "task_id": task_id, "state": "completed"})
+    assert (await admin.put(f"{url}/exec", json={"deny": []}, headers=H)).status_code == 409
+
+
+@pytest.mark.parametrize("lender_mode, task_mode", [("all", "ask"), ("ask", "all"), ("allowlist", "ask")])
+async def test_task_exec_uses_stricter_mode(host, monkeypatch, lender_mode, task_mode):
+    host.policy.update(lender_exec_modes={"friend": lender_mode}, exec_allow=["echo *"],
+                       limits={"sync_wait_sec": 0})
+    await join(host, "friend")
+    task_id = await host.mgr.start("x", lender="friend", exec_mode=task_mode)
+    runner = host.services.runner
+    monkeypatch.setattr(runner, "lender_fn", lambda: "friend")
+    monkeypatch.setattr(runner, "task_id_fn", lambda: task_id)
+    reply = await runner.run_command("echo hello")
+    assert reply["status"] == "waiting_approval"
+    approval, = host.approvals.pending()
+    assert approval.task_id == task_id
+    host.approvals.decide(approval.id, False)
+    await runner.jobs[reply["job_id"]].done.wait()
+
+
+@pytest.mark.parametrize("changes", [{"deny": ["echo review"]}, {"exec_mode": "off"}])
+async def test_parallel_task_rules_and_approval_recheck(host, monkeypatch, changes):
+    from codex_bridge.host.codex_mcp import current_lender, current_thread_id
+
+    executed = []
+
+    async def execute(job, cwd, timeout):
+        executed.append((job.task_id, job.command))
+        job.status = "done"
+
+    host.policy.update(lender_exec_modes={"friend": "all"}, exec_deny=["echo shared"], limits={"sync_wait_sec": 0})
+    link = await join(host, "friend", protocol=5, capabilities={"max_parallel": 3})
+    first = await host.mgr.start("first", lender="friend", deny=["echo local"], ask=["echo review"])
+    second = await host.mgr.start("second", lender="friend")
+    for task_id, thread in [(first, "one"), (second, "two")]:
+        await host.mgr.on_agent_message(link, {"type": "task_state", "task_id": task_id, "state": "running",
+                                              "thread_id": thread})
+    runner = host.services.runner
+    monkeypatch.setattr(runner, "_execute", execute)
+
+    async def command(thread, value):
+        lender_token = current_lender.set("friend")
+        thread_token = current_thread_id.set(thread)
+        try:
+            reply = await runner.run_command(value)
+            job = runner.jobs[reply["job_id"]]
+            if job.status != "waiting_approval":
+                await job.done.wait()
+            return job
+        finally:
+            current_lender.reset(lender_token)
+            current_thread_id.reset(thread_token)
+
+    assert (await command("one", "echo local")).status == "denied"
+    assert (await command("two", "echo local")).status == "done"
+    assert (await command(None, "echo local")).status == "done"
+    assert (await command(None, "echo shared")).status == "denied"
+    waiting = await command("one", "echo review")
+    assert waiting.status == "waiting_approval"
+    assert (await command("two", "echo review")).status == "done"
+    host.mgr.set_task_exec(first, **changes)
+    host.approvals.decide(waiting.approval_id, True)
+    await waiting.done.wait()
+    assert waiting.status == "denied"
+    assert ("拒否リスト" if "deny" in changes else "off") in waiting.message
+    assert executed == [(second, "echo local"), (None, "echo local"), (second, "echo review")]
+
+
 async def test_send_task_to_a_chosen_lender(admin, host):
     sent = await two_lenders(host)
     r = await admin.post("/admin/api/tasks", json={"prompt": "one", "lender": "alice"}, headers=H)  # bob has more room
@@ -704,7 +990,7 @@ async def test_send_task_to_a_chosen_lender(admin, host):
     assert sent["alice"][-1]["type"] == "task_start" and sent["alice"][-1]["task_id"] == r.json()["task_id"]
     assert all(m["type"] != "task_start" for m in sent["bob"])
     r = await admin.post("/admin/api/tasks", json={"prompt": "two", "lender": "alice"}, headers=H)
-    assert r.status_code == 409 and "作業中" in r.json()["detail"]
+    assert r.status_code == 409 and "上限" in r.json()["detail"]
     r = await admin.post("/admin/api/tasks", json={"prompt": "two", "lender": "carol"}, headers=H)
     assert r.status_code == 409 and "接続されていません" in r.json()["detail"]
     assert (await admin.post("/admin/api/tasks", json={"prompt": "two", "lender": 5}, headers=H)).status_code == 400
@@ -742,3 +1028,97 @@ async def test_send_task_errors_are_readable(admin, host):
     r = await admin.post("/admin/api/tasks", json={"prompt": "x"}, headers=H)
     assert r.status_code == 409 and "接続されていません" in r.json()["detail"]
     assert (await admin.post("/admin/api/tasks", json={"prompt": "  "}, headers=H)).status_code == 400
+
+
+async def test_put_lender_exec_mode(admin, host, monkeypatch):
+    from codex_bridge.host.policy import EXEC_MODES
+    host.tokens.issue("alice")
+    host.tokens.issue("bob")
+    notices = []
+    monkeypatch.setattr(host.events, "notify", lambda: notices.append(True))
+    for mode in (*EXEC_MODES, "inherit"):
+        r = await admin.put("/admin/api/lenders/alice/exec-mode", json={"mode": mode}, headers=H)
+        assert r.status_code == 200 and r.json() == {"ok": True}
+        expected = {} if mode == "inherit" else {"alice": mode}
+        assert host.policy.current().lender_exec_modes == expected
+        assert (await admin.get("/admin/api/overview")).json()["lender_exec_modes"] == expected
+        rows = (await admin.get("/admin/api/lenders")).json()
+        global_mode = host.policy.current().exec_mode  # effective: the lender's own, else the global one
+        assert {r["name"]: r["exec_mode"] for r in rows} == {"alice": expected.get("alice", global_mode),
+                                                              "bob": global_mode}
+    assert len(notices) == 5
+    for body in ({"mode": "bad"}, {"mode": False}, {"mode": []}, {}):
+        r = await admin.put("/admin/api/lenders/alice/exec-mode", json=body, headers=H)
+        assert r.status_code == 400 and "mode" in r.json()["detail"]
+    assert len(notices) == 5
+    assert host.policy.current().lender_exec_modes == {}
+    assert (await admin.put("/admin/api/lenders/alice/exec-mode", json={"mode": "all"})).status_code == 403
+
+
+async def test_put_lender_exec_mode_unknown_name_404(admin, host):
+    r = await admin.put("/admin/api/lenders/missing/exec-mode", json={"mode": "off"}, headers=H)
+    assert r.status_code == 404
+    assert r.json()["detail"] == "その名前の招待コードがありません: missing"
+    assert host.policy.current().lender_exec_modes == {}
+
+
+@pytest.mark.parametrize("via", ["web", "mcp", "tokens"])
+async def test_revoke_clears_lender_mode(admin, host, via):
+    host.tokens.issue("alice")
+    host.tokens.issue("bob")
+    host.policy.update(lender_exec_modes={"alice": "off", "bob": "all"})
+    await host.mgr.set_log_visibility("all", "alice")
+    await host.mgr.set_log_visibility("files", "bob")
+    host.tokens.issue("alice")  # rotating an invite keeps the override
+    assert host.policy.current().lender_exec_modes == {"alice": "off", "bob": "all"}
+    assert host.mgr.settings["lender_log_visibility"] == {"alice": "all", "bob": "files"}
+    if via == "web":
+        assert (await admin.delete("/admin/api/invites/alice", headers=H)).status_code == 200
+    elif via == "mcp":
+        async with running(host.claude_ep):
+            assert await claude_call(admin, "revoke_invite", {"name": "alice"}) == {"ok": True}
+    else:
+        host.tokens.revoke("alice")
+    assert host.policy.current().lender_exec_modes == {"bob": "all"}
+    assert host.mgr.settings["lender_log_visibility"] == {"bob": "files"}
+    assert json.loads(host.mgr.settings_path.read_text(encoding="utf-8"))["lender_log_visibility"] == {"bob": "files"}
+    host.tokens.issue("alice")
+    assert host.policy.current().exec_mode_for("alice") == host.policy.current().exec_mode
+    assert host.mgr.log_visibility_for("alice") == host.mgr.settings["log_visibility"]
+
+
+async def test_policy_form_save_keeps_lender_exec_modes(admin, host):
+    host.policy.update(lender_exec_modes={"alice": "off", "bob": "all"})
+    form = (await admin.get("/admin/api/policy-form")).json()
+    assert form["lender_exec_modes"] == {"alice": "off", "bob": "all"}
+    host.tokens.issue("alice")
+    changed = await admin.put("/admin/api/lenders/alice/exec-mode", json={"mode": "ask"}, headers=H)
+    assert changed.status_code == 200
+    form.pop("lender_exec_modes")
+    form["exec"]["mode"] = "ask"
+    r = await admin.put("/admin/api/policy-form", json=form, headers=H)
+    assert r.status_code == 200, r.text
+    assert host.policy.current().lender_exec_modes == {"alice": "ask", "bob": "all"}
+
+
+async def test_shared_command_rules_page_has_no_global_lender_settings(admin):
+    response = await admin.get("/app/static/use-pages.js")
+    assert response.status_code == 200
+    rules = response.text.split("export function rulesHtml(form) {", 1)[1].split("export function", 1)[0]
+    assert 'data-act="rule-text"' in rules
+    assert 'data-act="allow-confirm"' in rules
+    for setting in ("exec-mode", "delete-approval", "log-files", "log-result", "threshold"):
+        assert f'data-act="{setting}"' not in rules
+
+
+async def test_admin_overview_lists_every_active_task_and_keeps_first(host, admin):
+    host.tokens.issue("friend")
+
+    async def send(message):
+        pass
+
+    link = host.mgr.attach("friend", send)
+    await host.mgr.on_agent_message(link, {"type": "hello", "protocol": 5, "capabilities": {"max_parallel": 3}})
+    ids = [await host.mgr.start("first"), await host.mgr.start("second")]
+    overview = (await admin.get("/admin/api/overview")).json()
+    assert overview["active_task_ids"] == ids and overview["current_task"] == ids[0]

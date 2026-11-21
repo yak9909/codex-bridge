@@ -16,7 +16,7 @@ class ToolError(Exception):
 
 
 PAUSED_MSG = "停止中です（管理者が一時停止しています）"
-UNSET_SHARE_MSG = "共有フォルダがまだ設定されていません。管理画面で選んでください。"
+UNSET_SHARE_MSG = "共有フォルダがまだ設定されていません。「使う」タブで選んでください。"
 
 
 def not_found(rel: str) -> ToolError:
@@ -362,7 +362,8 @@ class SafePaths:
             excludes.extend(["!/" + pattern, "!/" + pattern + "/**"])
         return excludes
 
-    def walk(self, root: Path, need: Literal["read", "write"]) -> Iterator[tuple[Path, os.DirEntry]]:
+    def walk(self, root: Path, need: Literal["read", "write"], *,
+             policy: Policy | None = None) -> Iterator[tuple[Path, os.DirEntry]]:
         """Yield (file path, cached directory entry), in find_files order.
 
         Keep both the requested and real namespace. Only roots and reparse links
@@ -370,7 +371,7 @@ class SafePaths:
         Directory symlinks are not followed (as with os.walk); junctions are, with
         an ancestor guard to stop cycles. Internal outputs are never enumerated.
         """
-        rules = _WalkPolicy(self.policy.current(), self._fallback_root)
+        rules = _WalkPolicy(policy if policy is not None else self.policy.current(), self._fallback_root)
         root = Path(os.path.abspath(root))
         try:
             real = root.resolve(strict=False)

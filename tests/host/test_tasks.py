@@ -43,6 +43,229 @@ async def agent(mgr):
     return a
 
 
+@pytest.fixture
+async def model_agent(mgr):
+    a = FakeAgent(mgr)
+    await a.push("hello", protocol=3, capabilities={"model_select": True},
+                 models=[{"model": "m1", "efforts": ["low", "high"], "is_default": True}], max_effort="xhigh")
+    return a
+
+
+async def test_hello_models_shown_in_lenders(mgr, model_agent):
+    row = mgr.lenders()[0]
+    assert row["models"][0]["model"] == "m1" and row["max_effort"] == "xhigh"
+    assert mgr.agent_info()["models"] == row["models"]
+    assert mgr.agent_info()["max_effort"] == "xhigh"
+    await model_agent.push("hello", protocol=2, capabilities={"resumable": True})
+    assert mgr.lenders()[0]["models"] is None and mgr.lenders()[0]["max_effort"] is None
+
+
+async def test_lender_models_message_updates_offer(mgr, model_agent):
+    changes = []
+    mgr.on_change.append(lambda: changes.append(mgr.lenders()[0]))
+    await model_agent.push("lender_models", models=[None, {"model": 7},
+                           {"model": "m2", "efforts": ["low", 3, "low"], "is_default": True}], max_effort="high")
+    assert len(changes) == 1
+    assert changes[0]["models"] == [{"model": "m2", "name": "m2", "efforts": ["low"],
+                                     "default_effort": None, "is_default": True}]
+    assert changes[0]["max_effort"] == "high"
+    await model_agent.push("lender_models", models={}, max_effort=3)
+    assert len(changes) == 2 and changes[-1]["models"] is None and changes[-1]["max_effort"] is None
+
+
+VIEW = {"features": {"web_search": True, "image_generation": False, "multi_agent": False, "goals": True},
+        "pre_approval": {"new_task": True, "followup": False, "timeout_min": 30},
+        "resumable": True, "over_limit": "stop", "max_effort": "high", "max_parallel": 1,
+        "models_all": [{"model": "m1", "allowed": True, "is_default": True},
+                       {"model": "m2", "allowed": False, "is_default": False}]}
+
+
+async def test_lender_view_normalized(mgr):
+    a = FakeAgent(mgr)
+    await a.push("hello", protocol=4, lender_view={**VIEW, "extra": 1, "features": {**VIEW["features"], "x": True}})
+    assert mgr.lenders()[0]["lender_view"] == VIEW
+    await a.push("lender_models", models=[], max_effort="high",
+                 lender_view={**VIEW, "over_limit": "report", "models_all": None, "pre_approval": {
+                     "new_task": False, "followup": True, "timeout_min": None}})
+    view = mgr.lenders()[0]["lender_view"]
+    assert view["over_limit"] == "report" and view["models_all"] is None
+    assert view["pre_approval"] == {"new_task": False, "followup": True, "timeout_min": None}
+
+
+async def test_lender_view_missing_is_none(mgr):
+    a = FakeAgent(mgr)
+    await a.push("hello", protocol=3, capabilities={"model_select": True}, models=[], max_effort="xhigh")
+    assert mgr.lenders()[0]["lender_view"] is None
+    assert mgr.lenders(["never"])[-1]["lender_view"] is None
+
+
+@pytest.mark.parametrize("bad", [
+    "x", 5, [], {}, {**VIEW, "features": "x"}, {**VIEW, "features": {"web_search": "yes"}},
+    {**VIEW, "pre_approval": {"new_task": 1, "followup": False, "timeout_min": 30}},
+    {**VIEW, "pre_approval": {"new_task": True, "followup": False, "timeout_min": True}},
+    {**VIEW, "over_limit": "maybe"}, {**VIEW, "max_effort": "huge"}, {**VIEW, "resumable": "yes"},
+    {**VIEW, "models_all": [1]}, {**VIEW, "models_all": "x"},
+    {**VIEW, "models_all": [{"model": "m", "allowed": "yes", "is_default": False}]},
+])
+async def test_lender_view_garbage_is_none(mgr, bad):
+    a = FakeAgent(mgr)
+    await a.push("hello", protocol=4, lender_view=VIEW)
+    assert mgr.lenders()[0]["lender_view"] == VIEW
+    await a.push("lender_models", models=[], max_effort="high", lender_view=bad)  # never an exception
+    assert mgr.lenders()[0]["lender_view"] is None
+    await a.push("hello", protocol=4, lender_view=bad)
+    assert mgr.lenders()[0]["lender_view"] is None
+
+
+async def test_start_sends_model_and_effort(mgr, model_agent):
+    tid = await mgr.start("do it", model="m1", effort="high", origin="claude", session="caller-session")
+    msg = model_agent.last("task_start")
+    assert msg["model"] == "m1" and msg["effort"] == "high"
+    rec = mgr.tasks[tid]
+    assert (rec.origin, rec.session, rec.model, rec.effort) == ("claude", "caller-session", "m1", "high")
+    expected = {"origin": "claude", "model": "m1", "effort": "high", "actual_model": None,
+                "actual_effort": None, "rerouted": None}
+    for row in (mgr.status(tid), mgr.result(tid), mgr.list_tasks()[0]):
+        assert {k: row[k] for k in expected} == expected
+
+
+async def test_start_without_spec_sends_no_model_keys(mgr, model_agent):
+    await mgr.start("do it")
+    assert "model" not in model_agent.last("task_start")
+    assert "effort" not in model_agent.last("task_start")
+
+
+@pytest.mark.parametrize("model, effort", [("m2", None), ("m1", "ultra")])
+@pytest.mark.parametrize("busy", [False, True])
+async def test_named_lender_refuses_unoffered_model(mgr, model_agent, model, effort, busy):
+    if busy:
+        await mgr.start("already working")
+    with pytest.raises(ToolError, match="使えるモデルと推論の強さ"):
+        await mgr.start("do it", lender="friend", model=model, effort=effort)
+    assert len(mgr.tasks) == int(busy)
+
+
+async def test_v02_lender_refuses_model(mgr, agent):
+    await agent.push("hello", protocol=2, capabilities={"resumable": True})
+    with pytest.raises(ToolError, match="v0.2 以前"):
+        await mgr.start("do it", lender="friend", model="m1")
+    assert mgr.tasks == {}
+
+
+async def test_auto_pick_only_among_accepting(mgr):
+    a, b = FakeAgent(mgr, "A"), FakeAgent(mgr, "B")
+    for agent, model, used in ((a, "m1", 10), (b, "m2", 60)):
+        await agent.push("hello", protocol=3, capabilities={"model_select": True},
+                         models=[{"model": model, "efforts": ["low", "high"], "is_default": True}],
+                         max_effort="xhigh")
+        await agent.push("usage", **usage(five_hour=used))
+    tid = await mgr.start("do it", model="m2")
+    assert mgr.tasks[tid].lender == "B" and b.last("task_start")["model"] == "m2"
+    assert "effort" not in b.last("task_start")
+    assert not [m for m in a.sent if m["type"] == "task_start"]
+
+
+@pytest.mark.parametrize("model, effort", [("m2", None), (None, "ultra")])
+async def test_auto_pick_none_accepting_names_reasons(mgr, model_agent, model, effort):
+    old = FakeAgent(mgr, "old")
+    await old.push("hello", protocol=2)
+    with pytest.raises(ToolError) as exc:
+        await mgr.start("do it", model=model, effort=effort)
+    assert str(exc.value) == (
+        "指定のモデル（" + (model or "既定") + "）と推論の強さ（" + (effort or "既定")
+        + "）を使わせている人が、接続中の中にいません。"
+        "「friend」は、指定のモデルと推論の強さを使わせていません。"
+        "この人が使えるモデルと推論の強さ: m1（low・high） "
+        "「old」の exe は v0.2 以前のため、モデルと推論の強さを指定できません。")
+    assert mgr.tasks == {}
+
+
+@pytest.mark.parametrize("spec, expected", [({}, {"model": "m1", "effort": "high"}),
+                                           ({"model": "m1"}, {"model": "m1", "effort": None}),
+                                           ({"effort": "low"}, {"model": None, "effort": "low"})])
+async def test_continuation_inherits_model(mgr, model_agent, spec, expected):
+    first = await mgr.start("first", model="m1", effort="high")
+    await model_agent.push("event", task_id=first, kind="model", data={"model": "m9", "effort": "low"})
+    await model_agent.finish(first)
+    tid = await mgr.start("next", continue_task_id=first, **spec)
+    assert model_agent.last("task_start")["continue_thread_id"] == "th1"
+    for key, value in expected.items():
+        assert mgr.result(tid)[key] == value
+        if value is None:
+            assert key not in model_agent.last("task_start")
+        else:
+            assert model_agent.last("task_start")[key] == value
+
+
+async def test_continuation_rechecks_model_offer_before_busy(mgr, model_agent):
+    tid = await mgr.start("first", model="m1", effort="high")
+    await model_agent.finish(tid)
+    await model_agent.push("lender_models", models=[], max_effort="xhigh")
+    await mgr.start("already working")
+    with pytest.raises(ToolError, match="使えるモデルと推論の強さ"):
+        await mgr.start("next", continue_task_id=tid)
+
+
+async def test_model_event_sets_actual_and_rerouted(mgr, model_agent):
+    tid = await mgr.start("do it", model="m1", effort="high")
+    other = FakeAgent(mgr, "other")
+    await other.push("event", task_id=tid, kind="model", data={"model": "wrong"})
+    assert mgr.result(tid)["actual_model"] is None and mgr.events(tid) == []
+    data = {"model": "m9", "effort": "high", "rerouted_from": "m1", "reason": "x"}
+    await model_agent.push("event", task_id=tid, kind="model", data=data)
+    expected = {"model": "m1", "effort": "high", "actual_model": "m9", "actual_effort": "high",
+                "rerouted": {"from": "m1", "reason": "x"}}
+    for row in (mgr.result(tid), mgr.status(tid), mgr.list_tasks()[0]):
+        assert {k: row[k] for k in expected} == expected
+    assert mgr.events(tid)[0]["kind"] == "model" and mgr.events(tid)[0]["data"] == data
+    for invalid in (None, [], "model", {}, {"model": 3, "effort": False, "rerouted_from": 5},
+                    {"model": "", "effort": "", "rerouted_from": ""}):
+        await model_agent.push("event", task_id=tid, kind="model", data=invalid)
+        assert {k: mgr.result(tid)[k] for k in expected} == expected
+    await model_agent.push("event", task_id=tid, kind="model", data={"rerouted_from": "m2", "reason": 3})
+    assert mgr.result(tid)["rerouted"] == {"from": "m2", "reason": None}
+
+
+async def test_new_fields_survive_restart(tmp_path, mgr, model_agent):
+    tid = await mgr.start("do it", model="m1", effort="high", origin="codex", session="caller-session")
+    await model_agent.push("event", task_id=tid, kind="model",
+                           data={"model": "m9", "effort": "high", "rerouted_from": "m1", "reason": "x"})
+    mgr.tasks[tid].notified_final = True
+    mgr._save(mgr.tasks[tid])
+    again = TaskManager(tmp_path / "data", touched_fn=lambda tid: [])
+    rec = again.tasks[tid]
+    assert (rec.origin, rec.session, rec.model, rec.effort) == ("codex", "caller-session", "m1", "high")
+    assert (rec.actual_model, rec.actual_effort, rec.rerouted) == ("m9", "high", {"from": "m1", "reason": "x"})
+    assert rec.notified_final is True
+
+
+@pytest.mark.parametrize("state", protocol.FINAL_STATES)
+async def test_loaded_final_tasks_count_as_notified(tmp_path, mgr, model_agent, state):
+    completed = await mgr.start("completed")
+    await model_agent.push("task_state", task_id=completed, state=state)
+    running = await mgr.start("running")
+    await model_agent.push("task_state", task_id=running, state="running")
+    assert mgr.tasks[completed].notified_final is False
+    again = TaskManager(tmp_path / "data", touched_fn=lambda tid: [])
+    assert again.tasks[completed].notified_final is True
+    assert again.tasks[running].state == "agent_offline" and again.tasks[running].notified_final is False
+    assert json.loads((mgr.dir / f"{completed}.json").read_text(encoding="utf-8"))["notified_final"] is False
+
+
+@pytest.mark.parametrize("rerouted, expected", [(None, None), ([], None), ({"from": 3}, None),
+                                               ({"from": "m1", "reason": 3}, {"from": "m1", "reason": None})])
+@pytest.mark.parametrize("notified, expected_notified", [(True, True), (1, False), ("true", False), (False, False)])
+def test_loaded_new_fields_are_validated(tmp_path, rerouted, expected, notified, expected_notified):
+    tasks = tmp_path / "data" / "tasks"
+    tasks.mkdir(parents=True)
+    raw = {"task_id": "t1", "state": "running", "origin": 3, "session": [], "model": False, "effort": {},
+           "actual_model": 5, "actual_effort": True, "rerouted": rerouted, "notified_final": notified}
+    (tasks / "t1.json").write_text(json.dumps(raw), encoding="utf-8")
+    rec = TaskManager(tmp_path / "data", touched_fn=lambda tid: []).tasks["t1"]
+    assert (rec.origin, rec.session, rec.model, rec.effort, rec.actual_model, rec.actual_effort) == (None,) * 6
+    assert rec.rerouted == expected and rec.notified_final is expected_notified
+
+
 def usage(five_hour=None, weekly=None, resets_at=1_800_000_000):
     w = lambda p: None if p is None else {"used_percent": p, "resets_at": resets_at}
     return {"five_hour": w(five_hour), "weekly": w(weekly), "ts": 0}
@@ -57,6 +280,24 @@ async def test_start_sends_task_and_tracks_state(mgr, agent):
     assert mgr.status(tid)["state"] == "running"
 
 
+async def test_task_sent_logged(mgr, agent):
+    lines = []
+    mgr.log = lambda level, text: lines.append((level, text))
+    tid = await mgr.start("secret prompt")
+    await agent.push("task_state", task_id=tid, state="failed", report="x")
+    assert (("info", f"{tid} を friend に送りました")) in lines
+    assert ("error", f"{tid} が終わりました（failed）") in lines
+    assert not any("secret prompt" in t for _, t in lines)
+
+
+def test_lender_connect_logged(mgr):
+    lines = []
+    mgr.log = lambda level, text: lines.append((level, text))
+    link = mgr.attach("friend", lambda m: None)
+    mgr.detach(link)
+    assert lines == [("warn", "friend とつながりました"), ("warn", "friend との接続が切れました")]
+
+
 async def test_no_agent_is_clear_error(mgr):
     with pytest.raises(ToolError, match="接続されていません"):
         await mgr.start("a")
@@ -64,21 +305,19 @@ async def test_no_agent_is_clear_error(mgr):
 
 async def test_one_task_at_a_time(mgr, agent):
     await mgr.start("a")
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("b")
 
 
 async def test_quota_blocks_new_tasks(mgr, agent):
-    await agent.push("usage", **usage(five_hour=95))
+    await agent.push("usage", **usage(five_hour=95), friend_limits={"five_hour": 90})
     with pytest.raises(ToolError, match="再開可能"):
         await mgr.start("a")
 
 
-async def test_quota_threshold_is_configurable(mgr, agent):
-    await agent.push("usage", **usage(five_hour=95))
-    await mgr.set_thresholds(five_hour=99, weekly=None)
+async def test_no_own_limit_never_blocks(mgr, agent):
+    await agent.push("usage", **usage(five_hour=99))
     assert await mgr.start("a")
-    assert agent.last("settings")["thresholds"] == {"five_hour": 99, "weekly": 95}
 
 
 async def test_completed_task_result(mgr, agent):
@@ -177,6 +416,55 @@ async def test_hello_triggers_settings(mgr, agent):
     assert mgr.agent_info()["auth_mode"] == "chatgpt"
 
 
+async def test_log_visibility_per_lender(tmp_path, mgr):
+    yamada, suzuki = FakeAgent(mgr, "yamada"), FakeAgent(mgr, "suzuki")
+    for a in (yamada, suzuki):
+        await a.push("hello", agent_version="0.3.0", codex_version="x", auth_mode="chatgpt")
+    await mgr.set_log_visibility("all", "yamada")
+    assert yamada.last("settings")["log_visibility"] == "all" and yamada.last("settings")["thresholds"] == {}
+    assert len(suzuki.sent) == 1  # nobody else is told
+    await suzuki.push("hello", agent_version="0.3.0", codex_version="x", auth_mode="chatgpt")
+    assert suzuki.last("settings")["log_visibility"] == "summary" and suzuki.last("settings")["thresholds"] == {}
+    with pytest.raises(ToolError):
+        await mgr.set_log_visibility("everything", "yamada")
+    mgr2 = TaskManager(tmp_path / "data", touched_fn=lambda tid: [])
+    assert mgr2.log_visibility_for("yamada") == "all" and mgr2.log_visibility_for("suzuki") == "summary"
+
+
+async def test_old_default_log_visibility_applies_to_lenders_without_their_own(tmp_path):
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "settings.json").write_text(json.dumps({"log_visibility": "files"}), encoding="utf-8")
+    mgr = TaskManager(tmp_path / "data", touched_fn=lambda tid: [])
+    assert mgr.log_visibility_for("anyone") == "files"
+    await mgr.set_log_visibility("all", "yamada")
+    assert mgr.log_visibility_for("yamada") == "all" and mgr.log_visibility_for("suzuki") == "files"
+
+
+async def test_lender_without_own_limit_counts_as_100_when_routing(mgr):
+    a, b = FakeAgent(mgr, "alice"), FakeAgent(mgr, "bob")
+    await a.push("hello", agent_version="0.2.0", codex_version="x", auth_mode="chatgpt")
+    await b.push("hello", agent_version="0.2.0", codex_version="x", auth_mode="chatgpt",
+                 limits={"five_hour": 50})
+    await a.push("usage", **usage(five_hour=10))  # 90 left of the implicit 100
+    await b.push("usage", **usage(five_hour=45))  # 5 left of 50
+    assert mgr.tasks[await mgr.start("one")].lender == "alice"
+
+
+async def test_old_saved_thresholds_load(tmp_path):
+    from codex_bridge.host.lenders import Lender
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "settings.json").write_text(
+        json.dumps({"thresholds": {"five_hour": 50}, "log_visibility": "summary"}), encoding="utf-8")
+    mgr = TaskManager(tmp_path / "data", touched_fn=lambda tid: [])
+    assert "thresholds" not in mgr.settings
+    agent = FakeAgent(mgr)
+    await agent.push("hello", agent_version="0.2.0", codex_version="x", auth_mode="chatgpt")
+    await agent.push("usage", **usage(five_hour=60))  # 60% with no own limit is available
+    assert await mgr.start("a")
+    mgr._save_settings()
+    assert "thresholds" not in json.loads((tmp_path / "data" / "settings.json").read_text(encoding="utf-8"))
+
+
 async def test_restarted_agent_without_task_fails_orphan(mgr, agent):
     # Review I4: an agent that restarted no longer has the task; the host must not stay stuck.
     tid = await mgr.start("a")
@@ -185,7 +473,33 @@ async def test_restarted_agent_without_task_fails_orphan(mgr, agent):
     agent2 = FakeAgent(mgr)
     await agent2.push("hello", agent_version="x", codex_version="x", auth_mode="chatgpt", current_task_id=None)
     assert mgr.status(tid)["state"] == "failed"
+    assert mgr.result(tid)["report"] == (
+        "貸す人の codex-bridge が起動し直したため、この依頼は中断されました。"
+        "続けるなら、この依頼の続きとして送ってください。")
     assert await mgr.start("b")
+
+
+async def test_task_errors_use_screen_words(mgr):
+    from codex_bridge.host.tasks import NOT_CONNECTED, BUSY, AWAITING, NOT_READY
+
+    with pytest.raises(ToolError) as missing:
+        await mgr.start("依頼")
+    assert str(missing.value) == NOT_CONNECTED and "「貸す」タブ" in str(missing.value)
+    with pytest.raises(ToolError) as named:
+        await mgr.sessions_list(lender="alice")
+    assert "貸す人「alice」" in str(named.value)
+    for text in (str(missing.value), str(named.value), BUSY, AWAITING, NOT_READY):
+        for word in ("知人", "管理画面", "cancel_task", "send_task", "agent", "貸す側"):
+            assert word not in text
+
+
+async def test_disconnect_error_uses_lender_words(mgr, agent):
+    request = asyncio.create_task(mgr.sessions_list())
+    while not mgr._pending:
+        await asyncio.sleep(0)
+    mgr.detach(agent.link)
+    with pytest.raises(ToolError, match="^貸す人との接続が切れました$"):
+        await request
 
 
 async def test_reconnected_agent_with_task_restores_state(mgr, agent):
@@ -401,11 +715,11 @@ async def test_a_new_task_is_refused_while_the_lender_has_one_awaiting_approval(
     await agent.finish(tid2)  # a finished one with a session to continue
     tid = await mgr.start("a")
     await agent.push("task_state", task_id=tid, state="awaiting_lender")
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("b")  # to that lender by name
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("b", lender="friend")
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("b", continue_task_id=tid2)
     assert len([m for m in agent.sent if m["type"] == "task_start"]) == 2  # the two that were allowed
 
@@ -500,8 +814,8 @@ async def test_hello_without_current_task_id_leaves_a_queued_task_alone(mgr, age
                      protocol=2, capabilities={"resumable": False, "pre_approval": True})
     assert mgr.status(tid)["state"] == "queued" and mgr.current_task_id() == tid
     assert mgr.lenders()[0]["current_task_id"] == tid
-    assert mgr.agent_info()["capabilities"] == {"resumable": False, "pre_approval": True}  # it did take effect
-    with pytest.raises(ToolError, match="作業中"):
+    assert mgr.agent_info()["capabilities"] == {"resumable": False, "pre_approval": True, "model_select": False, "max_parallel": 1}  # it did take effect
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("b")
     await agent.push("task_state", task_id=tid, state="running", thread_id="th1")
     assert mgr.status(tid)["state"] == "running"
@@ -567,7 +881,7 @@ async def test_the_host_s_guess_stays_when_the_agent_never_says_more_and_survive
     mgr.detach(agent.link)
     agent2 = FakeAgent(mgr)
     await agent2.push("hello", agent_version="0.1.0", codex_version="x", auth_mode="chatgpt", current_task_id=None)
-    assert "再起動" in mgr.result(tid)["report"]
+    assert "起動し直した" in mgr.result(tid)["report"]
     mgr2 = TaskManager(tmp_path / "data", touched_fn=lambda t: [])  # the guess is still a guess after a restart
     a3 = FakeAgent(mgr2)
     await a3.push("task_state", seq=9, task_id=tid, state="completed", report="done after all")

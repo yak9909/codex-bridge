@@ -1,4 +1,4 @@
-"""The lender's local screen. Only the loopback listener in main.py serves this app."""
+"""The lender's local API, mounted at /lend by the resident app."""
 
 from __future__ import annotations
 
@@ -11,16 +11,14 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, StrictBool, StrictFloat, StrictStr
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictFloat, StrictInt, StrictStr
 
+from ..common.protocol import EFFORT_ORDER
 from .appserver import AppServerError
+from .runner import SessionBusy, SessionNotOwned
 from .settings import FEATURE_INFO, SettingsStore
 from .ui_tasks import task_view
-
-STATIC = Path(__file__).parent / "static"
-COMMON = Path(__file__).parents[1] / "common" / "web"
 
 
 class Decision(BaseModel):
@@ -28,7 +26,7 @@ class Decision(BaseModel):
     task_id: StrictStr
     approve: StrictBool
     reason: StrictStr = ""
-    created: StrictFloat | None = None
+    created: StrictInt | StrictFloat
     connection_id: StrictStr | None = None
 
 
@@ -56,7 +54,7 @@ def create_ui_app(runner, settings: SettingsStore, client, *, versions: dict, da
 
     @app.exception_handler(RequestValidationError)
     async def invalid_body(request, error):
-        if request.url.path.startswith("/api/connections"):
+        if "/api/connections" in request.url.path:  # also under a mount prefix (/lend/api/connections)
             return JSONResponse({"detail": "招待コードや設定の形式が正しくありません"}, status_code=400)
         return await request_validation_exception_handler(request, error)
 
@@ -124,7 +122,8 @@ def create_ui_app(runner, settings: SettingsStore, client, *, versions: dict, da
     async def get_connection_settings(id: str):
         require_connections()
         one(id)
-        return {"settings": connections.store._read(id).settings, "feature_info": FEATURE_INFO}
+        return {"settings": connections.store._read(id).settings, "feature_info": FEATURE_INFO,
+                "models": connections.catalog, "efforts": list(EFFORT_ORDER)}
 
     @app.put("/api/connections/{id}/settings")
     async def put_connection_settings(id: str, body: dict):
@@ -150,14 +149,9 @@ def create_ui_app(runner, settings: SettingsStore, client, *, versions: dict, da
                                                        "style-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
         return response
 
-    @app.get("/")
-    async def index():
-        return FileResponse(STATIC / "index.html")
-
     @app.get("/api/overview")
     async def overview():
-        active = connections.slot.owner if connections else legacy_runner
-        current = active or next(iter(runners()), None)
+        current = next((r for r in runners() if r.active_task_ids()), next(iter(runners()), None))
         runner = current
         client = connections.clients.get(runner.connection_id) if connections and runner else None
         if connections is None:
@@ -173,12 +167,13 @@ def create_ui_app(runner, settings: SettingsStore, client, *, versions: dict, da
                 if window is not None:
                     usage[key] = {"used_percent": window.used_percent, "resets_at": window.resets_at,
                                   "resets_at_local": datetime.fromtimestamp(window.resets_at).astimezone().isoformat()}
-        state = ("paused" if client.paused else "awaiting_lender" if runner.pending_approval else
-                 "running" if runner.cur is not None else "idle")
+        state = ("paused" if client.paused else "awaiting_lender" if any(r.pending_approvals for r in runners()) else
+                 "running" if any(r.currents for r in runners()) else "idle")
         # The invite's name identifies the lender. The protocol has no requester display name yet.
         connected = any(row["connected"] for row in connections.rows()) if connections else client.ws is not None
         return {"host_name": urlsplit(client.invite.url).netloc, "connected": connected, "paused": client.paused,
-                "state": state, **versions, "usage": usage, "limits": dict(runner.friend_limits),
+                "state": state, "active_tasks": sum(len(r.active_task_ids()) for r in runners()),
+                "pending_approvals": sum(len(r.pending_approvals) for r in runners()), **versions, "usage": usage, "limits": dict(runner.friend_limits),
                 "thresholds": dict(runner.guard.thresholds), "effective_limits": runner.guard.effective_limits(),
                 "blocked_until": runner.guard.blocked_until, "log_visibility": runner.log_visibility}
 
@@ -208,40 +203,38 @@ def create_ui_app(runner, settings: SettingsStore, client, *, versions: dict, da
 
     @app.get("/api/pending")
     async def pending(connection_id: str | None = None):
-        return next((r.pending_approval for r in runners(connection_id) if r.pending_approval), None)
+        return [p for r in runners(connection_id) for p in r.pending_approvals]
 
     @app.post("/api/pending")
     async def decide(body: Decision):
         runner = one(body.connection_id, task_id=body.task_id)
-        current = runner.pending_approval
-        if body.created is not None and (current is None or current["created"] != body.created):
-            raise HTTPException(409, "承認待ちが変わりました。画面を更新してください")
-        if not await runner.decide_pending(body.approve, body.reason, task_id=body.task_id):
+        if not await runner.decide_pending(body.approve, body.reason, task_id=body.task_id, created=body.created):
             raise HTTPException(409, "承認待ちが変わりました。画面を更新してください")
         return {"decided": True}
 
     @app.get("/api/sessions")
     async def sessions(connection_id: str | None = None):
         return [{"thread_id": s["thread_id"], "created": s["created"], "task_ids": s["task_ids"],
-                 "active": r.cur is not None and r.cur.thread_id == s["thread_id"],
+                 "active": r.thread_active(s["thread_id"]),
                  "disposable": bool(s.get("ephemeral")), **r.connection_fields()}
                 for r in runners(connection_id) for s in r.sessions.list()]
 
     @app.delete("/api/sessions/{thread_id}")
     async def delete_session(thread_id: str, connection_id: str | None = None):
         runner = one(connection_id, thread_id=thread_id)
-        async with runner.exclusive():  # a resumed task cannot start while deletion is in flight
-            if not runner.sessions.owns(thread_id):
-                raise HTTPException(404, "このツールで作ったセッションではありません")
-            if runner.cur is not None and runner.cur.thread_id == thread_id:
-                raise HTTPException(409, "作業中のセッションは削除できません")
-            try:
-                if runner.prepare:
-                    await runner.prepare()
-                await runner.app.thread_delete(thread_id)
-            except (AppServerError, OSError, TimeoutError) as e:
-                raise HTTPException(502, f"削除できませんでした: {e}") from e
-            runner.sessions.remove(thread_id)
+        try:
+            async with runner.session_operation(thread_id, read=False):
+                try:
+                    if runner.prepare:
+                        await runner.prepare()
+                    await runner.app.thread_delete(thread_id)
+                except (AppServerError, OSError, TimeoutError) as e:
+                    raise HTTPException(502, f"削除できませんでした: {e}") from e
+                runner.sessions.remove(thread_id)
+        except SessionNotOwned as e:
+            raise HTTPException(404, str(e)) from e
+        except SessionBusy as e:
+            raise HTTPException(409, str(e)) from e
         return {"deleted": thread_id}
 
     @app.get("/api/settings")
@@ -294,6 +287,17 @@ def create_ui_app(runner, settings: SettingsStore, client, *, versions: dict, da
                 raise HTTPException(409, "起動し直すのを待ってください")
             return {"cleared": sum(r.worklog.clear() for r in runners() if r.worklog)}
 
+    @app.post("/api/connections/{id}/logs/clear")
+    async def clear_connection(id: str):
+        require_connections()
+        async with mutations:
+            if moving:
+                raise HTTPException(409, "起動し直すのを待ってください")
+            runner, = runners(id)  # 404 for an unknown connection
+            if getattr(connections, "moving", False):
+                raise HTTPException(409, "保存場所を移動中です")
+            return {"cleared": runner.worklog.clear() if runner.worklog else 0}
+
     @app.post("/api/pause")
     async def pause(body: Pause):
         if on_pause:
@@ -304,6 +308,4 @@ def create_ui_app(runner, settings: SettingsStore, client, *, versions: dict, da
                 await client.drop()
         return {"paused": connections.paused if connections else client.paused}
 
-    app.mount("/admin/common", StaticFiles(directory=COMMON), name="common")
-    app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app

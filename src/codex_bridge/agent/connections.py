@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 from ..common.invite import Invite, parse_invite
 from ..common.protocol import LOG_VISIBILITY
-from .settings import CONNECTION_KEYS, SettingsStore, _merge, defaults
+from .settings import CONNECTION_KEYS, SettingsStore, _merge, defaults, expand_legacy_pre_approval
 from .setup import load_invite, save_invite
 
 SAFE_ID = re.compile(r"[a-f0-9]{12}")
@@ -23,7 +23,7 @@ SAFE_ID = re.compile(r"[a-f0-9]{12}")
 
 def connection_settings(raw=None, *, strict=False) -> dict:
     if strict and (not isinstance(raw, dict) or set(raw) - CONNECTION_KEYS):
-        raise ValueError("接続先の設定は features、pre_approval、disposable、log_visibility だけです")
+        raise ValueError("接続先の設定は features、pre_approval、disposable、log_visibility、allowed_models、max_effort だけです")
     raw = raw if isinstance(raw, dict) else {}
     settings = _merge(defaults(), {k: v for k, v in raw.items() if k != "log_visibility"}, strict)
     visibility = raw.get("log_visibility", "summary")
@@ -31,7 +31,8 @@ def connection_settings(raw=None, *, strict=False) -> dict:
         if strict:
             raise ValueError("log_visibility は summary、files、all のどれかです")
         visibility = "summary"
-    return {**{k: settings[k] for k in ("features", "pre_approval", "disposable")}, "log_visibility": visibility}
+    return {**{k: settings[k] for k in ("features", "pre_approval", "disposable", "allowed_models", "max_effort")},
+            "log_visibility": visibility}
 
 
 def _write_settings(path: Path, settings: dict) -> None:
@@ -190,6 +191,8 @@ class ConnectionStore:
         with self._lock:
             current = self._read(id).settings
             connection_settings(patch, strict=True)
+            if "pre_approval" in patch:  # an old-shape patch (`enabled`) must not be undone by the stored new keys
+                patch = {**patch, "pre_approval": expand_legacy_pre_approval(patch["pre_approval"])}
             merged = {**current, **patch}
             for key in ("features", "pre_approval"):
                 if key in patch:

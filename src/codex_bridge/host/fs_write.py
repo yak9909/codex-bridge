@@ -45,7 +45,9 @@ def write_text_preserving(abs_path: Path, text: str, encoding: str, newline: str
 
 class WriteTools:
     def __init__(self, paths: SafePaths, policy: PolicyStore, snapshots: Snapshots, audit: AuditLog,
-                 task_id_fn: Callable[[], str | None], approve_fn: ApproveFn) -> None:
+                 task_id_fn: Callable[[], str | None], approve_fn: ApproveFn,
+                 lender_fn: Callable[[], str | None] = lambda: None) -> None:
+        self.lender_fn = lender_fn  # invite name of the lender making the current call (None: not known)
         self.paths = paths
         self.policy = policy
         self.snapshots = snapshots
@@ -172,7 +174,7 @@ class WriteTools:
         if not real.exists():
             raise not_found(path)
         await asyncio.to_thread(self.paths.check_subtree_writable, real, "削除")
-        if self.policy.current().delete_needs_approval:
+        if self.policy.current().delete_approval_for(self.lender_fn()):
             decision = await self.approve_fn("delete", f"削除: {rel}")
             if decision == "pending":
                 return {"status": "waiting_approval", "path": rel,

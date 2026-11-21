@@ -189,3 +189,70 @@ def test_unrelated_changes_save_with_a_stored_rule_containing_data_dir(tmp_path)
     assert store.current().paused and store.current().exec_mode == "off"
     with pytest.raises(ValueError, match="データフォルダ"):
         add_folder(store, tmp_path.parent.as_posix(), "read")
+
+
+def test_delete_approval_per_lender():
+    p = parse_policy({"delete_needs_approval": True, "lender_delete_approval": {"yamada": False}})
+    assert p.delete_approval_for("yamada") is False
+    assert p.delete_approval_for("suzuki") is True
+    assert p.delete_approval_for(None) is True
+    assert parse_policy({"delete_needs_approval": False, "lender_delete_approval": {"a": True}}
+                        ).delete_approval_for("b") is False
+    with pytest.raises(ValueError):
+        parse_policy({"lender_delete_approval": {"yamada": "no"}})
+
+
+async def test_delete_through_write_tools_uses_the_calling_lenders_setting(share):
+    share.policy.update(delete_needs_approval=True, lender_delete_approval={"yamada": False})
+    share.deny_all()  # an asked approval is refused: a delete that is not asked goes through
+    share.write.lender_fn = lambda: "yamada"
+    assert (await share.write.delete_path("raw/b.txt"))["status"] == "done"
+    share.write.lender_fn = lambda: "suzuki"
+    with pytest.raises(Exception, match="拒否"):
+        await share.write.delete_path("raw/a.txt")
+    assert (share.root / "raw/a.txt").exists()
+
+
+async def test_patch_delete_uses_the_calling_lenders_setting(share):
+    from codex_bridge.host.patch import apply_patch
+    share.policy.update(delete_needs_approval=True, lender_delete_approval={"yamada": False})
+    share.deny_all()
+    share.write.lender_fn = lambda: "yamada"
+    r = await apply_patch(share.write, "*** Begin Patch\n*** Delete File: raw/b.txt\n*** End Patch\n")
+    assert r["status"] == "done"
+    share.write.lender_fn = lambda: "suzuki"
+    with pytest.raises(Exception, match="拒否"):
+        await apply_patch(share.write, "*** Begin Patch\n*** Delete File: raw/a.txt\n*** End Patch\n")
+
+
+def test_drop_lender_drops_delete_approval(tmp_path):
+    store = PolicyStore(tmp_path / "policy.yaml")
+    store.update(lender_exec_modes={"yamada": "ask", "suzuki": "all"},
+                 lender_delete_approval={"yamada": False, "suzuki": False})
+    store.drop_lender("yamada")
+    assert store.current().lender_exec_modes == {"suzuki": "all"}
+    assert store.current().lender_delete_approval == {"suzuki": False}
+    store.set_lender_delete_approval("yamada", True)
+    assert store.current().lender_delete_approval == {"suzuki": False, "yamada": True}
+    store.drop_lender("yamada")
+    assert store.current().lender_delete_approval == {"suzuki": False}
+
+
+def test_lender_delete_approval_round_trips_through_the_form(tmp_path):
+    from codex_bridge.host.policy_form import form_from_raw, save_form
+    store = PolicyStore(tmp_path / "policy.yaml")
+    store.update(lender_delete_approval={"yamada": False})
+    form = form_from_raw(store.as_dict())
+    assert form["lender_delete_approval"] == {"yamada": False}
+    save_form(store, form)
+    assert store.current().lender_delete_approval == {"yamada": False}
+    form.pop("lender_delete_approval")  # a form without the key keeps what is stored
+    save_form(store, form)
+    assert store.current().lender_delete_approval == {"yamada": False}
+
+
+def test_old_global_exec_mode_still_applies(tmp_path):
+    p = parse_policy({"exec": {"mode": "all"}})
+    assert p.exec_mode_for("yamada") == "all" and p.exec_mode_for(None) == "all"
+    p = parse_policy({"exec": {"mode": "all"}, "lender_exec_modes": {"yamada": "ask"}})
+    assert p.exec_mode_for("yamada") == "ask" and p.exec_mode_for("suzuki") == "all"

@@ -47,11 +47,6 @@ async def test_settings_message_sets_visibility(store):
     assert store.visibility == "all"
 
 
-async def test_page_served(client):
-    r = await client.get("/")
-    assert r.status_code == 200 and "codex-bridge" in r.text
-
-
 def test_store_persists_to_disk(tmp_path, store):
     assert len(LogStore(tmp_path / "logs").entries) == len(store.entries)
 

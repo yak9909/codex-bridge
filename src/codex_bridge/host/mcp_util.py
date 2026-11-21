@@ -7,6 +7,7 @@ import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable
+from urllib.parse import parse_qs
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
@@ -48,6 +49,22 @@ class BearerAuth:
                 return
             # New dicts: the server may hand the same state object to every request.
             scope = {**scope, "state": {**(scope.get("state") or {}), "lender": name}}
+        await self.app(scope, receive, send)
+
+
+class OriginTag:
+    """ASGI wrapper: identify the caller from the MCP endpoint's query string."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http":
+            query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
+            origin = "codex" if "codex" in query.get("client", []) else "claude"
+            # New dicts: the server may hand the same state object to every request.
+            scope = {**scope, "state": {**(scope.get("state") or {}),
+                                       "origin": origin, "caller_session": None}}
         await self.app(scope, receive, send)
 
 

@@ -35,6 +35,13 @@ class TokenStore:
             cb(name)
         return token
 
+    def reissue(self, name: str) -> str:
+        """A new token for an existing invite name; the old code stops working. KeyError for an unknown name."""
+        with self._lock:
+            if name not in self._items:
+                raise KeyError(name)
+        return self.issue(name)
+
     def revoke(self, name: str) -> None:
         with self._lock:
             self._items.pop(name, None)

@@ -16,7 +16,7 @@ from codex_bridge.host.paths import ToolError
 from conftest import RG_PATH
 from mcp_helpers import running
 
-MESSAGE = "共有フォルダがまだ設定されていません。管理画面で選んでください。"
+MESSAGE = "共有フォルダがまだ設定されていません。「使う」タブで選んでください。"
 H = {"X-Codex-Bridge": "1"}
 MCP_H = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
 
@@ -423,7 +423,7 @@ def test_host_main_accepts_then_start(tmp_path, monkeypatch):
     monkeypatch.setattr(setup_cli, "run_setup", lambda path, **kw: calls.append((path, kw)))
     monkeypatch.setattr(sys, "argv", ["host", "setup", "--then-start", "--config", str(cfg)])
     main.main()
-    assert calls == [(cfg, {"then_start": True})]
+    assert calls == [(cfg, {"then_start": True, "from_app": False})]
 
 
 def test_host_main_setup_default_is_setup_only(tmp_path, monkeypatch):
@@ -432,7 +432,16 @@ def test_host_main_setup_default_is_setup_only(tmp_path, monkeypatch):
     monkeypatch.setattr(setup_cli, "run_setup", lambda path, **kw: calls.append((path, kw)))
     monkeypatch.setattr(sys, "argv", ["host", "setup", "--config", str(cfg)])
     main.main()
-    assert calls == [(cfg, {"then_start": False})]
+    assert calls == [(cfg, {"then_start": False, "from_app": False})]
+
+
+def test_host_main_passes_from_app(tmp_path, monkeypatch):
+    cfg = tmp_path / "host.yaml"
+    calls = []
+    monkeypatch.setattr(setup_cli, "run_setup", lambda path, **kw: calls.append((path, kw)))
+    monkeypatch.setattr(sys, "argv", ["host", "setup", "--from-app", "--config", str(cfg)])
+    main.main()
+    assert calls == [(cfg, {"then_start": False, "from_app": True})]
 
 
 def test_setup_does_not_build_friend_kit(tmp_path, monkeypatch, capsys):

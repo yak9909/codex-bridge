@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from codex_bridge.host.policy import PolicyStore
+import pytest
+import yaml
+
+from codex_bridge.host.policy import EXEC_MODES, PolicyStore, parse_policy
 
 POLICY = """
 default: read
@@ -97,3 +100,45 @@ def test_hidden_wins_over_any_later_rule(tmp_path):
     p = store.current()
     assert p.level_for("private/x.txt") == "hidden" and p.level_for("private") == "hidden"
     assert p.level_for("other.txt") == "write"
+
+
+def test_lender_exec_modes_parse_and_off_as_false():
+    p = parse_policy(yaml.safe_load('exec: {mode: ask}\nlender_exec_modes: {a: off, b: all}\n'))
+    assert p.lender_exec_modes == {"a": "off", "b": "all"}
+    assert p.exec_mode_for("a") == "off" and p.exec_mode_for("b") == "all"
+    assert p.exec_mode_for("c") == "ask" and p.exec_mode_for(None) == "ask"
+    for raw in ({}, {"lender_exec_modes": None}):
+        assert parse_policy(raw).lender_exec_modes == {}
+
+
+@pytest.mark.parametrize("modes", [{"a": "bad"}, {"a": "inherit"}, {"a": None}, {"a": True},
+                                   {"a": []}, {1: "all"}, [], "all", False, 0])
+def test_lender_exec_modes_bad_value_rejected(modes):
+    with pytest.raises(ValueError) as exc:
+        parse_policy({"lender_exec_modes": modes})
+    expected = (f"lender_exec_modes の値は {EXEC_MODES} のどれかです: {next(iter(modes))}"
+                if isinstance(modes, dict) else "lender_exec_modes は 名前: モード の形で書いてください")
+    assert str(exc.value) == expected
+
+
+def test_set_and_inherit_lender_mode(tmp_path):
+    store = write_policy(tmp_path, POLICY)
+    store.set_lender_exec_mode("b", "ask")
+    for mode in EXEC_MODES:
+        store.set_lender_exec_mode("a", mode)
+        assert PolicyStore(store.path).current().exec_mode_for("a") == mode
+        assert store.current().exec_mode == "allowlist"
+        assert store.current().allow_patterns == ["python scripts/**/*.py *"]
+    before = store.path.read_bytes()
+    for invalid in ("bad", None, False, [], {}):
+        with pytest.raises(ValueError):
+            store.set_lender_exec_mode("a", invalid)
+        assert store.path.read_bytes() == before
+    store.set_lender_exec_mode("a", "inherit")
+    assert store.current().lender_exec_modes == {"b": "ask"}
+    assert store.current().exec_mode_for("a") == "allowlist"
+    before = store.path.read_bytes()
+    store.drop_lender("missing")
+    assert store.path.read_bytes() == before
+    store.drop_lender("b")
+    assert PolicyStore(store.path).current().lender_exec_modes == {}

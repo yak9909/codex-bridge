@@ -9,6 +9,7 @@ import pytest
 
 from codex_bridge.agent.connections import ConnectionStore
 from codex_bridge.agent.main import AgentConnections
+from codex_bridge.agent.runner import Current
 from codex_bridge.agent.settings import SettingsStore
 from codex_bridge.agent.setup import load_invite, save_invite
 from codex_bridge.agent.ui import create_ui_app
@@ -45,6 +46,18 @@ async def multi(tmp_path):
 
 def start(task_id):
     return {"type": "task_start", "task_id": task_id, "prompt": "依頼"}
+
+
+def test_connection_settings_keep_model_limits(tmp_path):
+    store = ConnectionStore(tmp_path)
+    a = store.add(make_invite("http://a.invalid", "secret-a", "friend"))
+    b = store.add(make_invite("http://b.invalid", "secret-b", "friend"))
+    patch = {"allowed_models": ["m1"], "max_effort": "high"}
+    updated = store.update_settings(a.id, patch)
+    reread = {c.id: c.settings for c in ConnectionStore(tmp_path).list()}
+    assert updated["allowed_models"] == ["m1"] and updated["max_effort"] == "high"
+    assert reread[a.id]["allowed_models"] == ["m1"] and reread[a.id]["max_effort"] == "high"
+    assert reread[b.id]["allowed_models"] is None and reread[b.id]["max_effort"] == "xhigh"
 
 
 @pytest.mark.parametrize("damaged", [False, True])
@@ -140,7 +153,7 @@ async def test_settings_are_per_connection_but_limits_are_shared(multi):
     assert 'web_search="disabled"' not in multi.fakes[a].argv
     assert 'web_search="disabled"' in multi.fakes[b].argv
     assert set((await multi.http.get("/api/settings")).json()["settings"]) == {
-        "limits", "workdir", "log_retention_days"}
+        "limits", "workdir", "log_retention_days", "max_parallel"}
     assert (await multi.http.put(f"/api/connections/{a}/settings", json={"limits": {}}, headers=WRITE)).status_code == 400
 
 
@@ -157,6 +170,50 @@ async def test_replace_invite_and_remove_refused_while_that_connection_is_busy(m
     assert (await multi.http.delete(f"/api/connections/{b}", headers=WRITE)).status_code == 200
 
 
+@pytest.mark.parametrize("legacy", [True, False])
+def test_pre_approval_legacy_enabled_in_the_connections_store(tmp_path, legacy):
+    store = ConnectionStore(tmp_path)
+    c = store.add(make_invite("http://a.invalid", "secret-a", "friend"))
+    path = tmp_path / "connections" / c.id / "settings.json"
+    path.write_text(json.dumps({"pre_approval": {"enabled": legacy, "timeout_min": 5}}), encoding="utf-8")
+    assert ConnectionStore(tmp_path).list()[0].settings["pre_approval"] == {
+        "new_task": legacy, "followup": legacy, "timeout_min": 5}
+    saved = store.update_settings(c.id, {"pre_approval": {"followup": True}})["pre_approval"]
+    assert saved == {"new_task": legacy, "followup": True, "timeout_min": 5}
+    assert json.loads(path.read_text(encoding="utf-8"))["pre_approval"] == saved
+
+
+async def test_lender_models_resent_on_settings_change(multi):
+    m, a, b = multi.runtime, multi.a.id, multi.b.id
+    sent = {a: [], b: []}
+    for id in (a, b):
+        async def send(msg, id=id):
+            sent[id].append(msg)
+        m.runners[id].send = send
+    await m.update_settings(a, {"pre_approval": {"new_task": True}})
+    models = [x for x in sent[a] if x["type"] == "lender_models"]
+    assert models and models[-1]["lender_view"]["pre_approval"]["new_task"] is True
+    assert not [x for x in sent[b] if x["type"] == "lender_models"]
+    await m.apply_shared({"limits": {"five_hour": 35, "weekly": 45, "force": True}})
+    for id in (a, b):
+        assert [x for x in sent[id] if x["type"] == "lender_models"][-1]["lender_view"]["over_limit"] == "stop"
+
+
+async def test_clear_one_connection_log(multi):
+    m, a, b = multi.runtime, multi.a.id, multi.b.id
+    for id, task in ((a, "a-task"), (b, "b-task")):
+        m.runners[id].worklog.add(task, "task_prompt", {"text": "依頼"})
+    response = await multi.http.post(f"/api/connections/{a}/logs/clear", headers=WRITE)
+    assert response.status_code == 200 and response.json() == {"cleared": 1}
+    assert m.runners[a].worklog.tasks() == []
+    assert [t["task_id"] for t in m.runners[b].worklog.tasks()] == ["b-task"]  # the other connection stays
+    assert (await multi.http.post(f"/api/connections/{a}/logs/clear")).status_code == 403  # needs the header
+
+
+async def test_clear_unknown_connection_404(multi):
+    assert (await multi.http.post("/api/connections/000000000000/logs/clear", headers=WRITE)).status_code == 404
+
+
 def test_migrates_single_invite_to_first_connection(tmp_path):
     code = make_invite("http://old.invalid", "secret", "friend")
     save_invite(tmp_path, parse_invite(code))
@@ -168,7 +225,7 @@ def test_migrates_single_invite_to_first_connection(tmp_path):
     (tmp_path / "sessions.json").write_text(json.dumps({"thread-old": {"created": 1, "task_ids": ["old-task"]}}))
     first, = ConnectionStore(tmp_path).list()
     assert first.invite == parse_invite(code)
-    assert first.settings["pre_approval"] == {"enabled": True, "timeout_min": None}
+    assert first.settings["pre_approval"] == {"new_task": True, "followup": True, "timeout_min": None}
     assert first.settings["disposable"] is True
     assert first.settings["log_visibility"] == "files"
     assert not (tmp_path / "invite.bin").exists()
@@ -205,7 +262,7 @@ async def test_connections_api_validates_codes_settings_and_local_write_header(m
     new = await multi.http.post("/api/connections", json={"code": make_invite("http://c.invalid", "s", "f")}, headers=WRITE)
     assert new.status_code == 201
     rows = (await multi.http.get("/api/connections")).json()
-    assert len(rows) == 3 and all(set(r) == {"id", "host_name", "connected", "invite_problem", "busy"} for r in rows)
+    assert len(rows) == 3 and all(set(r) == {"id", "host_name", "connected", "invite_problem", "busy", "active_task_ids"} for r in rows)
     assert "secret" not in str(rows)
     assert (await multi.http.get("/api/connections/missing/settings")).status_code == 404
     for body in ({}, {"code": 1}, {"code": "bad", "other": "x"}):
@@ -214,6 +271,7 @@ async def test_connections_api_validates_codes_settings_and_local_write_header(m
 
 async def test_concurrent_requests_reserve_one_slot_and_keep_each_pending_timeout(multi):
     m = multi.runtime
+    await m.apply_shared(m.settings.update({"max_parallel": 1}))
     for connection in (multi.a, multi.b):
         await m.update_settings(connection.id, {"pre_approval": {"enabled": True, "timeout_min": None}})
     a, b = (m.runners[c.id] for c in (multi.a, multi.b))
@@ -275,3 +333,109 @@ def test_failed_migration_leaves_original_untouched(tmp_path, monkeypatch):
         ConnectionStore(tmp_path)
     assert (tmp_path / "invite.bin").read_bytes() == original
     assert not (tmp_path / "connections").exists()
+
+
+async def test_prepare_does_not_restart_an_idle_appserver_for_deferred_settings(multi):
+    runtime = multi.runtime
+    runner = runtime.runners[multi.a.id]
+    await runner.prepare()
+    app = runner.app
+    process = app.proc
+    old_features = dict(app.features)
+    runner.settings["features"]["goals"] = not old_features["goals"]
+    await runner.prepare()
+    assert app.proc is process and app.features == old_features
+    await runner.handle(start("needs-new-features"))
+    assert app.proc is not process and app.features == runner.settings["features"]
+
+
+@pytest.mark.parametrize("operation", ["remove", "replace_invite", "move_data"])
+async def test_connection_changes_finish_while_followup_steer_is_pending(multi, monkeypatch, operation):
+    runtime = multi.runtime
+    connection_id = multi.a.id
+    runner = runtime.runners[connection_id]
+    entered = asyncio.Event()
+
+    async def steer(*args):
+        entered.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(runner.app, "turn_steer", steer)
+    monkeypatch.setattr("codex_bridge.agent.main.move_data_root", lambda *a, **k: [])
+    assert await runner._reserve_slot(start("task")) is None
+    runner.currents["task"] = Current("task", "thread-1", "turn-1")
+    await runner.receive({"type": "task_followup", "task_id": "task", "text": "more"})
+    await asyncio.wait_for(entered.wait(), 3)
+    worker = runner._followup_workers["task"]
+    async with runner._lock:
+        await runner._on_event({"method": "turn/completed", "params": {
+            "threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}}})
+    assert not runner.active_task_ids()
+    assert not worker.done()
+
+    if operation == "remove":
+        change = runtime.remove(connection_id)
+    elif operation == "replace_invite":
+        invite = make_invite("http://a.invalid", "rotated", "friend")
+        change = runtime.replace_invite(connection_id, invite)
+    else:
+        change = runtime.move_data(multi.home / "new")
+    await asyncio.wait_for(change, 3)
+    assert worker.cancelled()
+    assert "task" not in runner._followup_workers
+
+
+async def test_data_move_blocks_new_admission_without_holding_the_pc_lock(multi, monkeypatch):
+    from codex_bridge.agent import main
+
+    runtime = multi.runtime
+    entered, resume = asyncio.Event(), asyncio.Event()
+    original = runtime._stop_connection
+
+    async def stop(id):
+        entered.set()
+        await resume.wait()
+        await original(id)
+
+    monkeypatch.setattr(runtime, "_stop_connection", stop)
+    monkeypatch.setattr(main, "move_data_root", lambda *a, **k: [])
+    moving = asyncio.create_task(runtime.move_data(multi.home / "new"))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+
+        async def inspect():
+            async with runtime.slot.lock:
+                assert runtime.slot.moving and runtime.slot.count == 0
+
+        await asyncio.wait_for(inspect(), 0.5)
+        # Admission is blocked by the moving flag, not by a long-held PC lock.
+        r = runtime.runners[multi.b.id]
+        refusal = await asyncio.wait_for(r._reserve_slot(start("during-move")), 0.5)
+        assert "変更中" in refusal and not r._reservations
+    finally:
+        resume.set()
+        await asyncio.wait_for(moving, 2)
+
+
+async def test_prepare_does_not_restart_a_task_waiting_for_thread_start(multi, monkeypatch):
+    r = multi.runtime.runners[multi.a.id]
+    entered, resume = asyncio.Event(), asyncio.Event()
+    original = r.app.thread_start
+
+    async def thread_start(*args, **kwargs):
+        entered.set()
+        await resume.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(r.app, "thread_start", thread_start)
+    starting = asyncio.create_task(r.handle(start("starting")))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        process, old_features = r.app.proc, dict(r.app.features)
+        r.settings["features"]["goals"] = not old_features["goals"]
+        await r.prepare()
+        assert r.app.proc is process and r.app.features == old_features
+        assert r.currents["starting"].thread_id is None
+    finally:
+        resume.set()
+        await asyncio.wait_for(asyncio.gather(starting, return_exceptions=True), 10)

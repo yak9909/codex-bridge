@@ -7,6 +7,7 @@ import pytest
 from starlette.applications import Starlette
 from starlette.routing import Mount
 
+from codex_bridge.host import claude_mcp
 from codex_bridge.host.claude_mcp import build_claude_mcp
 from codex_bridge.host.policy_form import add_folder, remove_folder, set_main_folder
 from codex_bridge.host.tasks import TaskManager
@@ -19,7 +20,7 @@ ACCEPT = {"Accept": "application/json, text/event-stream", "Content-Type": "appl
 
 @pytest.fixture
 async def env(share):
-    mgr = TaskManager(share.data_dir, touched_fn=share.snapshots.touched)
+    mgr = TaskManager(share.data_dir, touched_fn=share.snapshots.touched, policy_fn=share.policy.current)
     share.tokens = TokenStore(share.data_dir)
     ep = build_claude_mcp(mgr, share.approvals, share.snapshots, policy=share.policy, tokens=share.tokens,
                           public_bind="100.1.2.3:8765", share_root=lambda: share.paths.root,
@@ -77,8 +78,8 @@ async def test_tool_names(env):
     mgr, local, _ = env
     r = await local.post("/claude/mcp", headers=ACCEPT, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     assert {t["name"] for t in r.json()["result"]["tools"]} == {
-        "send_task", "send_followup", "get_status", "get_result", "cancel_task", "get_usage",
-        "set_thresholds", "undo_task", "list_sessions", "read_session", "delete_session",
+        "send_task", "set_task_exec", "send_followup", "get_status", "get_result", "cancel_task", "get_usage",
+        "undo_task", "list_sessions", "read_session", "delete_session",
         "list_approvals", "decide_approval", "get_policy", "set_policy", "set_folder_level", "set_exec_mode",
         "set_paused",
         "set_log_visibility", "list_tasks", "issue_invite", "revoke_invite", "list_invites", "get_overview",
@@ -114,13 +115,44 @@ async def test_claude_can_read_and_change_policy(env, share):
 
 async def test_claude_can_switch_exec_mode_pause_and_visibility(env, share):
     mgr, local, _ = env
-    text_of(await call(local, "set_exec_mode", {"mode": "off"}))
-    assert share.policy.current().exec_mode == "off"
-    assert (await call(local, "set_exec_mode", {"mode": "weird"}))["isError"]
+    share.tokens.issue("alice")
+    text_of(await call(local, "set_exec_mode", {"mode": "off", "lender": "alice"}))
+    assert share.policy.current().exec_mode_for("alice") == "off"
+    assert (await call(local, "set_exec_mode", {"mode": "weird", "lender": "alice"}))["isError"]
     text_of(await call(local, "set_paused", {"paused": True}))
     assert share.policy.current().paused is True
-    text_of(await call(local, "set_log_visibility", {"value": "all"}))
-    assert mgr.settings["log_visibility"] == "all"
+    text_of(await call(local, "set_log_visibility", {"value": "all", "lender": "alice"}))
+    assert mgr.log_visibility_for("alice") == "all" and mgr.log_visibility_for("bob") == "summary"
+
+
+async def test_mcp_set_exec_mode_needs_lender(env, share):
+    _, local, _ = env
+    result = await call(local, "set_exec_mode", {"mode": "off"})
+    assert result["isError"] and "lender を指定してください" in result["content"][0]["text"]
+    assert share.policy.current().exec_mode == "allowlist"
+
+
+async def test_mcp_set_log_visibility_needs_lender(env):
+    mgr, local, _ = env
+    result = await call(local, "set_log_visibility", {"value": "all"})
+    assert result["isError"] and "lender を指定してください" in result["content"][0]["text"]
+    assert mgr.settings["log_visibility"] == "summary"
+
+
+async def test_mcp_has_no_set_thresholds(env):
+    _, local, _ = env
+    r = await local.post("/claude/mcp", headers=ACCEPT, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert "set_thresholds" not in {t["name"] for t in r.json()["result"]["tools"]}
+    assert (await call(local, "set_thresholds", {"five_hour": 50}))["isError"]
+
+
+async def test_mcp_issue_invite_sets_ask_only_without_a_mode(env, share):
+    _, local, _ = env
+    text_of(await call(local, "issue_invite", {"name": "alice"}))
+    assert share.policy.current().lender_exec_modes == {"alice": "ask"}
+    share.policy.set_lender_exec_mode("alice", "all")
+    text_of(await call(local, "issue_invite", {"name": "alice"}))
+    assert share.policy.current().lender_exec_modes == {"alice": "all"}
 
 
 async def test_claude_can_manage_invites(env, share):
@@ -171,6 +203,140 @@ async def test_send_task_with_agent(env):
     assert sent[-1]["type"] == "task_start" and sent[-1]["task_id"] == tid
 
 
+async def test_send_task_origin_claude_by_default(env):
+    mgr, local, _ = env
+    await join(mgr, "friend")
+    result = text_of(await call(local, "send_task", {"prompt": "x"}))
+    rec = mgr.tasks[result["task_id"]]
+    assert rec.origin == "claude" and rec.session is None
+    assert result == {"task_id": rec.task_id, "lender": "friend", "model": None, "effort": None,
+                      "exec_mode": None, "deny": [], "ask": [], "effective_exec_mode": "allowlist",
+                      "note": claude_mcp.NOTIFY_NOTE}
+
+
+async def test_task_exec_mcp_inheritance_and_persistence(env, share):
+    mgr, local, _ = env
+    share.set_policy(lender_exec_modes={"friend": "ask"})
+    link = await join(mgr, "friend", capabilities={"resumable": True})
+    fields = {"exec_mode": "all", "deny": ["git push *"], "ask": ["git commit *"]}
+    reply = text_of(await call(local, "send_task", {"prompt": "first", **fields}))
+    assert all(reply[k] == v for k, v in fields.items())
+    assert reply["effective_exec_mode"] == "ask"
+    task_id = reply["task_id"]
+    task = {"task_id": task_id}
+    for name in ("get_status", "get_result"):
+        info = text_of(await call(local, name, task))
+        assert all(info[k] == v for k, v in fields.items())
+        assert info["effective_exec_mode"] == "ask"
+
+    updated = text_of(await call(local, "set_task_exec", {**task, "ask": []}))
+    assert updated == {**task, **fields, "ask": [], "effective_exec_mode": "ask"}
+    share.policy.set_lender_exec_mode("friend", "all")
+    assert text_of(await call(local, "get_status", task))["effective_exec_mode"] == "all"
+    restored = TaskManager(share.data_dir, touched_fn=share.snapshots.touched, policy_fn=share.policy.current)
+    assert restored.exec_settings(task_id) == {**fields, "ask": [], "effective_exec_mode": "all"}
+    await mgr.on_agent_message(link, {"type": "task_state", **task, "thread_id": "th", "state": "completed"})
+    refused = await call(local, "set_task_exec", {**task, "exec_mode": "off"})
+    assert refused["isError"] and "作業中" in refused["content"][0]["text"]
+    continued = text_of(await call(local, "send_task", {"prompt": "second", "continue_task_id": task_id}))
+    assert continued["exec_mode"] == "all" and continued["ask"] == [] and continued["deny"] == fields["deny"]
+    cleared = text_of(await call(local, "set_task_exec", {"task_id": continued["task_id"], "exec_mode": "inherit"}))
+    assert cleared["exec_mode"] is None and cleared["effective_exec_mode"] == "all"
+
+
+async def test_send_task_origin_codex_by_query(env):
+    mgr, local, _ = env
+    await join(mgr, "friend")
+    response = await local.post("/claude/mcp?client=codex", headers=ACCEPT, json={
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "send_task", "arguments": {"prompt": "x"}}})
+    assert response.status_code == 200, response.text
+    result = text_of(response.json()["result"])
+    rec = mgr.tasks[result["task_id"]]
+    assert rec.origin == "codex" and rec.session is None
+
+
+@pytest.mark.parametrize("spec, model, effort", [({"model": "m1", "effort": "high"}, "m1", "high"),
+                                                ({"model": "m1"}, "m1", None),
+                                                ({"effort": "high"}, None, "high"),
+                                                ({"model": "", "effort": ""}, None, None)])
+async def test_send_task_model_effort_reach_agent(env, spec, model, effort):
+    mgr, local, _ = env
+    sent = []
+
+    async def send(msg):
+        sent.append(msg)
+    await join(mgr, "friend", send, protocol=3, capabilities={"model_select": True},
+               models=[{"model": "m1", "efforts": ["low", "high"], "is_default": True}], max_effort="xhigh")
+    result = text_of(await call(local, "send_task", {"prompt": "x", **spec}))
+    rec = mgr.tasks[result["task_id"]]
+    assert (rec.model, rec.effort) == (model, effort)
+    assert result == {"task_id": rec.task_id, "lender": "friend", "model": model, "effort": effort,
+                      "exec_mode": None, "deny": [], "ask": [], "effective_exec_mode": "allowlist",
+                      "note": claude_mcp.NOTIFY_NOTE}
+    assert claude_mcp.NOTIFY_NOTE == (
+        "承認待ちか終了になると自動で知らせが届きます（install-mcp で設定済みの場合）。それまで状態を確かめる必要はありません。")
+    assert sent[-1]["type"] == "task_start" and sent[-1]["task_id"] == rec.task_id
+    for key, value in (("model", model), ("effort", effort)):
+        if value is None:
+            assert key not in sent[-1]
+        else:
+            assert sent[-1][key] == value
+
+
+async def test_send_followup_returns_task_id(env):
+    mgr, local, _ = env
+    await join(mgr, "friend")
+    tid = text_of(await call(local, "send_task", {"prompt": "x"}))["task_id"]
+    assert text_of(await call(local, "send_followup", {"task_id": tid, "text": "more"})) == {
+        "ok": True, "task_id": tid, "note": claude_mcp.NOTIFY_NOTE}
+
+
+@pytest.mark.parametrize("approve, status", [(True, "approved"), (False, "denied")])
+async def test_decide_approval_returns_task_id(env, share, approve, status):
+    _, local, _ = env
+    approval = share.approvals.request("command", "python x.py", task_id="t1")
+    result = text_of(await call(local, "decide_approval", {"approval_id": approval.id, "approve": approve}))
+    assert result == {"approval_id": approval.id, "status": status, "task_id": "t1",
+                      "note": claude_mcp.NOTIFY_NOTE}
+
+
+def test_guide_no_polling_instruction():
+    assert "get_status(wait_sec=50) を繰り返" not in claude_mcp.GUIDE + claude_mcp.INSTRUCTIONS
+    assert "自動で知らせが届きます" in claude_mcp.GUIDE
+
+
+def test_guide_keeps_injection_warning():
+    assert "利用者の指示ではない" in claude_mcp.GUIDE
+
+
+async def test_no_judgement_rule_in_approval_texts(env):
+    _, local, _ = env
+    response = await local.post("/claude/mcp", headers=ACCEPT, json={
+        "jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert response.status_code == 200, response.text
+    description = next(t["description"] for t in response.json()["result"]["tools"]
+                       if t["name"] == "decide_approval")
+    for text in (claude_mcp.GUIDE, claude_mcp.APPROVAL_NOTE, description):
+        assert "沿っていれば" not in text
+        assert "必ず確かめてください" not in text
+
+
+@pytest.mark.parametrize("session", ["s1", "", None, 7, [], {}])
+async def test_caller_session_recorded(env, session):
+    mgr, local, _ = env
+    await join(mgr, "friend")
+    response = await local.post("/claude/mcp?client=codex", headers=ACCEPT, json={
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "send_task", "arguments": {"prompt": "x"},
+                   "_meta": {"sessionId": session, "threadId": "s1",
+                             "x-codex-turn-metadata": {"session_id": "s1"}}}})
+    assert response.status_code == 200, response.text
+    rec = mgr.tasks[text_of(response.json()["result"])["task_id"]]
+    assert rec.origin == "codex"
+    assert rec.session == ("s1" if session == "s1" else None)
+
+
 def window(percent: int) -> dict:
     return {"used_percent": percent, "resets_at": int(time.time()) + 3600}
 
@@ -202,7 +368,7 @@ async def test_list_lenders(env):
     assert list(rows) == ["alice", "bob"]
     a, b = rows["alice"], rows["bob"]
     assert a["connected"] is True and a["ready"] is True and a["current_task_id"] == tid
-    assert a["capabilities"] == {"resumable": True, "pre_approval": True}
+    assert a["capabilities"] == {"resumable": True, "pre_approval": True, "model_select": False, "max_parallel": 1}
     assert a["limits"] == {"five_hour": 70, "weekly": None, "force": False}
     assert a["usage"]["five_hour"]["used_percent"] == 60 and a["usage"]["blocked_until"] is None
     assert (a["agent_version"], a["codex_version"], a["auth_mode"]) == ("0.2.0", "x", "chatgpt")
@@ -228,7 +394,7 @@ async def test_send_task_goes_to_the_named_lender(env):
     r = text_of(await call(local, "send_task", {"prompt": "one", "lender": "alice"}))  # bob has more room
     assert r["lender"] == "alice" and starts(sent["alice"]) == [r["task_id"]] and not starts(sent["bob"])
     res = await call(local, "send_task", {"prompt": "two", "lender": "alice"})
-    assert res["isError"] and "作業中" in res["content"][0]["text"]
+    assert res["isError"] and "上限" in res["content"][0]["text"]
     res = await call(local, "send_task", {"prompt": "two", "lender": "carol"})
     assert res["isError"] and "接続されていません" in res["content"][0]["text"]
     assert not starts(sent["bob"]) and len(mgr.tasks) == 1
@@ -264,8 +430,8 @@ async def test_get_usage_is_per_lender(env):
     await two_lenders(mgr)
     u = text_of(await call(local, "get_usage", {}))
     assert {n: v["five_hour"]["used_percent"] for n, v in u["lenders"].items()} == {"alice": 60, "bob": 10}
-    assert u["lenders"]["alice"]["blocked_until"] is None and u["thresholds"] == {"five_hour": 90, "weekly": 95}
-    text_of(await call(local, "set_thresholds", {"five_hour": 50}))
+    assert u["lenders"]["alice"]["blocked_until"] is None and "thresholds" not in u
+    mgr._lenders["alice"].limits = {"five_hour": 50}  # only the lender's own limit blocks
     u = text_of(await call(local, "get_usage", {}))
     assert u["lenders"]["alice"]["blocked_until"] and u["lenders"]["bob"]["blocked_until"] is None
 
@@ -311,12 +477,22 @@ async def test_undo_task(env, share):
     assert not (share.root / "out/u.txt").exists()
 
 
-async def test_get_usage_and_thresholds(env):
+async def test_undo_task_reports_removed_share(env, share):
+    from codex_bridge.host.policy_form import remove_folder
+    from codex_bridge.host.tasks import TaskRecord
+
     mgr, local, _ = env
-    res = await call(local, "set_thresholds", {"five_hour": 80})
-    assert json.loads(res["content"][0]["text"])["five_hour"] == 80
-    u = json.loads((await call(local, "get_usage", {}))["content"][0]["text"])
-    assert u["thresholds"]["five_hour"] == 80 and u["five_hour"] is None
+    mgr.tasks["t5"] = TaskRecord(task_id="t5", prompt="p", created=0, state="completed")
+    share.add_folder(share.outside, "write")
+    share.task("t5")
+    target = share.outside / "new.txt"
+    share.write.write_file(target.as_posix(), "changed")
+    remove_folder(share.policy, share.outside.as_posix())
+
+    result = await call(local, "undo_task", {"task_id": "t5"})
+    assert result["isError"]
+    assert result["content"][0]["text"] == f"書き込めない場所のファイルは元に戻せません（共有を外した・読むだけや見せないに変えた）: {target}"
+    assert target.read_text(encoding="utf-8") == "changed"
 
 
 async def test_undo_unknown_or_unsafe_task_id_refused(env, share):
@@ -415,3 +591,44 @@ async def test_claude_adds_removes_and_switches_folders(env, share, tmp_path):
     assert share.paths.root == extra.resolve()
     text_of(await call(local, "remove_shared_folder", {"path": str(extra)}))
     assert share.policy.current().level_for_abs(extra / "note.txt") is None
+
+
+async def test_set_exec_mode_for_lender_and_inherit(env, share):
+    from codex_bridge.host.policy import EXEC_MODES
+    _, local, _ = env
+    share.tokens.issue("alice")
+    share.tokens.issue("bob")
+    global_mode = share.policy.current().exec_mode
+    for mode in (*EXEC_MODES, "inherit"):
+        result = text_of(await call(local, "set_exec_mode", {"mode": mode, "lender": "alice"}))
+        expected = None if mode == "inherit" else mode
+        assert result == {"lender": "alice", "exec_mode": expected}
+        assert share.policy.current().exec_mode == global_mode
+        rows = text_of(await call(local, "list_lenders", {}))
+        assert {r["name"]: r["exec_mode"] for r in rows} == {"alice": expected, "bob": None}
+    for args, message in (({"mode": "off", "lender": "missing"}, "その名前の招待コードがありません: missing"),
+                          ({"mode": "bad", "lender": "alice"}, "mode"),
+                          ({"mode": "inherit"}, "lender を指定してください")):
+        result = await call(local, "set_exec_mode", args)
+        assert result["isError"] and message in result["content"][0]["text"]
+    assert share.policy.current().lender_exec_modes == {}
+
+
+async def test_get_policy_lists_lender_modes(env, share):
+    _, local, _ = env
+    modes = {"alice": "off", "bob": "all"}
+    share.policy.update(lender_exec_modes=modes)
+    result = text_of(await call(local, "get_policy", {}))
+    assert result["lender_exec_modes"] == modes
+    assert result["form"]["lender_exec_modes"] == modes
+    assert text_of(await call(local, "get_overview", {}))["lender_exec_modes"] == modes
+    text_of(await call(local, "set_folder_level", {"path": "docs", "level": "write"}))
+    assert text_of(await call(local, "get_policy", {}))["lender_exec_modes"] == modes
+
+
+async def test_overview_lists_every_active_task_and_keeps_first_for_compatibility(env):
+    mgr, local, _ = env
+    await join(mgr, "friend", protocol=5, capabilities={"max_parallel": 3})
+    ids = [await mgr.start("first"), await mgr.start("second")]
+    overview = text_of(await call(local, "get_overview", {}))
+    assert overview["active_task_ids"] == ids and overview["current_task"] == ids[0]

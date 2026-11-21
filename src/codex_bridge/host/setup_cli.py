@@ -48,7 +48,7 @@ def _wait_tailscale_ip() -> str:
 
 
 # ---- setup.bat ---------------------------------------------------------------
-def run_setup(config_path: Path, *, then_start: bool = False) -> None:
+def run_setup(config_path: Path, *, then_start: bool = False, from_app: bool = False) -> None:
     root = Path.cwd()
     config_path = Path(config_path).resolve()
     total = 5
@@ -70,7 +70,8 @@ def run_setup(config_path: Path, *, then_start: bool = False) -> None:
         st.write_host_config(config_path, share_root=None, data_dir=root / "data", ip=ip)
     elif st.update_public_bind(config_path, ip):
         _say("Tailscale の IP が変わっていたので、設定を更新しました。招待コードは発行し直してください。")
-    _say("共有フォルダ（Codex に触らせるフォルダ）は、起動したあとの管理画面で選びます。")
+    _say("共有フォルダ（Codex に触らせるフォルダ）は、画面の「使う」タブで選びます。" if from_app else
+         "共有フォルダ（Codex に触らせるフォルダ）は、起動したあとの管理画面で選びます。")
 
     from .main import ensure_config
     ensure_config(config_path)
@@ -78,11 +79,12 @@ def run_setup(config_path: Path, *, then_start: bool = False) -> None:
     policy = cfg.data_dir / "policy.yaml"
     _say(f"権限の規則: {policy}")
     _say("  最初は「全部読むだけ・コマンドは許可リストのみ・削除は確認待ち」です。")
-    _say("  書かせてよいフォルダや、見せないフォルダは、管理画面の「権限の規則」でも変えられます。")
+    _say("  書かせてよいフォルダや、見せないフォルダは、「使う」タブの「共有フォルダ」で変えられます。" if from_app else
+         "  書かせてよいフォルダや、見せないフォルダは、管理画面の「権限の規則」でも変えられます。")
     if _yes("今、権限の規則をメモ帳で開きますか？", default=False):
         subprocess.Popen(["notepad.exe", str(policy)])
 
-    _step(4, total, "ファイアウォールの許可（知人の PC からの接続を通す）")
+    _step(4, total, "ファイアウォールの許可（" + ("貸す人" if from_app else "知人") + "の PC からの接続を通す）")
     if st.firewall_rule_exists():
         _say("設定済みです。")
     else:
@@ -92,24 +94,35 @@ def run_setup(config_path: Path, *, then_start: bool = False) -> None:
              "設定できませんでした。あとで setup.bat をもう一度実行してください。")
 
     _step(5, total, "完了")
-    _say("初期設定が終わりました。次にやること:")
+    if from_app:
+        _say("初期設定が終わりました。codex-bridge の画面に戻ってください。")
+    else:
+        _say("初期設定が終わりました。次にやること:")
     n = 0
-    if not then_start:
+    if not then_start and not from_app:
         n += 1
         _say(f"  {n}. start.bat（または exe をダブルクリックして「使う側」）で codex-bridge を起動する（管理画面が開きます）")
     n += 1
-    _say(f"  {n}. 管理画面で共有フォルダを選ぶ")
+    _say(f"  {n}. 「使う」タブで共有フォルダを選ぶ" if from_app else f"  {n}. 管理画面で共有フォルダを選ぶ")
     n += 1
     _say(f"  {n}. install-mcp.bat を実行して、Claude Code / Codex から codex-bridge を使えるようにする")
     n += 1
-    _say(f"  {n}. 管理画面の「招待コード」を発行し、同じ zip と一緒に知人に渡す（知人は exe をダブルクリックして「貸す側」）")
+    if from_app:
+        _say(f"  {n}. codex-bridge の画面の「使う」タブで「招待」を押してコードを発行し、同じ zip と一緒に貸す人に渡す"
+             "（貸す人は exe をダブルクリックし、「貸す」タブにコードを貼る）")
+    else:
+        _say(f"  {n}. 管理画面の「招待コード」を発行し、同じ zip と一緒に知人に渡す（知人は exe をダブルクリックして「貸す側」）")
     n += 1
-    _say(f"  {n}. Tailscale の管理画面でこの PC を知人と共有する（この画面を開きます）")
-    _say("     → この PC の行の「…」→「Share...」→ リンクをコピーして知人に送る")
-    if then_start:
+    who = "貸す人" if from_app else "知人"
+    screen = "画面" if from_app else "管理画面"
+    _say(f"  {n}. Tailscale の{screen}でこの PC を{who}と共有する（この画面を開きます）")
+    _say(f"     → この PC の行の「…」→「Share...」→ リンクをコピーして{who}に送る")
+    if then_start and not from_app:
         _say("次回からは、start.bat か、exe をダブルクリックして「使う側」を選ぶと起動できます。")
-    if _yes("Tailscale の管理画面を開きますか？"):
+    if _yes(f"Tailscale の{screen}を開きますか？"):
         webbrowser.open("https://login.tailscale.com/admin/machines")
+    if from_app:
+        input("Enter キーを押すと閉じます。")  # the exit code 0 tells the app to start
     if then_start:
         _say()
         _say("このまま codex-bridge を起動します。"
@@ -123,15 +136,32 @@ def run_install_mcp(config_path: Path) -> None:
     _say("Claude Code と Codex から codex-bridge を使えるように登録します。")
     msgs = {"added": "登録しました。", "already": "登録済みです。", "failed": "登録に失敗しました。",
             "missing": "見つかりませんでした（入れていなければ問題ありません。入れたあとでもう一度実行してください）。"}
-    _say(f"  Claude Code: {msgs[st.register_claude(local_port=port)]}")
+    hook_msgs = {"added": "入れました。", "updated": "入れ直しました（古い場所のものは外しました）。",
+                 "already": "入れてあります。", "failed": "入れられませんでした（設定ファイルを読めません: {path}）。"}
+    claude_result = st.register_claude(local_port=port)
+    _say(f"  Claude Code: {msgs[claude_result]}")
+    if claude_result in ("added", "already"):
+        result = st.install_claude_hook(st.hook_command("claude", port))
+        _say(f"  Claude Code の知らせ: {hook_msgs[result].format(path=st.claude_settings_path())}")
     codex_result = st.register_codex(local_port=port)
     _say(f"  Codex      : {msgs[codex_result]}")
-    if codex_result in ("added", "already") and st.codex_auto_approve():
-        _say("               （codex-bridge の道具を毎回確認なしで呼べるように設定しました）")
+    if codex_result in ("added", "already"):
+        url = st.codex_mcp_url(port)
+        if not st.codex_set_url(url) and st.codex_current_url() != url:
+            _say("  ※ Codex の登録の URL を書き換えられませんでした。config.toml の "
+                 f"[mcp_servers.codex-bridge] の url を {url} にしてください。")
+        if st.codex_auto_approve():
+            _say("               （codex-bridge の道具を毎回確認なしで呼べるように設定しました）")
+        result = st.install_codex_hook(st.hook_command("codex", port))
+        _say(f"  Codex の知らせ      : {hook_msgs[result].format(path=st.codex_hooks_path())}")
+        if result in ("added", "updated"):
+            _say("  ※ Codex を開いて /hooks で codex-bridge のフックを信頼してください"
+                 "（最初の 1 回と、install-mcp を実行し直してフックが変わったとき）。")
     _say("")
     _say("使い方: start.bat で codex-bridge を起動してから、Claude Code か Codex で新しい会話を始め、")
     _say("  「codex-bridge で、○○の開発を依頼して」のように頼んでください。")
-    _say("  エージェントが共有フォルダを確かめ、知人の Codex に依頼し、結果を確認して報告します。")
+    _say("  依頼したタスクが承認待ちか終了になると、依頼したエージェントに自動で知らせが届きます。")
+    _say("  （Codex では、知らせを待つ間は会話が続いている扱いです。話しかけるときは Esc で止めてください。）")
 
 
 # ---- start.bat ---------------------------------------------------------------
