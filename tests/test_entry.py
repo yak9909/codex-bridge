@@ -416,10 +416,11 @@ def test_update_acknowledges_only_after_claim_and_resident_start(launch, monkeyp
             events.append("old process exited")
         yield wait
 
-    def start(*, update_ready):
+    def start(*, update_ready, wait_for_previous):
         assert not (stage / "ready").exists()
         events.append("screen listening")
         asyncio.run(update_ready())
+        wait_for_previous()
         return 0
 
     monkeypatch.setattr(entry, "acquire_agent_instance", claim)

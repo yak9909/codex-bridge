@@ -522,6 +522,8 @@ class Resident:
             self.update_message = f"{self.update_message}。{reason}" if self.update_message else reason
             self.applog.add("use", "error", reason)
             self.notify("codex-bridge", reason)
+        if not self.stop_event.is_set() and self.config_path.exists() and not self.host_role.running:
+            await self.start_host()
 
     def _clean_old_exes(self) -> None:
         if self.update_exe is not None and self._installing is None and not self._recovery_failed:
@@ -776,7 +778,8 @@ class Resident:
                     self.tray.stop()
 
 
-def main(*, update_ready: Callable[[], Awaitable[None]] | None = None) -> int:
+def main(*, update_ready: Callable[[], Awaitable[None]] | None = None,
+         wait_for_previous: Callable[[], None] | None = None) -> int:
     from .agent.main import ensure_std_streams, run_guarded, start_again
     from .agent.setup import data_root
     from .host.role import HostRole
@@ -784,12 +787,14 @@ def main(*, update_ready: Callable[[], Awaitable[None]] | None = None) -> int:
 
     ensure_std_streams()
     home = data_root()
-    handover_complete = False
+    readiness_sent = False
 
     async def finish_handover() -> None:
-        nonlocal handover_complete
+        nonlocal readiness_sent
         await update_ready()
-        handover_complete = True
+        readiness_sent = True
+        if wait_for_previous is not None:
+            await asyncio.to_thread(wait_for_previous)
 
     def run() -> bool:
         applog = AppLog(home / "logs" / "app.jsonl")
@@ -803,7 +808,7 @@ def main(*, update_ready: Callable[[], Awaitable[None]] | None = None) -> int:
         return app.run(check_updates=True, update_ready=finish_handover if update_ready is not None else None)
 
     if update_ready is not None:
-        moved = run_guarded(run, home, should_report=lambda: handover_complete)
+        moved = run_guarded(run, home, should_report=lambda: readiness_sent)
     else:
         moved = run_guarded(run, home)
     if moved:

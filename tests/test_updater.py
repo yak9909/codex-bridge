@@ -318,6 +318,30 @@ def test_cleanup_retries_only_matching_regular_files(tmp_path, monkeypatch):
     assert directory.is_dir()
 
 
+@pytest.mark.parametrize("startup", [True, False])
+def test_recovery_stage_protects_all_exe_backups(tmp_path, startup):
+    exe = tmp_path / updater.EXE
+    old = exe.with_suffix(".exe.old")
+    renamed = old.with_name(old.name + "-123")
+    for backup in (old, renamed):
+        backup.write_bytes(b"needed for rollback")
+    stage = tmp_path / (updater.INSTALL_STAGE + "abcdefgh")
+    stage.mkdir()
+
+    def cleanup():
+        if startup:
+            updater.clean_up(exe, tmp_path / "data")
+        else:
+            updater.clean_old_exes(exe)
+
+    cleanup()
+    assert stage.is_dir()
+    assert old.read_bytes() == renamed.read_bytes() == b"needed for rollback"
+    stage.rmdir()
+    cleanup()
+    assert not old.exists() and not renamed.exists()
+
+
 def test_replacement_is_assigned_before_resume_and_waits_for_whole_job(tmp_path, monkeypatch):
     events = []
     remaining = iter([1, 0])  # the bootloader is gone, then the inner process exits

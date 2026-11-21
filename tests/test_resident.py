@@ -1277,8 +1277,8 @@ async def test_backup_cleanup_retries_after_start_and_at_release_check(tmp_path,
     assert len(events) == 3
 
 
-@pytest.mark.parametrize("ready", [True, False])
-def test_handover_crash_reporting_begins_after_readiness(tmp_path, monkeypatch, ready):
+@pytest.mark.parametrize("failure", ["notify", "wait", "resident"])
+def test_handover_crash_reporting_begins_after_readiness(tmp_path, monkeypatch, failure):
     from codex_bridge.agent import setup
 
     notices = []
@@ -1290,8 +1290,12 @@ def test_handover_crash_reporting_begins_after_readiness(tmp_path, monkeypatch, 
     monkeypatch.setattr(resident, "host_config_path", lambda: tmp_path / "host.yaml")
 
     async def notify_ready():
-        if not ready:
+        if failure == "notify":
             raise RuntimeError("before readiness")
+
+    def wait_for_previous():
+        if failure == "wait":
+            raise RuntimeError("after readiness, waiting for old process")
 
     def run(self, *, check_updates, update_ready):
         if update_ready is not None:
@@ -1300,18 +1304,21 @@ def test_handover_crash_reporting_begins_after_readiness(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(Resident, "run", run)
     log = tmp_path / "logs" / "crash.log"
-    if ready:
-        assert resident.main(update_ready=notify_ready) == 0
+    if failure != "notify":
+        assert resident.main(update_ready=notify_ready, wait_for_previous=wait_for_previous) == 0
         first = log.read_text(encoding="utf-8")
         assert re.match(r"--- \d{4}-\d\d-\d\d \d\d:\d\d:\d\d \(agent [^)]+\)", first)
-        assert "RuntimeError: resident crash" in first
+        reason = "after readiness, waiting for old process" if failure == "wait" else "resident crash"
+        assert f"RuntimeError: {reason}" in first
         assert len(notices) == 1 and notices[0][1] == {"error": True}
         assert str(log) in notices[0][0]
         assert resident.main() == 0
-        assert log.read_text(encoding="utf-8").count("RuntimeError: resident crash") == 2
+        appended = log.read_text(encoding="utf-8")
+        assert appended.startswith(first)
+        assert appended[len(first):].count("RuntimeError: resident crash") == 1
     else:
         with pytest.raises(RuntimeError, match="before readiness"):
-            resident.main(update_ready=notify_ready)
+            resident.main(update_ready=notify_ready, wait_for_previous=wait_for_previous)
         assert not log.exists() and not notices
 
 
@@ -1343,6 +1350,27 @@ async def test_mutex_recovery_is_bounded_keeps_app_alive_and_reports_failure(res
     assert ("画面の待ち受けを再開できませんでした" in status["message"]) is not port_free
     assert "ミューテックス" in res.applog.entries()[0]["text"]
     assert "ミューテックス" in res.tray.notices[0][1]
+
+
+@pytest.mark.parametrize("configured,running", [(True, False), (True, True), (False, False)])
+async def test_handover_recovery_restarts_only_configured_stopped_host(res, monkeypatch, configured, running):
+    res.stop_event = asyncio.Event()
+    res._handover = True
+    res.host_role.running = running
+    if configured:
+        res.config_path.touch()
+    monkeypatch.setattr(entry, "claim_agent_instance", lambda: True)
+    monkeypatch.setattr(res, "_start_ui", lambda: None)
+    attempts = []
+
+    async def start_host():
+        assert not res._handover
+        attempts.append("start")
+
+    monkeypatch.setattr(res, "start_host", start_host)
+    await res._restore_update_handover()
+    assert attempts == (["start"] if configured and not running else [])
+
 
 
 

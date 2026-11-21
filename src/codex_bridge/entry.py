@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from contextlib import contextmanager
 import ctypes
 from ctypes import wintypes
@@ -144,8 +143,7 @@ def _run_resident(*, after_update: tuple[str, int] | None = None) -> int:
                 async def ready():
                     if not acknowledge_restart(Path(sys.executable).resolve(), stage_name):
                         raise UpdateError("新しい exe の起動を通知できませんでした")
-                    await asyncio.to_thread(wait)
-                return resident.main(update_ready=ready)
+                return resident.main(update_ready=ready, wait_for_previous=wait)
     finally:
         release_agent_instance()
     return 0

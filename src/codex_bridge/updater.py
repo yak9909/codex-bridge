@@ -342,6 +342,8 @@ def install_release(exe: Path, package: Path, launch=None, *, before_launch=None
 def clean_old_exes(exe: Path) -> None:
     name = EXE + ".old"
     try:
+        if any(exe.parent.glob(INSTALL_STAGE + "*")):
+            return  # A failed rollback may still need a backup outside the staging directory.
         backups = list(exe.parent.glob(name + "*"))
     except OSError:
         return
