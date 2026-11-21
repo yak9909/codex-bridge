@@ -31,9 +31,9 @@ def test_readme_formats(mod):
     assert "/hooks" in mod.README
 
 
-def test_version_is_030(mod):
-    assert codex_bridge.__version__ == "0.3.0"
-    assert mod.VERSION == "0.3.0"
+def test_version_is_031(mod):
+    assert codex_bridge.__version__ == "0.3.1"
+    assert mod.VERSION == "0.3.1"
 
 
 @pytest.mark.parametrize("path", ["README.md", "docs/friend-guide.md", "docs/operation-guide.md", None])
