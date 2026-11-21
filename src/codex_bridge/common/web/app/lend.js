@@ -6,6 +6,10 @@ import { connectionHead, settingsHtml, modelSummary, preSummary } from "/app/sta
 import { pcHtml, setupErrorHtml } from "/app/static/lend-pages.js";
 
 const S = { open: new Set(), cards: new Map(), selected: null, filter: "", tab: "tasks", invite: false, code: "", pc: { edit: null, workdir: "", path: "", message: "" } };
+const pendingKey = (p) => JSON.stringify([p.connection_id, p.task_id, p.created]);
+export function pendingHtml(p) {
+  return `<div class="alert multi" data-pending="${esc(pendingKey(p))}"><span class="lz warn">${p.kind === "start" ? "新しい依頼" : "追加の指示"}</span><div class="body"><span class="pending-prompt" tabindex="0">${esc(p.prompt)}</span><span class="cap" data-pending-meta>${esc(pendingMeta(p))}</span><input class="sm" data-act="reason" placeholder="拒否する理由（任意）" aria-label="拒否する理由（任意）"></div><span class="decide"><button class="sm" data-act="decide" data-yes="1">許可</button><button class="danger sm" data-act="decide" data-yes="0">拒否</button></span></div>`;
+}
 const keyFor = (t) => JSON.stringify([t.connection_id, t.task_id]);
 export function pendingMeta(p, now = Date.now() / 1000) {
   const remaining = p.timeout_min == null ? null : Math.ceil((p.created + p.timeout_min * 60 - now) / 60);
@@ -25,7 +29,7 @@ const SHELL = `<div class="shell lend-shell">
   <aside class="pane side" aria-label="使用量と依頼主">
     <div data-slot="setup-error"></div>
     <div class="block"><h2>使用量</h2><div class="meters" data-slot="meters"></div><div class="limits" data-slot="limits"></div></div>
-    <div class="pane-head"><h2>依頼主</h2><span class="count" data-slot="count">0</span><span class="cap">作業は同時に 1 つ</span><span class="spacer"></span><button class="secondary sm" data-act="invite-open">${icon("plug")}追加</button></div>
+    <div class="pane-head"><h2>依頼主</h2><span class="count" data-slot="count">0</span><span class="cap" data-slot="parallel-caption"></span><span class="spacer"></span><button class="secondary sm" data-act="invite-open">${icon("plug")}追加</button></div>
     <div data-slot="invite"></div><div class="pane-body scroll" data-slot="connections"></div>
   </aside>
   <div class="work no-alerts"><div class="alerts" data-slot="pending" aria-label="許可を待っている依頼" hidden></div>
@@ -40,9 +44,9 @@ export function renderLend(root) {
   const shell = fromHtml(SHELL);
   root.replaceChildren(shell);
   const q = (slot) => shell.querySelector(`[data-slot="${slot}"]`);
-  const el = Object.fromEntries(["meters", "limits", "count", "invite", "connections", "pending", "filter", "items", "head", "req", "log", "setup-error"].map((k) => [k, q(k)]));
+  const el = Object.fromEntries(["meters", "limits", "count", "invite", "connections", "pending", "filter", "items", "head", "req", "log", "setup-error", "parallel-caption"].map((k) => [k, q(k)]));
   el.pc = shell.querySelector('[data-panel="pc"]');
-  const view = { connections: [], tasks: [], settings: new Map(), pending: null, shared: null, overview: {}, logFor: null, pendingKey: null };
+  const view = { connections: [], tasks: [], settings: new Map(), pending: [], shared: null, overview: {}, logFor: null, pendingKey: null };
   let alive = true, reading = false, again = false, revision = 0, writing = 0;
   let writes = Promise.resolve();
 
@@ -62,11 +66,14 @@ export function renderLend(root) {
 
   function drawLimits() {
     const limits = view.shared.settings.limits;
+    const maximum = view.shared.settings.max_parallel ?? 3;
+    el["parallel-caption"].textContent = `同時に ${maximum} つまで`;
     const usage = view.overview.usage || {};
     patch(el.meters, meter("5時間", usage.five_hour, limits.five_hour) + meter("週間", usage.weekly, limits.weekly));
     const html = [["five_hour", "5時間の上限"], ["weekly", "週間の上限"]].map(([k, label]) => `<label class="lim"><span class="lbl">${label}</span><input class="sm" type="number" min="1" max="100" step="any" placeholder="なし" data-act="limit" data-key="${k}" value="${esc(limits[k] ?? "")}"><span>%</span></label>`).join("") +
       `<label class="lim"><span class="lbl">上限を超えたとき</span><select class="sm" data-act="force"><option value="report"${!limits.force ? " selected" : ""}>止めて報告させる</option><option value="stop"${limits.force ? " selected" : ""}>すぐ強制終了</option></select></label>`;
-    patch(el.limits, html, true);
+    const parallel = `<label class="lim"><span class="lbl">同時に受ける依頼</span><select class="sm" data-act="parallel">${Array.from({ length: 8 }, (_, i) => i + 1).map((n) => `<option value="${esc(n)}"${n === maximum ? " selected" : ""}>${esc(n)}</option>`).join("")}</select></label>`;
+    patch(el.limits, html + parallel, true);
   }
 
   function drawCards(forceId = null) {
@@ -102,18 +109,23 @@ export function renderLend(root) {
     el.count.textContent = String(view.connections.length);
   }
 
-  function drawPending(p) {
-    const key = p ? JSON.stringify([p.connection_id, p.task_id, p.created]) : null;
-    if (key !== view.pendingKey) {
-      const meta = p ? pendingMeta(p) : "";
-      patch(el.pending, p ? `<div class="alert multi"><span class="lz warn">${p.kind === "start" ? "新しい依頼" : "追加の指示"}</span><div class="body"><span class="pending-prompt" tabindex="0">${esc(p.prompt)}</span><span class="cap" data-pending-meta>${esc(meta)}</span><input class="sm" data-act="reason" placeholder="拒否する理由（任意）" aria-label="拒否する理由（任意）"></div><span class="decide"><button class="sm" data-act="decide" data-yes="1">許可</button><button class="danger sm" data-act="decide" data-yes="0">拒否</button></span></div>` : "");
-      view.pendingKey = key;
-    } else if (p) {
-      el.pending.querySelector('[data-pending-meta]').innerHTML = esc(pendingMeta(p));
+  function drawPending(pending) {
+    const rows = Array.isArray(pending) ? pending : [];
+    const keys = new Set(rows.map(pendingKey));
+    let previous = null;
+    for (const p of rows) {
+      const key = pendingKey(p);
+      let item = [...el.pending.children].find((n) => n.dataset.pending === key);
+      if (!item) item = fromHtml(pendingHtml(p));
+      else item.querySelector('[data-pending-meta]').innerHTML = esc(pendingMeta(p));
+      const place = previous ? previous.nextSibling : el.pending.firstChild;
+      if (item.parentNode !== el.pending || item !== place) el.pending.insertBefore(item, place);
+      previous = item;
     }
-    view.pending = p;
-    el.pending.hidden = !p;
-    shell.querySelector('.work').classList.toggle("no-alerts", !p);
+    for (const item of [...el.pending.children]) if (!keys.has(item.dataset.pending)) item.remove();
+    view.pending = rows;
+    el.pending.hidden = !rows.length;
+    shell.querySelector('.work').classList.toggle("no-alerts", !rows.length);
   }
 
   function drawTabs() {
@@ -215,9 +227,11 @@ export function renderLend(root) {
     }
     if (act === "remove") write(async () => { await send("DELETE", `/lend/api/connections/${encodeURIComponent(id)}`); S.open.delete(id); view.settings.delete(id); S.cards.delete(id); }, b);
     if (act === "clear-logs") write(async () => { await send("POST", `/lend/api/connections/${encodeURIComponent(id)}/logs/clear`); ui.confirm = null; }, b);
-    if (act === "decide" && view.pending) {
-      const p = view.pending;
-      const reason = el.pending.querySelector('[data-act="reason"]').value;
+    if (act === "decide") {
+      const item = b.closest("[data-pending]");
+      const p = view.pending.find((p) => pendingKey(p) === item?.dataset.pending);
+      if (!p) return;
+      const reason = item.querySelector('[data-act="reason"]').value;
       write(() => send("POST", "/lend/api/pending", { task_id: p.task_id, connection_id: p.connection_id, created: p.created, approve: b.dataset.yes === "1", reason }), b);
     }
     if (act === "workdir-open" || act === "move-open") {
@@ -241,6 +255,7 @@ export function renderLend(root) {
     if (act === "filter") { S.filter = input.value; revision++; refresh(); return; }
     if (act === "limit") saveShared({ limits: { [key]: input.value === "" ? null : Number(input.value) } });
     if (act === "force") saveShared({ limits: { force: input.value === "stop" } });
+    if (act === "parallel") saveShared({ max_parallel: Number(input.value) });
     if (act === "retention") saveShared({ log_retention_days: Number(input.value) });
     if (!id) return;
     const data = view.settings.get(id);

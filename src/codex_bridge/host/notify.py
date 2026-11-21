@@ -48,7 +48,7 @@ class Notifier:
         return [r.task_id for r in self.mgr.tasks.values()
                 if r.origin == "codex" and now - r.created <= CODEX_MAX_AGE
                 and (session is None or r.session is None or r.session == session)
-                and (r.state in ("queued", "running") or r.task_id in pending
+                and (r.state in ("queued", "running", "update_waiting") or r.task_id in pending
                      or (r.state in FINAL_STATES and not r.notified_final))]
 
     @staticmethod

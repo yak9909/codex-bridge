@@ -58,6 +58,27 @@ def test_form_roundtrip(tmp_path):
         ((tmp_path / "work" / "locked").as_posix(), "read"), ((tmp_path / "tools").as_posix(), "read")}
 
 
+@pytest.mark.parametrize("key", ["allow", "deny", "ask"])
+def test_policy_rejects_unclosed_pattern_quotes(tmp_path, key):
+    store = store_with(tmp_path)
+    with pytest.raises(ValueError, match="引用符"):
+        store.update(**{f"exec_{key}": ['show "unfinished']})
+    assert parse_policy(store.as_dict()).exec_mode == "allowlist"
+
+
+def test_command_rule_lists_roundtrip_through_folder_edits(tmp_path):
+    store = store_with(tmp_path)
+    assert store.current().deny_patterns == store.current().ask_patterns == []
+    store.update(exec_deny=["git push *"], exec_ask=['git commit "two words" *'])
+    set_folder_level(store, (tmp_path / "tools").as_posix(), "write")
+    assert store.current().deny_patterns == ["git push *"]
+    assert store.current().ask_patterns == ['git commit "two words" *']
+    assert store.current().allow_patterns == ["python scripts/**/*.py *", "git status"]
+    for key in ("deny", "ask"):
+        with pytest.raises(ValueError, match=rf"exec\.{key}"):
+            store.update(**{f"exec_{key}": "echo *"})
+
+
 def test_advanced_rules_survive(tmp_path):
     form = make_form(tmp_path)
     form["advanced_rules"] = [{"path": "**/*.lock", "level": "hidden"}]

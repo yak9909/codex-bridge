@@ -43,6 +43,7 @@ export function onOff(on) {
 
 export const STATES = {
   queued: ["順番待ち", "idle"],
+  update_waiting: ["アップデート待ち", "warn"],
   running: ["作業中", "ok"],
   completed: ["完了", "idle"],
   suspended_quota: ["中断（枠切れ）", "idle"],

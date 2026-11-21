@@ -1,4 +1,4 @@
-// The plain pages of the use tab: shared folders, the allowlist, and the empty state before the host is set up.
+// The plain pages of the use tab: shared folders, command rules, and the empty state before the host is set up.
 import { esc } from "/app/static/api.js";
 import { icon } from "/app/static/common.js";
 
@@ -42,12 +42,17 @@ export function foldersHtml(form, message) {
     `<div class="row"><button class="secondary sm" data-act="folder-add">${icon("folder-plus")}フォルダを追加</button></div>`;
 }
 
-export function allowHtml(form) {
+const RULE_LISTS = [["deny", "拒否リスト"], ["ask", "確認リスト"], ["allow", "許可リスト"]];
+
+export function rulesHtml(form) {
   const ex = form.exec || {};
-  return `<p class="hint">「許可リストだけ自動」の人が、確認なしで実行できるコマンド。<code>*</code> は名前の一部か任意の引数、<code>**</code> は下のフォルダすべて。<code>&amp;&amp;</code> や <code>|</code> を含むものは承認待ち。</p>` +
-    `<textarea rows="4" spellcheck="false" data-act="allow-text" style="font-family:var(--mono)">${esc((ex.allow || []).join("\n"))}</textarea>` +
-    `<label class="switch"><input type="checkbox" data-act="allow-confirm"${ex.confirm_modified_scripts ? " checked" : ""}><span class="track"></span><span>作業中に書き換えたスクリプトは承認待ちにする</span></label>` +
-    `<p class="note-warn">${icon("triangle-alert")}<span>実行したプログラムは、共有フォルダの外も読めます</span></p>`;
+  const lists = RULE_LISTS.map(([key, label]) => `<label class="field"><span>${esc(label)}</span>` +
+    `<textarea class="command-patterns" rows="3" spellcheck="false" data-act="rule-text" data-key="${esc(key)}">${esc((ex[key] || []).join("\n"))}</textarea></label>`).join("");
+  return `<p class="hint">「実行しない」を最初に判定します。次に拒否、確認、書き換えたスクリプト、許可、モードの順で判定します。許可リストが効くのは「許可リストだけ自動」のときです。</p>` +
+    `<p class="hint">1 行に 1 つの型を書きます。最後の <code>*</code> は任意の引数、<code>**</code> は下のフォルダすべてです。</p>` +
+    lists +
+    `<label class="switch"><input type="checkbox" data-act="allow-confirm"${ex.confirm_modified_scripts ? " checked" : ""}><span class="track"></span><span>作業中に書き換えたスクリプトは「すべて自動」でも承認待ちにする</span></label>` +
+    `<p class="note-warn">${icon("triangle-alert")}<span>拒否リストは確実な防御ではなく、スクリプトの中の操作は防げません。実行したプログラムは共有フォルダの外も読めます。</span></p>`;
 }
 
 export function policyWarningsHtml(overview) {

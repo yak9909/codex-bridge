@@ -1,11 +1,11 @@
-// The use tab: the lenders on the left, approvals / requests / shared folders / allowlist on the right.
+// The use tab: the lenders on the left, approvals / requests / shared folders / command rules on the right.
 // Every part is drawn into a container that stays in the page, and a refresh only writes what changed and is not being used
 // (a focused field, an open list), so scroll positions, open cards, the chosen request and typed text survive it.
 import { get, send, onChange, showError, clearError, esc, ago } from "/app/static/api.js";
 import { icon, codeFieldHtml, busyInside, taskTitle, ACTIVE } from "/app/static/common.js";
 import { lenderParts } from "/app/static/use-lenders.js";
-import { listHtml, newHeadHtml, headHtml, promptHtml, timelineHtml, pickerOptions } from "/app/static/use-tasks.js";
-import { emptyHtml, foldersHtml, allowHtml, policyWarningsHtml } from "/app/static/use-pages.js";
+import { listHtml, newHeadHtml, headHtml, promptHtml, timelineHtml, pickerOptions, taskExecHtml, taskExecModeLabel } from "/app/static/use-tasks.js";
+import { emptyHtml, foldersHtml, rulesHtml, policyWarningsHtml } from "/app/static/use-pages.js";
 
 // what the user has chosen; it outlives the tab being left and entered again
 const S = {
@@ -21,7 +21,7 @@ const S = {
   folderMessage: "",
 };
 
-const TABS = [["tasks", "依頼"], ["folders", "共有フォルダ"], ["allow", "許可リスト"]];
+const TABS = [["tasks", "依頼"], ["folders", "共有フォルダ"], ["allow", "コマンドの規則"]];
 const norm = (p) => String(p).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 const cardUi = (name) => {
   if (!S.cards.has(name)) S.cards.set(name, { code: null, confirm: false });
@@ -55,7 +55,13 @@ const SHELL = `
           </section>
           <section class="detail" aria-label="依頼の詳細">
             <header class="d-head" data-slot="dhead"></header>
-            <div class="d-req scroll" data-slot="dreq"></div>
+            <div class="d-req scroll" data-slot="dreq" hidden>
+              <details class="task-exec" data-slot="task-exec">
+                <summary>この依頼のコマンド <span class="cap" data-slot="task-exec-mode"></span></summary>
+                <div class="task-exec-fields" data-slot="task-exec-fields"></div>
+              </details>
+              <div class="d-req-prompt" data-slot="prompt"></div>
+            </div>
             <div class="d-log scroll" data-slot="dlog"></div>
             <form class="composer"><textarea rows="2" data-slot="text"></textarea><div class="composer-bar" data-slot="bar"></div></form>
           </section>
@@ -74,14 +80,17 @@ export function renderUse(root) {
   const el = {
     count: q("count"), invite: q("invite"), lenders: q("lenders"), approvals: q("approvals"), items: q("items"),
     dhead: q("dhead"), dreq: q("dreq"), dlog: q("dlog"), text: q("text"), bar: q("bar"), form: shell.querySelector("form.composer"),
+    prompt: q("prompt"), taskExec: q("task-exec"), taskExecMode: q("task-exec-mode"), taskExecFields: q("task-exec-fields"),
     folders: shell.querySelector('[data-panel="folders"]'), allow: shell.querySelector('[data-panel="allow"]'),
     tasks: shell.querySelector('[data-panel="tasks"]'), notices: q("notices"), warnings: q("policy-warnings"),
   };
-  const cache = { warnings: null, approvals: null, items: null, dhead: null, dreq: null, dlog: null, bar: null, folders: null, allow: null, empty: null };
+  const cache = { warnings: null, approvals: null, items: null, dhead: null, dreq: null, taskExec: null, dlog: null, bar: null, folders: null, allow: null, empty: null };
   const view = { mode: null, sel: null, selKey: undefined, lenders: [], tasks: [], logFor: null };
   let alive = true;
   let busy = false;
   let again = false;
+  let policyWrite = Promise.resolve();
+  let taskExecWrite = Promise.resolve();
 
   // ---- small drawing helpers ----
   function setMode(mode) {
@@ -232,19 +241,30 @@ export function renderUse(root) {
 
   function drawDetail(result) {
     const isNew = S.selected === "new";
+    el.form.hidden = !isNew && result?.state === "update_waiting";
     const head = isNew ? newHeadHtml() : result ? headHtml(result) : "";
     if (head !== cache.dhead) {
       cache.dhead = head;
       el.dhead.innerHTML = head;
     }
     const req = isNew || !result ? "" : promptHtml(result);
-    if (req !== cache.dreq || view.logFor !== S.selected) {
-      if (req !== cache.dreq) el.dreq.innerHTML = req;
+    const fresh = view.logFor !== S.selected;
+    el.dreq.hidden = !result || isNew;
+    if (req !== cache.dreq) {
+      el.prompt.innerHTML = req;
       cache.dreq = req;
-      if (view.logFor !== S.selected) el.dreq.scrollTop = 0;
+    }
+    if (fresh) {
+      el.dreq.scrollTop = 0;
+      el.taskExec.open = false;
+    }
+    const settings = result && !isNew ? taskExecHtml(result) : "";
+    el.taskExecMode.textContent = result ? `実際に効くモード ${taskExecModeLabel(result.effective_exec_mode)}` : "";
+    if (settings !== cache.taskExec && (fresh || !busyInside(el.taskExecFields))) {
+      el.taskExecFields.innerHTML = settings;
+      cache.taskExec = settings;
     }
     const body = isNew || !result ? "" : timelineHtml(result, result.events, result.progress);
-    const fresh = view.logFor !== S.selected;
     if (body !== cache.dlog || fresh) {
       const log = el.dlog;
       const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 24;
@@ -272,10 +292,12 @@ export function renderUse(root) {
   async function drawAllow() {
     if (S.rightTab !== "allow") return;
     const form = await get("/admin/api/policy-form");
-    const html = allowHtml(form);
+    const html = rulesHtml(form);
     if (html !== cache.allow && !busyInside(el.allow)) {
       cache.allow = html;
+      const top = el.allow.scrollTop;
       el.allow.innerHTML = html;
+      el.allow.scrollTop = top;
     }
   }
 
@@ -378,11 +400,23 @@ export function renderUse(root) {
     await refresh();
   }
 
-  async function editForm(mutate) {
-    const form = await get("/admin/api/policy-form");
-    mutate(form);
-    await send("PUT", "/admin/api/policy-form", form);
+  function editForm(mutate) {
+    const pending = policyWrite.then(async () => {
+      const form = await get("/admin/api/policy-form");
+      mutate(form);
+      await send("PUT", "/admin/api/policy-form", form);
+    });
+    policyWrite = pending.catch(() => {});
+    return pending;
   }
+
+  function editTaskExec(id, changes) {
+    const pending = taskExecWrite.then(() => send("PUT", `/admin/api/tasks/${encodeURIComponent(id)}/exec`, changes));
+    taskExecWrite = pending.catch(() => {});
+    return pending;
+  }
+
+  const patternLines = (value) => value.split("\n").map((line) => line.trim()).filter(Boolean);
 
   async function copy(button) {
     const field = button.previousElementSibling;
@@ -564,19 +598,28 @@ export function renderUse(root) {
         }));
         break;
       }
-      case "allow-confirm":
-        await write(() => editForm((form) => { form.exec = { ...form.exec, confirm_modified_scripts: t.checked }; }));
+      case "allow-confirm": {
+        const checked = t.checked;
+        await write(() => editForm((form) => { form.exec = { ...form.exec, confirm_modified_scripts: checked }; }));
+        break;
+      }
+      case "rule-text": {
+        const { key } = t.dataset;
+        const lines = patternLines(t.value);
+        cache.allow = null;
+        await write(() => editForm((form) => { form.exec = { ...form.exec, [key]: lines }; }));
+        break;
+      }
+      case "task-exec-mode":
+        cache.taskExec = null;
+        await write(() => editTaskExec(t.dataset.id, { exec_mode: t.value || null }));
+        break;
+      case "task-exec-list":
+        cache.taskExec = null;
+        await write(() => editTaskExec(t.dataset.id, { [t.dataset.key]: patternLines(t.value) }));
         break;
       default:
         break;
-    }
-  }
-
-  async function onFocusOut(ev) {
-    if (ev.target.dataset && ev.target.dataset.act === "allow-text") {
-      const lines = ev.target.value.split("\n").map((s) => s.trim()).filter(Boolean);
-      cache.allow = null;
-      await write(() => editForm((form) => { form.exec = { ...form.exec, allow: lines }; }));
     }
   }
 
@@ -599,7 +642,7 @@ export function renderUse(root) {
   async function onSubmit(ev) {
     ev.preventDefault();
     const text = el.text.value.trim();
-    if (!text) return;
+    if (!text || el.form.hidden) return;
     const key = S.selected;
     const button = el.form.querySelector("button[type=submit]");
     if (button) button.disabled = true;
@@ -635,7 +678,6 @@ export function renderUse(root) {
 
   root.addEventListener("click", onClick);
   shell.addEventListener("change", onChange_);
-  shell.addEventListener("focusout", onFocusOut);
   shell.addEventListener("focusin", selectCode);
   shell.addEventListener("click", selectCode);
   shell.addEventListener("input", onInput);

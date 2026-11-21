@@ -67,8 +67,8 @@ def task_view(runner: AgentRunner, task_id: str, *, detail: bool = True) -> dict
     for session in runner.sessions.list():
         if task_id in session["task_ids"]:
             task["thread_id"] = session["thread_id"]
-    cur = runner.cur
-    pending = runner.pending_approval
+    cur = runner.currents.get(task_id)
+    pending = next((p for p in runner.pending_approvals if p["task_id"] == task_id), None)
     if cur is not None and cur.task_id == task_id:
         task.update(state="running", thread_id=cur.thread_id, finished=None)
         if detail:

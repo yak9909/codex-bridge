@@ -1,8 +1,7 @@
 """Pre-approval by the lender (design 4.5): a new task and a follow-up wait for a yes before Codex sees them.
 
-One request waits at a time (the host gives a lender one task at a time, and refuses a follow-up to a task that
-waits). `PreApproval` holds it and puts the lender's answer to work through the runner it belongs to; the screen
-(Task 11) reads `AgentRunner.pending_approval` and answers with `AgentRunner.decide_pending`.
+One request per task may wait at a time. The screen reads `AgentRunner.pending_approvals` and answers with
+`AgentRunner.decide_pending`; every decision is applied to its own task.
 
 What the borrower is told: `awaiting_lender` while it waits. A refused new task is `rejected_by_lender` (final,
 the reason in `report`). A refused follow-up cannot end the task Codex is working on, so the task goes on:
@@ -55,47 +54,59 @@ def _why(base: str, reason: str) -> str:
 class PreApproval:
     def __init__(self, runner: AgentRunner) -> None:
         self.runner = runner
-        self.pending: Pending | None = None
+        self.pendings: dict[str, Pending] = {}
+
+    @property
+    def pending(self) -> Pending | None:
+        """Compatibility view for a single pending decision."""
+        return next(iter(self.pendings.values()), None)
+
+    @pending.setter
+    def pending(self, pending: Pending | None) -> None:
+        self.pendings = {pending.task_id: pending} if pending else {}
 
     def applies(self, kind: str) -> bool:
         """Whether the lender wants to say yes first to this kind of request (START or FOLLOWUP)."""
         return bool(self.runner.settings["pre_approval"]["new_task" if kind == START else "followup"])
 
     def holds(self, task_id: str) -> bool:
-        return self.pending is not None and self.pending.task_id == task_id
+        return task_id in self.pendings
 
     async def hold(self, msg: dict, kind: str) -> None:
         r = self.runner
         minutes = r.settings["pre_approval"]["timeout_min"]
         deadline = None if minutes is None else r.clock() + minutes * 60
-        self.pending = p = Pending(msg, kind, time.time(), deadline, timeout_min=minutes)
+        p = Pending(msg, kind, time.time(), deadline, timeout_min=minutes)
+        self.pendings[p.task_id] = p
         r.log_prompt(p.task_id, p.prompt)  # the lender can read it in the log from now on
         await self._announce(p)
 
     async def _announce(self, p: Pending) -> None:
-        cur = self.runner.cur
+        cur = self.runner.currents.get(p.task_id)
         await self.runner._state("awaiting_lender", task_id=p.task_id,
                                  thread_id=cur.thread_id if p.kind == FOLLOWUP and cur else None)
 
     async def resend(self) -> None:
         """After a reconnect and its hello: say again that a request waits (a number of its own, so that the host
         takes it even if it had already seen the first), so that the host never loses the task."""
-        if self.pending is not None:
-            await self._announce(self.pending)
+        async with self.runner._lock:
+            for p in list(self.pendings.values()):
+                if self.pendings.get(p.task_id) is p:
+                    await self._announce(p)
 
     def drop(self, task_id: str) -> Pending | None:
         """The request goes without an answer (the task ended or was cancelled); returns it."""
-        if self.holds(task_id):
-            p, self.pending = self.pending, None
-            return p
-        return None
+        return self.pendings.pop(task_id, None)
 
-    async def decide(self, approve: bool, reason: str = "", task_id: str | None = None) -> bool:
-        if task_id is not None and (self.pending is None or self.pending.task_id != task_id):
-            return False
-        p, self.pending = self.pending, None  # first: nothing below may be decided twice
-        if p is None:
-            return False
+    async def decide(self, approve: bool, reason: str = "", task_id: str | None = None,
+                     created: float | None = None) -> bool:
+        async with self.runner._lock:
+            if task_id is None:
+                task_id = next(iter(self.pendings), None) if len(self.pendings) == 1 else None
+            p = self.pendings.get(task_id)
+            if p is None or (created is not None and created != p.created):
+                return False
+            self.pendings.pop(task_id)
         if approve:
             self.runner._record(p.task_id, "lender_approved", {"kind": p.kind})
             await self._approve(p)
@@ -104,32 +115,32 @@ class PreApproval:
         return True
 
     async def expire(self) -> None:
-        p = self.pending
-        if p is not None and p.deadline is not None and self.runner.clock() >= p.deadline:
-            self.pending = None
-            await self._reject(p, TIMED_OUT.format(p.timeout_min))
+        async with self.runner._lock:
+            for p in list(self.pendings.values()):
+                if (self.pendings.get(p.task_id) is p and p.deadline is not None
+                        and self.runner.clock() >= p.deadline):
+                    self.pendings.pop(p.task_id)
+                    await self._reject(p, TIMED_OUT.format(p.timeout_min))
 
     async def shutdown(self) -> None:
-        p, self.pending = self.pending, None
-        if p is not None:
-            await self._reject(p, EXITED)
+        async with self.runner._lock:
+            for p in list(self.pendings.values()):
+                if self.pendings.get(p.task_id) is p:
+                    self.pendings.pop(p.task_id)
+                    await self._reject(p, EXITED)
 
     async def _approve(self, p: Pending) -> None:
         r = self.runner
         if p.kind == START:
-            async with r._lock:
-                await r._start_locked(p.msg, shown=True)
+            await r._start_locked(p.msg, shown=True)
             return
-        cur = r.cur
         await r._deliver_followup(p.msg, shown=True)
-        if cur is not None and r.cur is cur:  # still working (not failed on the way): the borrower sees it again
-            await r._state("running")
 
     async def _reject(self, p: Pending, report: str) -> None:
         r = self.runner
         if p.kind == START:
             await r._state("rejected_by_lender", report=report, task_id=p.task_id)
-            await r._release_slot()
-        elif r.cur is not None and r.cur.task_id == p.task_id:
-            await r._event("status", text=f"追加の指示は渡しませんでした（{report}）")
-            await r._state("running")
+            await r._release_slot(p.task_id)
+        elif (cur := r.currents.get(p.task_id)) is not None:
+            await r._event("status", cur=cur, text=f"追加の指示は渡しませんでした（{report}）")
+            await r._state("running", cur=cur)

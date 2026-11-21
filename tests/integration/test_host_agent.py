@@ -183,7 +183,8 @@ async def test_config_default_or_read_failure_reaches_turn_start(multiple, tmp_p
     runtime.on_log = logs.append
     # Exercise config/read again while observing that its failure adds no log.
     await runtime._load_catalog(runtime.runners[connections[0].id].app)
-    assert not logs
+    # Initial hello/settings exchanges may still arrive from the other connection during this request.
+    assert not [message for message in logs if message.get("type") != "settings"]
     tid = await managers[0].start("work")
     await until(lambda: managers[0].status(tid)["state"] == "running")
     received = [json.loads(line)["received"]
@@ -198,9 +199,10 @@ async def test_config_default_or_read_failure_reaches_turn_start(multiple, tmp_p
 
 
 @pytest.mark.parametrize("pending", [False, True])
-async def test_only_one_task_at_a_time(multiple, pending):
+async def test_configured_capacity_one_is_shared_across_hosts(multiple, pending):
     runtime, connections, (a, b), (_, b_messages) = multiple
     ar, br = (runtime.runners[c.id] for c in connections)
+    await runtime.apply_shared(runtime.settings.update({"max_parallel": 1}))
     await runtime.update_settings(connections[0].id, {"pre_approval": {"enabled": pending, "timeout_min": None}})
     tid = await a.start("work")
     await until(lambda: a.status(tid)["state"] == ("awaiting_lender" if pending else "running"))
@@ -208,9 +210,10 @@ async def test_only_one_task_at_a_time(multiple, pending):
     # B's host would now refuse routing, so inject a request that was already in flight.
     await br.handle({"type": "task_start", "task_id": "in-flight", "prompt": "other"})
     await br.handle({"type": "task_followup", "task_id": "followup-flight", "text": "other"})
-    await until(lambda: len([m for m in b_messages if m.get("state") == "rejected_by_lender"]) == 2)
+    await until(lambda: len([m for m in b_messages if m.get("state") == "rejected_by_lender"]) == 1)
     rejected = [m for m in b_messages if m.get("state") == "rejected_by_lender"]
-    assert all(m["report"] == "貸している人は、ほかの依頼主の作業をしています。あとでもう一度頼むか、ほかの人に頼んでください。" for m in rejected)
+    assert "上限（1 件）" in rejected[0]["report"]
+    assert ar.active_task_ids() == [tid] and not br.active_task_ids()
     if pending:
         client = runtime.clients[connections[0].id]
         since = a.agent_info()["since"]
@@ -344,7 +347,7 @@ async def test_a_pending_approval_is_not_lost_when_the_connection_drops_and_come
     await asyncio.sleep(0.2)  # whatever the agent says again after hello has arrived
     assert mgr.status(tid)["state"] == "awaiting_lender"  # not failed, and not lost
     assert mgr.current_task_id() == tid
-    with pytest.raises(Exception, match="作業中"):
+    with pytest.raises(Exception, match="上限"):
         await mgr.start("y")  # the lender still counts as working
     await runner.decide_pending(True)
     await until(lambda: mgr.status(tid)["state"] == "completed")
@@ -405,3 +408,62 @@ async def test_a_v01_agent_that_says_hello_before_resending_still_gets_its_resul
     await runner.handle({"type": "task_followup", "task_id": tid, "text": "続けて"})  # ends while the link is down
     await until(lambda: mgr.status(tid)["state"] == "completed")
     assert mgr.result(tid)["report"] == "完了" and mgr.current_task_id() is None
+
+
+@pytest.mark.parametrize("multiple", [{"responses": {
+    "thread/start": [{"thread": {"id": "th1"}, "model": "gpt-fake"},
+                     {"thread": {"id": "th2"}, "model": "gpt-fake"}],
+    "turn/start": [{"turn": {"id": "u1"}}, {"turn": {"id": "u2"}}],
+}, "after": {}}], indirect=True)
+async def test_two_threads_run_on_one_appserver_over_the_real_websocket(multiple, tmp_path):
+    runtime, connections, (host, _), messages = multiple
+    r = runtime.runners[connections[0].id]
+    await runtime.apply_shared(runtime.settings.update({"max_parallel": 2}))
+    await until(lambda: host.lenders()[0]["max_parallel"] == 2)
+    ids = [await host.start("first"), await host.start("second")]
+    await until(lambda: all(host.tasks[t].state == "running" for t in ids)
+                and len(r.currents) == 2 and all(c.turn_id for c in r.currents.values()))
+    assert {c.thread_id for c in r.currents.values()} == {"th1", "th2"}
+    record = tmp_path / ("fake-" + connections[0].id) / "record.jsonl"
+    rows = [json.loads(line) for line in record.read_text(encoding="utf-8").splitlines()]
+    assert sum("argv" in row for row in rows) == 1  # One subprocess serves both threads.
+    await host.followup(ids[1], "second only")
+    await until(lambda: any(json.loads(line).get("received", {}).get("method") == "turn/steer"
+                           for line in record.read_text(encoding="utf-8").splitlines()))
+    received = [json.loads(line).get("received", {}) for line in record.read_text(encoding="utf-8").splitlines()]
+    steer = next(m["params"] for m in received if m.get("method") == "turn/steer")
+    assert steer["threadId"] == "th2" and steer["expectedTurnId"] == "u2"
+    await r.app.events.put({"method": "turn/completed", "params": {
+        "threadId": "th2", "turn": {"id": "u2", "status": "completed"}}})
+    await until(lambda: host.tasks[ids[1]].state == "completed")
+    assert host.tasks[ids[0]].state == "running" and set(r.currents) == {ids[0]}
+    await host.cancel(ids[0])
+    await until(lambda: r.currents[ids[0]].cancelling)
+    await r.app.events.put({"method": "turn/completed", "params": {
+        "threadId": "th1", "turn": {"id": "u1", "status": "interrupted"}}})
+    await until(lambda: host.tasks[ids[0]].state == "cancelled")
+    assert not r.active_task_ids()
+
+
+async def test_two_pending_requests_are_both_resent_after_reconnect(multiple):
+    runtime, connections, (host, _), (messages, _) = multiple
+    id = connections[0].id
+    runner = runtime.runners[id]
+    await runtime.apply_shared(runtime.settings.update({"max_parallel": 2}))
+    await runtime.update_settings(id, {"pre_approval": {"new_task": True}})
+    await until(lambda: host.lenders()[0]["max_parallel"] == 2 and host.lenders()[0]["capabilities"]["pre_approval"])
+    ids = [await host.start("first"), await host.start("second")]
+    await until(lambda: len(runner.pending_approvals) == 2 and
+                all(host.tasks[t].state == "awaiting_lender" for t in ids))
+    previous = {t: sum(m.get("state") == "awaiting_lender" and m.get("task_id") == t for m in messages) for t in ids}
+    since = host.agent_info()["since"]
+    await runtime.clients[id].drop()
+    await until(lambda: host.agent_info()["ready"] and host.agent_info()["since"] != since)
+    await until(lambda: all(sum(m.get("state") == "awaiting_lender" and m.get("task_id") == t for m in messages)
+                           > previous[t] for t in ids))
+    assert host.active_task_ids("friend") == ids
+    assert {p["task_id"] for p in runner.pending_approvals} == set(ids)
+    for task in ids:
+        assert await runner.decide_pending(False, task_id=task)
+    await until(lambda: all(host.tasks[t].state == "rejected_by_lender" for t in ids))
+    assert runtime.slot.count == 0

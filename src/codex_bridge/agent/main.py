@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AsyncExitStack, asynccontextmanager
 import os
 import shutil
 import subprocess
@@ -78,6 +79,7 @@ class AgentConnections:
         self.app_factory, self.versions = app_factory, versions
         self.initial_backoff = initial_backoff
         self.slot = TaskSlot()
+        self._changes = asyncio.Lock()
         self.catalog: list[dict] | None = None
         self._catalog_stale = False
         self.runners, self.clients, self.links = {}, {}, {}
@@ -93,13 +95,18 @@ class AgentConnections:
         root = self.home / "connections" / connection.id
 
         async def prepare():
+            async with runner._prepare_lock:
+                await prepare_app()
+
+        async def prepare_app():
             if self.moving:
                 raise RuntimeError("保存場所を移動中です")
             # Launch only when a task/session operation arrives. A change to launch arguments waits for idle.
             desired = runner.settings["features"]
             wd = resolve_workdir(runner.settings, self.home)
             if (app.running and (app.features != desired or Path(app.workdir) != wd)
-                    and runner.cur and runner.cur.thread_id is None):
+                    and len(runner.currents) == 1 and not runner._session_operations
+                    and any(c.thread_id is None and not c.prepared for c in runner.currents.values())):
                 await app.restart(features=desired, workdir=wd)
             elif not app.running:
                 app.features = dict(desired)
@@ -109,7 +116,7 @@ class AgentConnections:
             if mode != self.versions.get("auth_mode"):
                 self.versions["auth_mode"] = mode
                 for other in self.runners.values():
-                    other.guard.enabled = mode == "chatgpt"
+                    other.set_usage_enabled(mode == "chatgpt")
                 await asyncio.gather(*(client.refresh_hello() for client in self.clients.values()),
                                      return_exceptions=True)
             if self.catalog is None or self._catalog_stale:
@@ -195,10 +202,10 @@ class AgentConnections:
             async with self.slot.lock:
                 if not self.started or self.moving:
                     return
-                # Warm only one connection. Its periodic usage is broadcast to every requester by TaskSlot.
-                runner = next(iter(self.runners.values()), None)
-                if runner is not None:
-                    await runner.prepare()
+                # Select under the PC lock, then perform startup without holding it.
+                runner = next((r for r in self.runners.values() if r not in self.slot.blocked_runners), None)
+            if runner is not None:
+                await runner.prepare()
         except Exception as e:
             self._error("起動時の使用量を確認できませんでした", e)
 
@@ -230,32 +237,45 @@ class AgentConnections:
                 self._error("接続先の終了処理でエラーがありました", e)
 
     async def add(self, code):
-        parse_invite(code)  # a bad code must not start a Codex download
-        if self.before_add is not None:
-            await self.before_add()
-        connection = self.store.add(code)
-        self._install(connection)
-        if self.started:
-            await self._activate(connection.id)
-            self._ensure_usage_probe()
-        return connection
+        async with self._changes:
+            parse_invite(code)
+            if self.before_add is not None:
+                await self.before_add()
+            connection = self.store.add(code)
+            self._install(connection)
+            if self.started:
+                await self._activate(connection.id)
+                self._ensure_usage_probe()
+            return connection
 
     def _require_idle(self, id):
-        if self.runners[id].active_task_id() is not None:
+        if self.runners[id].active_task_id() is not None or self.runners[id]._session_operations:
             raise RuntimeError("作業中・承認待ちの接続先は変更できません")
 
-    async def replace_invite(self, id, code):
-        parse_invite(code)  # a bad code must not start a Codex download
+    @asynccontextmanager
+    async def _blocked_connection(self, id):
         async with self.slot.lock:
             self._require_idle(id)
+            runner = self.runners[id]
+            self.slot.blocked_runners.add(runner)
+        try:
+            # Wait for local session/preparation work without blocking any other connection.
+            async with runner._lock, runner._prepare_lock:
+                yield runner
+        finally:
+            async with self.slot.lock:
+                self.slot.blocked_runners.discard(runner)
+
+    async def replace_invite(self, id, code):
+        parse_invite(code)
+        async with self._changes, self._blocked_connection(id) as runner:
             if self.before_add is not None:
-                await self.before_add()  # retry Codex setup if startup failed
+                await self.before_add()
             connection = self.store.replace_invite(id, code)
             await self._stop_connection(id)
-            runner, client = self.runners[id], self.clients[id]
+            client = self.clients[id]
             same_host = (client.invite.url, client.invite.name) == (connection.invite.url, connection.invite.name)
             if not same_host:
-                # Never send another requester's events or sessions to the replacement host.
                 runner._unacked.clear()
                 runner.sessions = SessionRegistry(self.home / "connections" / id / "sessions.json")
                 runner.guard = make_guard(self.versions.get("auth_mode", "chatgpt"))
@@ -269,8 +289,7 @@ class AgentConnections:
             return connection
 
     async def remove(self, id):
-        async with self.slot.lock:
-            self._require_idle(id)
+        async with self._changes, self._blocked_connection(id):
             await self._stop_connection(id)
             self.store.remove(id)
             self.slot.runners.remove(self.runners.pop(id))
@@ -298,6 +317,8 @@ class AgentConnections:
             await self.clients[id].refresh_hello()  # limits also appear in hello even when Codex is still lazy
             await runner.send_models()  # the over-limit behaviour (limits.force) is part of the lender's view
 
+        await self.slot.announce()
+
     async def settle(self):
         if self.moving:
             return
@@ -315,18 +336,29 @@ class AgentConnections:
                 await client.drop()
 
     async def move_data(self, new):
-        async with self.slot.lock:
-            if self.slot.owner is not None:
-                raise ValueError("作業中・承認待ちは保存場所を変えられません")
+        async with self._changes:
+            async with self.slot.lock:
+                if self.slot.update_waiting:
+                    raise ValueError("アップデートの切り替え待ちは保存場所を変えられません")
+                if self.slot.count or any(r._session_operations for r in self.runners.values()):
+                    raise ValueError("作業中・承認待ちは保存場所を変えられません")
+                self.moving = self.slot.moving = True
             was_paused = self.paused
-            await self.set_paused(True)
-            self.moving = True
             try:
-                for id in self.runners:
-                    await self._stop_connection(id)
-                return await asyncio.to_thread(move_data_root, new, current=self.home)
+                if self._usage_probe is not None:
+                    self._usage_probe.cancel()
+                    await asyncio.gather(self._usage_probe, return_exceptions=True)
+                async with AsyncExitStack() as local_locks:
+                    for runner in self.runners.values():
+                        await local_locks.enter_async_context(runner._lock)
+                        await local_locks.enter_async_context(runner._prepare_lock)
+                    await self.set_paused(True)
+                    for id in self.runners:
+                        await self._stop_connection(id)
+                    return await asyncio.to_thread(move_data_root, new, current=self.home)
             except BaseException:
-                self.moving = False
+                async with self.slot.lock:
+                    self.moving = self.slot.moving = False
                 if self.started:
                     for id in self.runners:
                         await self._activate(id)
@@ -335,7 +367,8 @@ class AgentConnections:
 
     def rows(self):
         return [{"id": id, "host_name": runner.host_name, "connected": self.clients[id].ws is not None,
-                 "invite_problem": self.clients[id].invite_problem, "busy": runner.active_task_id() is not None}
+                 "invite_problem": self.clients[id].invite_problem, "busy": bool(runner.active_task_ids()),
+                 "active_task_ids": runner.active_task_ids()}
                 for id, runner in self.runners.items()]
 
 
@@ -401,7 +434,7 @@ class AgentRole:
         """(borrowers connected, connections, approvals waiting) for the tray."""
         rows = self.runtime.rows()
         return (sum(bool(r["connected"]) for r in rows), len(rows),
-                sum(1 for r in self.runtime.runners.values() if r.pending_approval))
+                sum(len(r.pending_approvals) for r in self.runtime.runners.values()))
 
     def _make_app(self, connection, current):
         app = AppServer(self.cmd, connection.invite.url, connection.invite.token,
@@ -430,7 +463,7 @@ class AgentRole:
             self.applog.add("lend", *line)
         if message.get("type") == "task_state" and message.get("state") == "awaiting_lender":
             runner = self.runtime.runners.get(message.get("connection_id"))
-            pending = runner.pending_approval if runner else None
+            pending = next((p for p in runner.pending_approvals if p["task_id"] == message.get("task_id")), None) if runner else None
             key = (runner.connection_id, pending["task_id"], pending["created"]) if pending else None
             if key is not None and key != self._notified:
                 self._notified = key
@@ -523,11 +556,13 @@ def ensure_std_streams() -> None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 
-def run_guarded(fn, home: Path):
+def run_guarded(fn, home: Path, *, should_report: Callable[[], bool] | None = None):
     """Run fn and return its result; on an unexpected error write logs/crash.log and tell the user in Japanese."""
     try:
         return fn()
     except Exception:
+        if should_report is not None and not should_report():
+            raise
         log = Path(home) / "logs" / "crash.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         with open(log, "a", encoding="utf-8") as f:

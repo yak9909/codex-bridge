@@ -1,6 +1,8 @@
 """Unified entry point; no test may open a real window, console or browser."""
 
 import ast
+import asyncio
+from contextlib import contextmanager
 import io
 import sys
 import runpy
@@ -392,3 +394,40 @@ def test_build_removes_same_version_split_zips_only(tmp_path, monkeypatch):
     for name in keep:
         assert (tmp_path / name).read_bytes() == name.encode("utf-8")
     assert (tmp_path / "release" / "codex-bridge-v0.2.0.zip").exists()
+
+
+@pytest.mark.parametrize("acquired", [True, False])
+def test_update_acknowledges_only_after_claim_and_resident_start(launch, monkeypatch, acquired):
+    from codex_bridge import updater
+
+    events = []
+    stage = launch.install / (updater.INSTALL_STAGE + "abcdefgh")
+    stage.mkdir()
+
+    def claim():
+        events.append("mutex")
+        return acquired, None
+
+    @contextmanager
+    def previous_process(pid):
+        assert pid == 1234
+        def wait():
+            assert (stage / "ready").is_file()
+            events.append("old process exited")
+        yield wait
+
+    def start(*, update_ready, wait_for_previous):
+        assert not (stage / "ready").exists()
+        events.append("screen listening")
+        asyncio.run(update_ready())
+        wait_for_previous()
+        return 0
+
+    monkeypatch.setattr(entry, "acquire_agent_instance", claim)
+    monkeypatch.setattr(entry, "_previous_process", previous_process)
+    launch.resident.side_effect = start
+    assert entry.main([updater.RESTART_ARG, stage.name, "1234"]) == (0 if acquired else 1)
+    assert events == (["mutex", "screen listening", "old process exited"] if acquired else ["mutex"])
+    assert (stage / "ready").exists() is acquired
+    launch.browser.assert_not_called()
+

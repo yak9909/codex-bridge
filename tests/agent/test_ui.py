@@ -222,12 +222,12 @@ async def hold(env, task_id="t1"):
 
 @pytest.mark.parametrize("approve", [True, False])
 async def test_pending_decisions_use_the_task_id_seen_and_cannot_be_repeated(env, approve):
-    assert (await env.http.get("/api/pending")).json() is None
+    assert (await env.http.get("/api/pending")).json() == []
     await hold(env)
-    pending = (await env.http.get("/api/pending")).json()
+    pending, = (await env.http.get("/api/pending")).json()
     assert pending["task_id"] == "t1" and pending["kind"] == "start" and pending["created"]
     assert (await env.http.get("/api/overview")).json()["state"] == "awaiting_lender"
-    body = {"task_id": "t1", "approve": approve, "reason": "今は使えません"}
+    body = {"task_id": "t1", "created": pending["created"], "approve": approve, "reason": "今は使えません"}
     assert (await env.http.post("/api/pending", json=body, headers=WRITE)).status_code == 200
     assert env.runner.pending_approval is None
     assert (await env.http.post("/api/pending", json=body, headers=WRITE)).status_code == 409
@@ -237,7 +237,7 @@ async def test_pending_decisions_use_the_task_id_seen_and_cannot_be_repeated(env
 
 async def test_stale_approval_cannot_decide_a_different_pending_task(env):
     await hold(env, "new")
-    response = await env.http.post("/api/pending", json={"task_id": "old", "approve": True}, headers=WRITE)
+    response = await env.http.post("/api/pending", json={"task_id": "old", "created": 0.0, "approve": True}, headers=WRITE)
     assert response.status_code == 409 and env.runner.pending_approval["task_id"] == "new"
     assert env.runner.cur is None
     assert await env.runner.decide_pending(True, task_id="old") is False
@@ -404,12 +404,12 @@ async def test_a_session_cannot_be_resumed_while_its_deletion_is_in_flight(env):
     await entered.wait()
     resume = asyncio.create_task(env.runner.handle({"type": "task_start", "task_id": "t2", "prompt": "続き",
                                                     "continue_thread_id": "s1"}))
-    await asyncio.sleep(0)
-    assert env.runner.cur is None
+    await asyncio.wait_for(resume, 1)
+    assert env.runner.cur is None and not env.runner._lock.locked()
+    assert env.sent[-1]["state"] == "rejected_by_lender" and "削除中" in env.sent[-1]["report"]
     finish.set()
     assert (await deletion).status_code == 200
-    await resume
-    assert env.runner.cur is None and env.sent[-1]["state"] == "failed"
+    assert not env.runner._deleting_threads and env.runner._session_operations == 0
 
 
 async def test_files_visibility_never_exposes_nested_nonpath_arguments(env):
@@ -418,3 +418,71 @@ async def test_files_visibility_never_exposes_nested_nonpath_arguments(env):
                                         "result_summary": "SECRET"})
     task = (await env.http.get("/api/tasks/t1")).json()
     assert "SECRET" not in str(task)
+
+
+async def test_multiple_pending_decisions_and_overview_counts(env):
+    await hold(env, "one")
+    await hold(env, "two")
+    rows = (await env.http.get("/api/pending")).json()
+    assert [p["task_id"] for p in rows] == ["one", "two"]
+    overview = (await env.http.get("/api/overview")).json()
+    assert overview["active_tasks"] == overview["pending_approvals"] == 2
+    missing_created = {"task_id": "one", "approve": True}
+    assert (await env.http.post("/api/pending", json=missing_created, headers=WRITE)).status_code == 422
+    for row, approve in zip(rows, (True, False)):
+        body = {"task_id": row["task_id"], "created": row["created"], "approve": approve, "reason": "今は使いません"}
+        assert (await env.http.post("/api/pending", json=body, headers=WRITE)).status_code == 200
+    assert set(env.runner.currents) == {"one"} and not env.runner.pending_approvals
+    assert (await env.http.get("/api/pending")).json() == []
+
+
+@pytest.mark.parametrize("created", [1234, 1234.0])
+@pytest.mark.parametrize("approve", [False, True])
+async def test_pending_decision_accepts_integer_and_float_creation_times(env, created, approve):
+    await hold(env)
+    env.runner.approval.pendings["t1"].created = 1234.0
+    response = await env.http.post("/api/pending", headers=WRITE,
+                                   json={"task_id": "t1", "created": created, "approve": approve})
+    assert response.status_code == 200 and not env.runner.pending_approvals
+
+
+@pytest.mark.parametrize("created", [True, False, "1234", None])
+async def test_pending_decision_still_rejects_non_numeric_creation_times(env, created):
+    await hold(env)
+    response = await env.http.post("/api/pending", headers=WRITE,
+                                   json={"task_id": "t1", "created": created, "approve": True})
+    assert response.status_code == 422 and env.runner.pending_approvals
+
+
+async def test_slow_ui_delete_allows_other_task_progress_and_completion(env):
+    from test_multi_task_fix1 import wait_until
+
+    env.runner.sessions.add("saved", "old")
+    env.runner.cur = Current("active", "active-thread", "active-turn")
+    env.runner.app.events = asyncio.Queue()
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def delete(thread_id):
+        entered.set()
+        await finish.wait()
+    env.runner.app.thread_delete = delete
+    pump = asyncio.create_task(env.runner._pump())
+    deletion = asyncio.create_task(env.http.delete("/api/sessions/saved", headers=WRITE))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        assert not env.runner._lock.locked()
+        await env.runner.app.events.put({"method": "item/agentMessage/delta", "params": {
+            "threadId": "active-thread", "turnId": "active-turn", "itemId": "message", "delta": "進みました"}})
+        await env.runner.app.events.put({"method": "turn/completed", "params": {
+            "threadId": "active-thread", "turn": {"id": "active-turn", "status": "completed"}}})
+        await wait_until(lambda: env.runner.cur is None)
+        assert not deletion.done()
+        assert any(m.get("kind") == "progress" for m in env.sent)
+        assert any(m.get("state") == "completed" for m in env.sent)
+        finish.set()
+        assert (await deletion).status_code == 200
+    finally:
+        finish.set()
+        await asyncio.gather(deletion, return_exceptions=True)
+        pump.cancel()
+        await asyncio.gather(pump, return_exceptions=True)

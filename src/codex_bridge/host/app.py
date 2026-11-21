@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from ..common.audit import AuditLog
 from .approvals import Approvals, make_approve_fn
 from .claude_mcp import build_claude_mcp
-from .codex_mcp import HostServices, build_codex_mcp, current_lender
+from .codex_mcp import HostServices, build_codex_mcp, current_lender, current_thread_id, call_task_id
 from .config import HostConfig
 from .control import add_control_route
 from .share import (add_shared_folder, change_share_root, remove_shared_folder,
@@ -74,9 +74,10 @@ def build_host(config: HostConfig, config_path: Path | None = None) -> Host:
     paths = SafePaths(config.share_root, policy,
                       install_dir=config.install_dir or (config_path.parent if config_path else None),
                       protected=(config.rg_path, *((config_path,) if config_path else ())))
-    snapshots = Snapshots(data)
+    snapshots = Snapshots(data, paths)
     approvals = Approvals(policy)
-    mgr = TaskManager(data, touched_fn=snapshots.touched, check_start=paths.check_configured)
+    mgr = TaskManager(data, touched_fn=snapshots.touched, check_start=paths.check_configured,
+                      policy_fn=policy.current)
     notifier = Notifier(mgr, approvals)
     tokens = TokenStore(data)
     def invite_changed(name):
@@ -88,17 +89,17 @@ def build_host(config: HostConfig, config_path: Path | None = None) -> Host:
     mgr.invited_names = lambda: {i["name"] for i in tokens.list()}
 
     def task_id_fn() -> str | None:
-        """A Codex tool call belongs to the task of the lender whose token it came with, never to
-        another's. Without a known lender it belongs to no task (not to "any active task")."""
+        """Identify the lender and conversation; retain the chosen task across an in-flight tool call."""
         lender = current_lender.get()
-        return mgr.current_task_id(lender) if lender is not None else None
+        return call_task_id.get() or (mgr.task_for(lender, current_thread_id.get()) if lender is not None else None)
 
     write = WriteTools(paths, policy, snapshots, audit, task_id_fn,
                        make_approve_fn(approvals, task_id_fn, wait_sec=30), lender_fn=current_lender.get)
     services = HostServices(
         paths=paths, policy=policy, read=ReadTools(paths, policy), search=SearchTools(paths, policy, config.rg_path),
         write=write, runner=CommandRunner(paths, policy, approvals, snapshots, audit, task_id_fn,
-                                          lender_fn=current_lender.get),
+                                          lender_fn=current_lender.get, thread_fn=current_thread_id.get,
+                                          task_record_fn=mgr.tasks.get),
         approvals=approvals, snapshots=snapshots, audit=audit, task_id_fn=task_id_fn)
     events = Broadcaster()
     approvals.on_change.append(events.notify)
@@ -140,7 +141,12 @@ def create_local_app(host: Host, page_url: str | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app):
         async with host.claude_ep.run():
-            yield
+            waiting = asyncio.create_task(host.mgr.run_update_waits())
+            try:
+                yield
+            finally:
+                waiting.cancel()
+                await asyncio.gather(waiting, return_exceptions=True)
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.include_router(admin_router(host, page_url=page_url))

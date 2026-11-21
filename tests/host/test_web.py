@@ -358,12 +358,16 @@ def store_bad_folder(host):
     return bad.as_posix()
 
 
-async def claude_call(admin, name, args):
+async def claude_result(admin, name, args):
     response = await admin.post("/claude/mcp", headers={"Accept": "application/json, text/event-stream"},
                                 json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                                       "params": {"name": name, "arguments": args}})
     assert response.status_code == 200, response.text
-    result = response.json()["result"]
+    return response.json()["result"]
+
+
+async def claude_call(admin, name, args):
+    result = await claude_result(admin, name, args)
     assert not result.get("isError"), result
     return json.loads(result["content"][0]["text"])
 
@@ -447,16 +451,20 @@ def test_folder_write_probe_returns_quickly_when_acl_denies_writing(tmp_path, de
         # A child process lets the timeout kill the old retry loop without leaving
         # a spinning thread behind, even if an assertion fails before ACL cleanup.
         result = subprocess.run(
-            [sys.executable, "-c", "from pathlib import Path; import sys; "
+            [sys.executable, "-c", "from pathlib import Path; import json, sys, time; "
              "from codex_bridge.host.share import folder_is_writable; "
-             "print(folder_is_writable(Path(sys.argv[1])))", str(folder)],
-            capture_output=True, text=True, check=True, timeout=3)
+             "started = time.monotonic(); writable = folder_is_writable(Path(sys.argv[1])); "
+             "print(json.dumps([writable, time.monotonic() - started]))", str(folder)],
+            capture_output=True, text=True, check=True, timeout=20)
+        # Time the probe itself, independently of interpreter/import startup under Windows load.
+        writable, elapsed = json.loads(result.stdout)
+        assert elapsed < 3, f"folder write probe took {elapsed:.2f}s"
         if denied_rights == "W":
-            assert result.stdout.strip() == "False"
+            assert writable is False
         else:
             # A newly opened DELETE_ON_CLOSE handle can clean itself up even if
             # ordinary deletion is denied. Either result must leave no probe.
-            assert result.stdout.strip() in ("True", "False")
+            assert isinstance(writable, bool)
     finally:
         restored = subprocess.run([icacls, str(folder), "/remove:d", f"*{sid}"],
                                   capture_output=True, text=True, errors="replace", timeout=10)
@@ -589,6 +597,83 @@ async def test_folder_add_remove_main_api(admin, host, tmp_path):
     assert (await admin.post("/admin/api/folders/add", json={"path": str(tmp_path), "level": "read"}, headers=H)).status_code == 400
 
 
+async def test_folder_api_during_task(admin, host, tmp_path):
+    from codex_bridge.host.tasks import TaskRecord
+
+    host.mgr.tasks["t1"] = TaskRecord(task_id="t1", prompt="p", created=0, state="running")
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    body = {"path": str(extra)}
+    assert (await admin.post("/admin/api/folders/add", json=body, headers=H)).status_code == 200
+    response = await admin.post("/admin/api/folders/main", json=body, headers=H)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "作業中はメインのフォルダを切り替えられません。終わってから切り替えてください"
+    assert (await admin.post("/admin/api/folders/remove", json=body, headers=H)).status_code == 200
+
+
+@pytest.mark.parametrize("via", ["api", "mcp"])
+async def test_main_removal_during_task_reports_busy(admin, host, tmp_path, via):
+    from codex_bridge.host.share import add_shared_folder
+    from codex_bridge.host.tasks import TaskRecord
+
+    original = host.paths.root
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    add_shared_folder(host, extra.as_posix())
+    folders = host.paths.roots()
+    host.mgr.tasks["t1"] = task = TaskRecord(task_id="t1", prompt="p", created=0, state="running")
+
+    async def remove(path):
+        body = {"path": path.as_posix()}
+        if via == "api":
+            return await admin.post("/admin/api/folders/remove", headers=H, json=body)
+        return await claude_result(admin, "remove_shared_folder", body)
+
+    async with running(host.claude_ep):
+        response = await remove(original)
+        message = "作業中はメインのフォルダを外せません（メインのフォルダが共有から外れるため）。終わってから外してください"
+        if via == "api":
+            assert response.status_code == 409
+            assert response.json()["detail"] == message
+        else:
+            assert response["isError"]
+            assert response["content"][0]["text"] == message
+        assert host.paths.root == original
+        assert host.paths.roots() == folders
+
+        spare = tmp_path / "spare"
+        spare.mkdir()
+        add_shared_folder(host, spare.as_posix())
+        response = await remove(spare)
+        assert (response.status_code == 200 if via == "api" else not response.get("isError"))
+        assert host.paths.level_of(spare) is None
+        assert host.paths.root == original
+
+        task.state = "completed"
+        response = await remove(original)
+        assert (response.status_code == 200 if via == "api" else not response.get("isError"))
+    assert host.paths.root == extra.resolve()
+
+
+async def test_undo_api_reports_removed_share(admin, host, tmp_path):
+    from codex_bridge.host.share import add_shared_folder, remove_shared_folder
+    from codex_bridge.host.tasks import TaskRecord
+
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    add_shared_folder(host, str(extra), "write")
+    target = extra / "changed.txt"
+    host.snapshots.before_change("t1", target.as_posix(), target)
+    target.write_text("changed", encoding="utf-8")
+    host.mgr.tasks["t1"] = TaskRecord(task_id="t1", prompt="p", created=0, state="completed")
+    remove_shared_folder(host, str(extra))
+
+    response = await admin.post("/admin/api/tasks/t1/undo", headers=H)
+    assert response.status_code == 400
+    assert response.json()["detail"] == f"書き込めない場所のファイルは元に戻せません（共有を外した・読むだけや見せないに変えた）: {target}"
+    assert target.read_text(encoding="utf-8") == "changed"
+
+
 async def test_change_share_root_rejects_bad_paths(admin, host, tmp_path):
     assert (await admin.put("/admin/api/share-root", json={"path": str(tmp_path / "nope")}, headers=H)).status_code == 400
     # the data folder must stay outside the share
@@ -653,7 +738,8 @@ async def test_admin_send_task_with_model(admin, host, spec, model, effort):
     assert r.status_code == 200, r.text
     rec = host.mgr.tasks[r.json()["task_id"]]
     assert rec.origin == "admin" and rec.model == model and rec.effort == effort
-    assert r.json() == {"task_id": rec.task_id, "lender": "friend", "model": model, "effort": effort}
+    assert r.json() == {"task_id": rec.task_id, "lender": "friend", "model": model, "effort": effort,
+                        "exec_mode": None, "deny": [], "ask": [], "effective_exec_mode": "allowlist"}
     for key, value in (("model", model), ("effort", effort)):
         if value is None:
             assert key not in sent[-1]
@@ -777,7 +863,7 @@ async def test_lenders_api_lists_each_lender(admin, host):
     assert a["usage"]["five_hour"]["used_percent"] == 60 and a["usage"]["weekly"] is None
     assert "thresholds" not in a["usage"] and a["usage"]["blocked_until"] is None
     assert a["limits"] == {"five_hour": 70, "weekly": None, "force": True}
-    assert a["capabilities"] == {"resumable": True, "pre_approval": False, "model_select": False}
+    assert a["capabilities"] == {"resumable": True, "pre_approval": False, "model_select": False, "max_parallel": 1}
     assert (a["agent_version"], a["codex_version"], a["auth_mode"]) == ("0.2.0", "x", "chatgpt")
     assert b["current_task_id"] is None and b["capabilities"]["resumable"] is False
     assert (await admin.get("/admin/api/lenders", headers={"Host": "evil.example:8770"})).status_code == 403
@@ -813,6 +899,90 @@ async def test_lenders_api_survives_numbers_that_are_not_json(admin, host):
     assert (await admin.get("/admin/api/usage")).status_code == 200
 
 
+async def test_admin_task_exec_settings_are_guarded_and_partial(admin, host):
+    host.policy.update(lender_exec_modes={"friend": "all"})
+    link = await join(host, "friend")
+    reply = await admin.post("/admin/api/tasks", json={"prompt": "x", "exec_mode": "ask", "deny": ["echo x"]}, headers=H)
+    assert reply.status_code == 200 and reply.json()["effective_exec_mode"] == "ask"
+    task_id = reply.json()["task_id"]
+    url = f"/admin/api/tasks/{task_id}"
+    assert (await admin.put(f"{url}/exec", json={"exec_mode": "off"})).status_code == 403
+    reply = await admin.put(f"{url}/exec", json={"ask": ["echo y"], "exec_mode": "inherit"}, headers=H)
+    assert reply.status_code == 200
+    assert reply.json() == {"exec_mode": None, "deny": ["echo x"], "ask": ["echo y"], "effective_exec_mode": "all"}
+    detail = (await admin.get(url)).json()
+    assert all(detail[k] == v for k, v in reply.json().items())
+    invalid = await admin.put(f"{url}/exec", json={"deny": "echo z"}, headers=H)
+    assert invalid.status_code == 409 and (await admin.get(url)).json()["deny"] == ["echo x"]
+    await host.mgr.on_agent_message(link, {"type": "task_state", "task_id": task_id, "state": "completed"})
+    assert (await admin.put(f"{url}/exec", json={"deny": []}, headers=H)).status_code == 409
+
+
+@pytest.mark.parametrize("lender_mode, task_mode", [("all", "ask"), ("ask", "all"), ("allowlist", "ask")])
+async def test_task_exec_uses_stricter_mode(host, monkeypatch, lender_mode, task_mode):
+    host.policy.update(lender_exec_modes={"friend": lender_mode}, exec_allow=["echo *"],
+                       limits={"sync_wait_sec": 0})
+    await join(host, "friend")
+    task_id = await host.mgr.start("x", lender="friend", exec_mode=task_mode)
+    runner = host.services.runner
+    monkeypatch.setattr(runner, "lender_fn", lambda: "friend")
+    monkeypatch.setattr(runner, "task_id_fn", lambda: task_id)
+    reply = await runner.run_command("echo hello")
+    assert reply["status"] == "waiting_approval"
+    approval, = host.approvals.pending()
+    assert approval.task_id == task_id
+    host.approvals.decide(approval.id, False)
+    await runner.jobs[reply["job_id"]].done.wait()
+
+
+@pytest.mark.parametrize("changes", [{"deny": ["echo review"]}, {"exec_mode": "off"}])
+async def test_parallel_task_rules_and_approval_recheck(host, monkeypatch, changes):
+    from codex_bridge.host.codex_mcp import current_lender, current_thread_id
+
+    executed = []
+
+    async def execute(job, cwd, timeout):
+        executed.append((job.task_id, job.command))
+        job.status = "done"
+
+    host.policy.update(lender_exec_modes={"friend": "all"}, exec_deny=["echo shared"], limits={"sync_wait_sec": 0})
+    link = await join(host, "friend", protocol=5, capabilities={"max_parallel": 3})
+    first = await host.mgr.start("first", lender="friend", deny=["echo local"], ask=["echo review"])
+    second = await host.mgr.start("second", lender="friend")
+    for task_id, thread in [(first, "one"), (second, "two")]:
+        await host.mgr.on_agent_message(link, {"type": "task_state", "task_id": task_id, "state": "running",
+                                              "thread_id": thread})
+    runner = host.services.runner
+    monkeypatch.setattr(runner, "_execute", execute)
+
+    async def command(thread, value):
+        lender_token = current_lender.set("friend")
+        thread_token = current_thread_id.set(thread)
+        try:
+            reply = await runner.run_command(value)
+            job = runner.jobs[reply["job_id"]]
+            if job.status != "waiting_approval":
+                await job.done.wait()
+            return job
+        finally:
+            current_lender.reset(lender_token)
+            current_thread_id.reset(thread_token)
+
+    assert (await command("one", "echo local")).status == "denied"
+    assert (await command("two", "echo local")).status == "done"
+    assert (await command(None, "echo local")).status == "done"
+    assert (await command(None, "echo shared")).status == "denied"
+    waiting = await command("one", "echo review")
+    assert waiting.status == "waiting_approval"
+    assert (await command("two", "echo review")).status == "done"
+    host.mgr.set_task_exec(first, **changes)
+    host.approvals.decide(waiting.approval_id, True)
+    await waiting.done.wait()
+    assert waiting.status == "denied"
+    assert ("拒否リスト" if "deny" in changes else "off") in waiting.message
+    assert executed == [(second, "echo local"), (None, "echo local"), (second, "echo review")]
+
+
 async def test_send_task_to_a_chosen_lender(admin, host):
     sent = await two_lenders(host)
     r = await admin.post("/admin/api/tasks", json={"prompt": "one", "lender": "alice"}, headers=H)  # bob has more room
@@ -820,7 +990,7 @@ async def test_send_task_to_a_chosen_lender(admin, host):
     assert sent["alice"][-1]["type"] == "task_start" and sent["alice"][-1]["task_id"] == r.json()["task_id"]
     assert all(m["type"] != "task_start" for m in sent["bob"])
     r = await admin.post("/admin/api/tasks", json={"prompt": "two", "lender": "alice"}, headers=H)
-    assert r.status_code == 409 and "作業中" in r.json()["detail"]
+    assert r.status_code == 409 and "上限" in r.json()["detail"]
     r = await admin.post("/admin/api/tasks", json={"prompt": "two", "lender": "carol"}, headers=H)
     assert r.status_code == 409 and "接続されていません" in r.json()["detail"]
     assert (await admin.post("/admin/api/tasks", json={"prompt": "two", "lender": 5}, headers=H)).status_code == 400
@@ -931,11 +1101,24 @@ async def test_policy_form_save_keeps_lender_exec_modes(admin, host):
     assert host.policy.current().lender_exec_modes == {"alice": "ask", "bob": "all"}
 
 
-async def test_shared_allowlist_page_has_no_global_lender_settings(admin):
+async def test_shared_command_rules_page_has_no_global_lender_settings(admin):
     response = await admin.get("/app/static/use-pages.js")
     assert response.status_code == 200
-    allow = response.text.split("export function allowHtml(form) {", 1)[1].split("export function", 1)[0]
-    assert 'data-act="allow-text"' in allow
-    assert 'data-act="allow-confirm"' in allow
+    rules = response.text.split("export function rulesHtml(form) {", 1)[1].split("export function", 1)[0]
+    assert 'data-act="rule-text"' in rules
+    assert 'data-act="allow-confirm"' in rules
     for setting in ("exec-mode", "delete-approval", "log-files", "log-result", "threshold"):
-        assert f'data-act="{setting}"' not in allow
+        assert f'data-act="{setting}"' not in rules
+
+
+async def test_admin_overview_lists_every_active_task_and_keeps_first(host, admin):
+    host.tokens.issue("friend")
+
+    async def send(message):
+        pass
+
+    link = host.mgr.attach("friend", send)
+    await host.mgr.on_agent_message(link, {"type": "hello", "protocol": 5, "capabilities": {"max_parallel": 3}})
+    ids = [await host.mgr.start("first"), await host.mgr.start("second")]
+    overview = (await admin.get("/admin/api/overview")).json()
+    assert overview["active_task_ids"] == ids and overview["current_task"] == ids[0]

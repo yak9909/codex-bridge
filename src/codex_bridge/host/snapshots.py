@@ -9,12 +9,15 @@ import shutil
 import threading
 from pathlib import Path
 
+from .paths import SafePaths, ToolError
+
 NO_TASK = "_no_task"
 SAFE_ID = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,80}")
 
 
 class Snapshots:
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path, paths: SafePaths) -> None:
+        self.paths = paths
         self.base = Path(data_dir) / "snapshots"
         self._lock = threading.Lock()
 
@@ -61,6 +64,21 @@ class Snapshots:
         with self._lock:
             d = self._dir(task_id)
             manifest = self._manifest(d)
+            for entry in manifest.values():
+                target = Path(entry["abs"])
+                try:
+                    if self.paths.level_of(target) != "write" or self.paths.level_of(target.resolve()) != "write":
+                        raise ToolError
+                    self.paths.check_subtree_writable(target, "元に戻すことが")
+                    if entry["kind"] == "dir":
+                        src = d / entry["copy"]
+                        for child in src.rglob("*"):
+                            destination = target / child.relative_to(src)
+                            if (self.paths.level_of(destination) != "write"
+                                    or self.paths.level_of(destination.resolve()) != "write"):
+                                raise ToolError
+                except (ToolError, OSError, RuntimeError):
+                    raise ValueError(f"書き込めない場所のファイルは元に戻せません（共有を外した・読むだけや見せないに変えた）: {target}") from None
             restored = []
             # Restore in reverse order so parents created later are removed first.
             for entry in reversed(list(manifest.values())):

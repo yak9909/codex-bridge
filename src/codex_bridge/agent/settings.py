@@ -42,7 +42,7 @@ LOCATION_FILE = "location.txt"
 WORKDIR_MEMO = "workdir.txt"
 MAX_TIMEOUT_MIN = 24 * 60
 MAX_RETENTION_DAYS = 3650
-SHARED_KEYS = frozenset({"limits", "workdir", "log_retention_days"})
+SHARED_KEYS = frozenset({"limits", "workdir", "log_retention_days", "max_parallel"})
 CONNECTION_KEYS = frozenset({"features", "pre_approval", "disposable", "log_visibility", "allowed_models", "max_effort"})
 
 
@@ -51,7 +51,7 @@ def defaults() -> dict:
             "features": {f: False for f in FEATURES},  # False = stopped
             "pre_approval": {"new_task": False, "followup": False, "timeout_min": 30},
             "disposable": False, "workdir": None, "log_retention_days": 30,
-            "allowed_models": None, "max_effort": "xhigh"}
+            "allowed_models": None, "max_effort": "xhigh", "max_parallel": 3}
 
 
 # ---- validation: each returns the value to keep, or raises ValueError --------------------------------
@@ -125,7 +125,7 @@ def expand_legacy_pre_approval(value):
     out.setdefault("new_task", value["enabled"])
     out.setdefault("followup", value["enabled"])
     return out
-SCALARS = {"disposable": _flag, "workdir": _folder,
+SCALARS = {"max_parallel": _whole(1, 8, "同時に受ける依頼の数"), "disposable": _flag, "workdir": _folder,
            "log_retention_days": _whole(1, MAX_RETENTION_DAYS, "記録の保管日数"),
            "allowed_models": _models, "max_effort": _effort}
 
@@ -196,7 +196,7 @@ class SettingsStore:
         """Validated as a whole before anything is written; returns all the settings."""
         with self._lock:
             if self.shared and (not isinstance(patch, dict) or set(patch) - SHARED_KEYS):
-                raise ValueError("共通の設定は limits、workdir、log_retention_days だけです")
+                raise ValueError("共通の設定は limits、workdir、log_retention_days、max_parallel だけです")
             new = _merge({**defaults(), **self._load()}, patch, strict=True)
             if self.shared:
                 new = {k: new[k] for k in SHARED_KEYS}
@@ -238,23 +238,26 @@ def lender_view(settings: dict, catalog: list[dict] | None) -> dict:
                              "timeout_min": settings["pre_approval"]["timeout_min"]},
             "resumable": not settings["disposable"],
             "over_limit": "stop" if settings["limits"]["force"] else "report",
-            "max_effort": settings["max_effort"],
+            "max_effort": settings["max_effort"], "max_parallel": settings["max_parallel"],
             "models_all": None if catalog is None else
             [{"model": m["model"], "allowed": allowed is None or m["model"] in allowed,
               "is_default": m["is_default"] is True} for m in catalog]}
 
 
+def capabilities(settings: dict) -> dict:
+    return {"resumable": not settings["disposable"],
+            "pre_approval": settings["pre_approval"]["new_task"] or settings["pre_approval"]["followup"],
+            "model_select": True, "max_parallel": settings["max_parallel"]}
+
+
 def models_fields(settings: dict, catalog: list[dict] | None) -> dict:
-    return {"models": offered_models(catalog, settings["allowed_models"], settings["max_effort"]),
+    return {"capabilities": capabilities(settings), "models": offered_models(catalog, settings["allowed_models"], settings["max_effort"]),
             "max_effort": settings["max_effort"], "lender_view": lender_view(settings, catalog)}
 
 
 def hello_fields(settings: dict, catalog: list[dict] | None = None) -> dict:
     """What `hello` says about this agent (design 6): the host reads capabilities before routing a task."""
     return {"protocol": PROTOCOL,
-            "capabilities": {"resumable": not settings["disposable"],
-                             "pre_approval": settings["pre_approval"]["new_task"] or settings["pre_approval"]["followup"],
-                             "model_select": True},
             "limits": dict(settings["limits"]), **models_fields(settings, catalog)}
 
 

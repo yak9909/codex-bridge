@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import threading
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -12,10 +13,13 @@ from typing import Literal
 
 import yaml
 
+from .command_rules import lex
+
 Level = Literal["hidden", "read", "write"]
 ExecMode = Literal["off", "allowlist", "ask", "all"]
 LEVELS = ("hidden", "read", "write")
 EXEC_MODES = ("off", "allowlist", "ask", "all")
+EXEC_MODE_STRICTNESS = ("all", "allowlist", "ask", "off")
 OUTPUTS_TOP = ".codex-bridge"
 DATA_SHARE_MSG = "codex-bridge のデータフォルダ（記録や合言葉の置き場）を含むフォルダは共有できません"
 
@@ -116,9 +120,15 @@ class Policy:
     folders: tuple[Folder, ...] = ()  # v2: absolute folders
     main: Path | None = None          # v2: relative paths are resolved from here
     v2: bool = False
+    deny_patterns: list[str] = field(default_factory=list)
+    ask_patterns: list[str] = field(default_factory=list)
 
     def exec_mode_for(self, lender: str | None) -> str:
         return self.lender_exec_modes.get(lender, self.exec_mode) if lender is not None else self.exec_mode
+
+    def effective_exec_mode(self, lender: str | None, task_mode: str | None) -> str:
+        mode = self.exec_mode_for(lender)
+        return max(mode, task_mode, key=EXEC_MODE_STRICTNESS.index) if task_mode is not None else mode
 
     def delete_approval_for(self, lender: str | None) -> bool:
         """Whether a delete by this lender waits for approval (the global value when it has none of its own)."""
@@ -176,6 +186,17 @@ class Policy:
         return level if level is not None else self.default
 
 
+def command_patterns(value, label: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{label} はコマンドの型の並びで指定してください")
+    for item in value:
+        if lex(item, "powershell", pattern=True)[1]:
+            raise ValueError(f"{label} の型の引用符が閉じていません: {item}")
+    return list(value)
+
+
 def parse_policy(data: dict | None) -> Policy:
     if data is None:
         data = {}
@@ -230,6 +251,11 @@ def parse_policy(data: dict | None) -> Policy:
     allow = ex.get("allow") or []
     if not isinstance(allow, list) or not all(isinstance(a, str) for a in allow):
         raise ValueError("exec.allow must be a list of strings")
+    for pattern in allow:
+        try:
+            shlex.split(pattern, posix=False)
+        except ValueError as e:
+            raise ValueError(f"exec.allow の型の引用符が閉じていません: {pattern}") from e
     lim = data.get("limits") or {}
     try:
         limits = Limits(**{k: int(v) for k, v in lim.items()})
@@ -241,6 +267,8 @@ def parse_policy(data: dict | None) -> Policy:
         exec_mode=mode,
         lender_exec_modes=lender_exec_modes,
         allow_patterns=list(allow),
+        deny_patterns=command_patterns(ex.get("deny"), "exec.deny"),
+        ask_patterns=command_patterns(ex.get("ask"), "exec.ask"),
         paused=bool(data.get("paused", False)),
         confirm_modified_scripts=bool(ex.get("confirm_modified_scripts", False)),
         delete_needs_approval=bool(data.get("delete_needs_approval", True)),

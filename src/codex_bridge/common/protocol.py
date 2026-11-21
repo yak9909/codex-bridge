@@ -13,6 +13,8 @@ agent -> host:
     protocol 4 adds: lender_view{features{web_search, image_generation, multi_agent, goals}, pre_approval{new_task,
     followup, timeout_min}, resumable, over_limit: report|stop, max_effort, models_all|null} (the lender's own
     settings, for the borrower's read-only view; without it the host shows nothing for that lender)
+    protocol 5 adds: capabilities.max_parallel (1..8), active_task_ids in hello (current_task_id kept),
+    lender_view.max_parallel; lender_models also refreshes capabilities.
   event{seq, task_id, kind, data}            kind: started|agent_message|turn_completed|status|final_report|error
     v0.2 adds (design 4.10): plan{steps:[{step,status}]}  reasoning_summary{text}
     tool_started{tool,arguments}  tool_finished{tool,arguments,duration_ms,success,result_summary}
@@ -32,14 +34,14 @@ from __future__ import annotations
 import json
 import math
 
-PROTOCOL = 4  # what the agent says in hello
+PROTOCOL = 5  # what the agent says in hello
 HOST_TO_AGENT = {"task_start", "task_followup", "task_cancel", "session_list", "session_read",
                  "session_delete", "settings", "ack"}
 AGENT_TO_HOST = {"hello", "event", "usage", "task_state", "reply", "lender_status", "lender_models"}
 TYPES = HOST_TO_AGENT | AGENT_TO_HOST
 
 TASK_STATES = ("queued", "running", "completed", "suspended_quota", "failed", "cancelled", "agent_offline",
-               "awaiting_lender", "rejected_by_lender")
+               "awaiting_lender", "rejected_by_lender", "update_waiting")
 FINAL_STATES = ("completed", "suspended_quota", "failed", "cancelled", "rejected_by_lender")
 LOG_VISIBILITY = ("summary", "files", "all")
 EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")

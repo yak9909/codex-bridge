@@ -18,8 +18,8 @@ export function preSummary(p) {
 
 export function connectionHead(c, open, tasks) {
   const [label, cls] = c.invite_problem ? ["招待コードが無効", "bad"] : !c.connected ? ["つなぎ直し中", "warn"] : c.busy ? ["作業中", "ok"] : ["待機中", "idle"];
-  const active = tasks.find((t) => t.connection_id === c.id && ["running", "awaiting_lender"].includes(t.state));
-  const caption = active ? taskTitle(active) : "依頼はありません";
+  const active = tasks.filter((t) => t.connection_id === c.id && ["queued", "running", "awaiting_lender", "agent_offline"].includes(t.state));
+  const caption = active.length > 1 ? `${active.length} 件作業中` : active.length ? taskTitle(active[0]) : "依頼はありません";
   return `<button class="ent-head" data-act="card" data-id="${esc(c.id)}" aria-expanded="${open}">` +
     `<span class="ent-line"><span class="ent-name ellipsis" title="${esc(c.host_name)}">${esc(c.host_name)}</span><span class="lz ${cls}">${label}</span></span>` +
     `<span class="cap low ellipsis">${esc(caption)}</span>${icon("chevron-right", "ic chev")}</button>`;

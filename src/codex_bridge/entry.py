@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import ctypes
 from ctypes import wintypes
 import os
@@ -86,17 +87,63 @@ def release_agent_instance() -> None:
         _agent_handle = None
 
 
-def _run_resident() -> int:
+def claim_agent_instance() -> bool:
     global _agent_handle
+    if _agent_handle is not None:
+        return True
     acquired, handle = acquire_agent_instance()
-    if not acquired:
+    if acquired:
+        _agent_handle = handle
+    return acquired
+
+
+@contextmanager
+def _previous_process(pid: int):
+    """Keep a handle to the old process so that waiting cannot follow a reused PID."""
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.OpenProcess(0x100000, False, pid)  # SYNCHRONIZE
+    if not handle:
+        error = ctypes.get_last_error()
+        if error != 87:  # The process has already exited.
+            raise ctypes.WinError(error)
+        yield lambda: None
+        return
+
+    def wait():
+        if kernel.WaitForSingleObject(handle, 0xFFFFFFFF) != 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    try:
+        yield wait
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _run_resident(*, after_update: tuple[str, int] | None = None) -> int:
+    if not claim_agent_instance():
+        if after_update is not None:
+            return 1
         from .resident import ui_port
         webbrowser.open(f"http://127.0.0.1:{ui_port()}/")
         return 0
-    _agent_handle = handle
     try:
         from . import resident
-        resident.main()
+        if after_update is None:
+            resident.main()
+        else:
+            from .updater import UpdateError, acknowledge_restart
+            stage_name, previous_pid = after_update
+            with _previous_process(previous_pid) as wait:
+                async def ready():
+                    if not acknowledge_restart(Path(sys.executable).resolve(), stage_name):
+                        raise UpdateError("新しい exe の起動を通知できませんでした")
+                return resident.main(update_ready=ready, wait_for_previous=wait)
     finally:
         release_agent_instance()
     return 0
@@ -122,6 +169,14 @@ def main(argv: list[str] | None = None) -> int:
         return hook_main(argv[1:])
     if not argv or argv == ["agent"]:
         return _run_resident()
+    if len(argv) == 3 and argv[0] == "--after-update" and getattr(sys, "frozen", False):
+        try:
+            previous_pid = int(argv[2])
+        except ValueError:
+            return 1
+        if not 0 < previous_pid <= 0xFFFFFFFF or previous_pid == os.getpid():
+            return 1
+        return _run_resident(after_update=(argv[1], previous_pid))
     if argv[0] == "host":
         return _run_host(argv[1:])
     attach_console()

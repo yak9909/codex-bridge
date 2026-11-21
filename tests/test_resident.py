@@ -14,8 +14,9 @@ import pytest
 import yaml
 from fastapi import FastAPI
 
-from codex_bridge import resident
+from codex_bridge import entry, resident, updater
 from codex_bridge.agent import main as agent_main
+from codex_bridge.agent.runner import TaskSlot
 from codex_bridge.common.applog import AppLog
 from codex_bridge.common.invite import make_invite
 from codex_bridge.host.app import build_host, create_local_app
@@ -437,7 +438,7 @@ async def test_state_counts(tmp_path):
     async with client_for(create_resident_app(res)) as web:
         assert (await web.get("/app/api/state")).json() == {
             "use": {"configured": True, "running": False, "error": None},
-            "lend": {"connections": 4, "error": None}, "paused": False}
+            "lend": {"connections": 4, "error": None}, "paused": False, "update": res.update_status()}
     res.host_role.running = True
     assert res.status_line() == "貸す人 1/2・依頼主 3/4・承認待ち 7"
 
@@ -852,7 +853,9 @@ async def test_shutdown_after_log_folder_is_removed_stops_both_roles(tmp_path):
     applog.path.unlink()
     applog.path.parent.rmdir()
     serving = asyncio.create_task(asyncio.sleep(0))
-    await res._shutdown(SimpleNamespace(should_exit=False), serving)
+    res._ui_server = SimpleNamespace(should_exit=False)
+    res._ui_serving = serving
+    await res._shutdown()
     assert not role.running and role.host is None
     assert agent.log == ["stop"]
     assert not applog.path.parent.exists()
@@ -945,3 +948,429 @@ async def test_pause_state_and_tray_use_either_side_and_resume_both(tmp_path, ho
 async def test_state_exposes_lender_setup_error(web, res):
     res.agent.error = "Codex をダウンロードできませんでした: オフラインです"
     assert (await web.get("/app/api/state")).json()["lend"]["error"] == res.agent.error
+
+
+async def test_source_app_checks_and_notifies_without_preparing(tmp_path, res, web, monkeypatch):
+    calls = []
+    release = updater.Release("9.0.0", "fake", "0" * 64)
+    monkeypatch.setattr(updater, "check_release", lambda: release)
+    monkeypatch.setattr(updater, "prepare_release", lambda *args: calls.append(args))
+    res.update_exe = None
+    res.tray = FakeTray()
+    assert res.update_mode == "confirm"
+    assert (await web.post("/app/api/update/check")).status_code == 403
+    assert (await web.post("/app/api/update/mode", headers=H, json={"mode": "auto"})).status_code == 200
+    assert make_resident(tmp_path).update_mode == "auto"
+    response = await web.post("/app/api/update/check", headers=H)
+    assert response.status_code == 202 and response.json()["phase"] == "checking"
+    await res._update_job
+    assert res.update_status()["phase"] == "available"
+    assert res.update_status()["latest"] == "9.0.0"
+    assert len(res.tray.notices) == 1
+    assert (await web.post("/app/api/update/install", headers=H)).status_code == 409
+    assert not calls
+
+
+@pytest.mark.parametrize("automatic", [True, False])
+async def test_switch_waits_for_work_on_both_sides_and_keeps_approvals(tmp_path, monkeypatch, automatic):
+    host = make_host(tmp_path)
+    role = FakeHostRole(host)
+    role.running = True
+    agent = FakeAgent()
+    slot = TaskSlot()
+    busy = SimpleNamespace(active_task_ids=lambda: ["lend work"])
+    slot.runners.append(busy)
+
+    async def announce():
+        pass
+
+    slot.announce = announce
+    agent.runtime = SimpleNamespace(slot=slot, moving=False)
+    app = make_resident(tmp_path, host_role=role, agent=agent)
+    app.loop = asyncio.get_running_loop()
+    app.stop_event = asyncio.Event()
+    host.mgr.update_waiting = role.update_waiting
+    app.update_exe = tmp_path / updater.EXE
+    app.update_exe.write_bytes(b"old exe")
+    app.update_mode = "auto" if automatic else "confirm"
+    newest = updater.Release("9.0.0", "fake", "0" * 64)
+    package = tmp_path / "data" / "updates" / "download" / newest.folder
+    installs = []
+    monkeypatch.setattr(updater, "check_release", lambda: newest)
+    monkeypatch.setattr(updater, "prepare_release", lambda *args: package)
+    monkeypatch.setattr(updater, "install_release", lambda *args: installs.append(args))
+    host.mgr.check_start = None
+
+    async def send(message):
+        pass
+
+    host.tokens.issue("alice")
+    link = host.mgr.attach("alice", send)
+    await host.mgr.on_agent_message(link, {"type": "hello", "protocol": 4})
+    working = await host.mgr.start("still working", lender="alice")
+    approval = host.approvals.request("command", "echo approved", working)
+    async with client_for(create_resident_app(app)) as http:
+        await http.post("/app/api/update/check", headers=H)
+        if not automatic:
+            await app._update_job
+            assert app.update_phase == "available" and not installs
+            assert (await http.post("/app/api/update/install", headers=H)).status_code == 202
+        async with asyncio.timeout(3):
+            while not slot.update_waiting:
+                await asyncio.sleep(0.01)
+        assert app.update_waiting
+        idle_task = await host.mgr.start("after restart", lender="alice")
+        assert host.mgr.status(idle_task)["state"] == "update_waiting"
+        assert (await http.post(f"/admin/api/approvals/{approval.id}", headers=H, json={"approve": True})).status_code == 200
+        slot.runners.remove(busy)
+        await asyncio.sleep(0.3)
+        assert not installs
+        await host.mgr.on_agent_message(link, {"type": "task_state", "task_id": working, "state": "completed"})
+        await asyncio.wait_for(app._update_job, 3)
+        await asyncio.wait_for(app.stop_event.wait(), 3)
+    assert installs == [(app.update_exe, package)]
+
+
+@pytest.mark.parametrize("cancel", [True, False])
+async def test_end_switch_wait_releases_held_task(tmp_path, monkeypatch, cancel):
+    host = make_host(tmp_path)
+    role = FakeHostRole(host)
+    role.running = True
+    app = make_resident(tmp_path, host_role=role)
+    host.mgr.check_start = None
+    host.mgr.update_waiting = role.update_waiting
+    host.tokens.issue("alice")
+    messages = []
+
+    async def send(message):
+        messages.append(message)
+
+    link = host.mgr.attach("alice", send)
+    await host.mgr.on_agent_message(link, {"type": "hello", "protocol": 5})
+    app.update_exe = tmp_path / updater.EXE
+    app.update_exe.write_bytes(b"old exe")
+    newest = updater.Release("9.0.0", "fake", "0" * 64)
+    app.update_mode = "auto"
+    staged = tmp_path / "data" / "updates" / "download" / newest.folder
+    prepares = []
+    installs = []
+    busy = [True]
+
+    def prepare(*args):
+        prepares.append(args)
+        staged.mkdir(parents=True)
+        return staged
+
+    def fail(*args):
+        installs.append(args)
+        raise updater.UpdateError("入れ替えの失敗")
+
+    monkeypatch.setattr(updater, "check_release", lambda: newest)
+    monkeypatch.setattr(updater, "prepare_release", prepare)
+    monkeypatch.setattr(updater, "install_release", fail)
+    monkeypatch.setattr(app, "_update_busy", lambda: busy[0])
+    app.check_update()
+    async with asyncio.timeout(3):
+        while not app.update_waiting:
+            await asyncio.sleep(0.01)
+    held = await host.mgr.start("held", lender="alice")
+    async with client_for(create_resident_app(app)) as web:
+        if cancel:
+            assert (await web.post("/app/api/update/cancel")).status_code == 403
+            response = await web.post("/app/api/update/cancel", headers=H)
+            assert response.json()["phase"] == "cancelled"
+        else:
+            busy[0] = False
+            await asyncio.wait_for(app._update_job, 3)
+            assert app.update_phase == "failed"
+            assert app.update_message == "入れ替えの失敗"
+        assert installs == ([] if cancel else [(app.update_exe, staged)])
+        assert not staged.parent.exists()
+        assert [m["task_id"] for m in messages if m["type"] == "task_start"] == [held]
+        if cancel:
+            assert make_resident(tmp_path)._cancelled_version == newest.version
+            app.check_update()
+            await app._update_job
+            assert len(prepares) == 1
+            await web.post("/app/api/update/check", headers=H)
+            async with asyncio.timeout(3):
+                while not app.update_waiting:
+                    await asyncio.sleep(0.01)
+            assert len(prepares) == 2
+            assert (await web.post("/app/api/update/cancel", headers=H)).status_code == 200
+
+
+async def test_preflight_failure_does_not_enter_switch_wait(tmp_path, res, monkeypatch):
+    res.update_exe = tmp_path / updater.EXE
+    res.update_release = updater.Release("9.0.0", "fake", "0" * 64)
+    res.update_phase = "available"
+
+    def deny(exe):
+        raise updater.UpdateError(f"exe のフォルダに書き込めません: {exe.parent}")
+
+    monkeypatch.setattr(updater, "check_install_folder", deny)
+    monkeypatch.setattr(updater, "prepare_release", lambda *args: pytest.fail("download after failed check"))
+    assert res.prepare_update()
+    await res._update_job
+    assert res.update_phase == "failed" and "exe のフォルダ" in res.update_message
+
+
+async def test_check_failure_keeps_installable_release(tmp_path, res, web, monkeypatch):
+    res.update_exe = tmp_path / updater.EXE
+    newest = updater.Release("9.0.0", "fake", "0" * 64)
+    res.update_release = newest
+
+    def offline():
+        raise ConnectionError("offline")
+
+    monkeypatch.setattr(updater, "check_release", offline)
+    await web.post("/app/api/update/check", headers=H)
+    await res._update_job
+    update = (await web.get("/app/api/state")).json()["update"]
+    assert update["latest"] == newest.version
+    assert update["phase"] == "failed" and update["can_install"]
+    assert res.update_release is newest
+
+
+def runnable_update_app(tmp_path, host_role=None):
+    with bind_socket("127.0.0.1", 0) as sock:
+        port = sock.getsockname()[1]
+    tray = FakeTray()
+    tray.run_detached = tray.stop = lambda: None
+    app = Resident(applog=AppLog(tmp_path / "logs" / "app.jsonl"), agent=FakeAgentRun(),
+                   host_role=host_role or FakeHostRole(), config_path=tmp_path / "host.yaml", port=port,
+                   tray_factory=lambda r: tray)
+    app.update_exe = tmp_path / updater.EXE
+    app.update_exe.write_bytes(b"old exe")
+    return app
+
+
+async def test_new_resident_signals_only_after_listening_then_waits_to_clean_up(tmp_path, monkeypatch):
+    app = runnable_update_app(tmp_path)
+    notices = []
+    parent_gone = asyncio.Event()
+    acknowledged = asyncio.Event()
+    monkeypatch.setattr(updater, "clean_up", lambda *args: notices.append("cleanup"))
+    binds = []
+
+    def server_factory(asgi, port):
+        binds.append(port)
+        if len(binds) == 1:
+            raise RuntimeError("old socket is still closing")
+        return UiServer(asgi, port)
+
+    app.server_factory = server_factory
+
+    async def ready():
+        assert binds == [app.port, app.port]
+        async with httpx.AsyncClient(trust_env=False) as web:
+            assert (await web.get(app.page_url)).status_code == 200
+            assert (await web.post(app.page_url + "app/api/update/check", headers=H)).status_code == 503
+        acknowledged.set()
+        await parent_gone.wait()
+
+    run = asyncio.create_task(app._run(update_ready=ready))
+    try:
+        await asyncio.wait_for(acknowledged.wait(), 5)
+        assert not notices and not app.agent.log
+        parent_gone.set()
+        async with asyncio.timeout(3):
+            while not app.agent.log:
+                await asyncio.sleep(0.01)
+        assert notices == ["cleanup"]
+    finally:
+        parent_gone.set()
+        app.request_quit()
+        await asyncio.wait_for(run, 5)
+
+
+@pytest.mark.parametrize("child_fails", [False, True])
+async def test_old_resident_waits_for_handover_and_recovers_if_child_fails(tmp_path, monkeypatch, child_fails):
+    host = make_host(tmp_path)
+    app = runnable_update_app(tmp_path, FakeHostRole(host))
+    host.mgr.update_waiting = app.host_role.update_waiting
+    host.mgr.check_start = None
+    host.tokens.issue("alice")
+    messages = []
+
+    async def send(message):
+        messages.append(message)
+
+    link = host.mgr.attach("alice", send)
+    await host.mgr.on_agent_message(link, {"type": "hello"})
+    package = tmp_path / "data" / "updates" / "download" / "pkg"
+    package.mkdir(parents=True)
+    (package / updater.EXE).write_bytes(b"new exe")
+    launch_started, child_finished = threading.Event(), threading.Event()
+    events = []
+    monkeypatch.setattr(entry, "release_agent_instance", lambda: events.append("released"))
+    monkeypatch.setattr(entry, "claim_agent_instance", lambda: events.append("reclaimed") or True)
+    monkeypatch.setattr(updater, "clean_up", lambda *args: None)
+    monkeypatch.setattr(updater, "prepare_release", lambda *args: package)
+
+    def launch(exe, staging):
+        assert events == ["released"]
+        assert exe.with_suffix(".exe.old").read_bytes() == b"old exe"
+        launch_started.set()
+        assert child_finished.wait(6)
+        if child_fails:
+            raise updater.UpdateError("子プロセスが起動できませんでした")
+
+    monkeypatch.setattr(updater, "_launch", launch)
+    run = asyncio.create_task(app._run())
+    try:
+        async with asyncio.timeout(5):
+            while not app.agent.log:
+                await asyncio.sleep(0.01)
+        app.update_release = updater.Release("9.0.0", "fake", "0" * 64)
+        app.update_phase = "available"
+        assert app.prepare_update()
+        assert await asyncio.to_thread(launch_started.wait, 5)
+        assert not app.stop_event.is_set() and app._ui_serving is None
+        assert app.host_role.running
+        held = await host.mgr.start("queued during handover", lender="alice")
+        assert host.mgr.status(held)["state"] == "update_waiting"
+        child_finished.set()
+        await asyncio.wait_for(app._update_job, 5)
+        if child_fails:
+            assert not app.stop_event.is_set()
+            assert app.update_phase == "failed"
+            assert events == ["released", "reclaimed"]
+            assert [m["task_id"] for m in messages if m["type"] == "task_start"] == [held]
+            assert app.update_exe.read_bytes() == b"old exe"
+            async with httpx.AsyncClient(trust_env=False) as web:
+                async with asyncio.timeout(5):
+                    while not app._ui_server.server.started:
+                        await asyncio.sleep(0.01)
+                assert (await web.get(app.page_url + "app/api/state")).json()["update"]["phase"] == "failed"
+        else:
+            assert app.update_exe.read_bytes() == b"new exe"
+            await asyncio.wait_for(run, 5)
+    finally:
+        child_finished.set()
+        app.request_quit()
+        await asyncio.wait_for(run, 5)
+
+
+async def test_backup_cleanup_retries_after_start_and_at_release_check(tmp_path, res, monkeypatch):
+    res.update_exe = tmp_path / updater.EXE
+    events = []
+    monkeypatch.setattr(resident, "BACKUP_CLEANUP_DELAY", 0)
+    monkeypatch.setattr(updater, "CHECK_INTERVAL", 0)
+    monkeypatch.setattr(updater, "clean_old_exes", lambda exe: events.append(("cleanup", exe)))
+
+    await res._retry_old_exes_after_start()
+    assert events == [("cleanup", res.update_exe)]
+
+    def check():
+        if events[-1] == ("cleanup", res.update_exe) and len(events) > 1:
+            raise asyncio.CancelledError
+        events.append("check")
+
+    monkeypatch.setattr(res, "check_update", check)
+    with pytest.raises(asyncio.CancelledError):
+        await res._periodic_update()
+    assert events == [("cleanup", res.update_exe), "check", ("cleanup", res.update_exe)]
+    res._installing = asyncio.create_task(asyncio.sleep(0))
+    await res._installing
+    res._clean_old_exes()
+    assert len(events) == 3
+
+
+@pytest.mark.parametrize("failure", ["notify", "wait", "resident"])
+def test_handover_crash_reporting_begins_after_readiness(tmp_path, monkeypatch, failure):
+    from codex_bridge.agent import setup
+
+    notices = []
+    monkeypatch.setattr(setup, "data_root", lambda: tmp_path)
+    monkeypatch.setattr(agent_main, "ensure_std_streams", lambda: None)
+    monkeypatch.setattr(agent_main, "show_info", lambda text, **kw: notices.append((text, kw)))
+    monkeypatch.setattr(agent_main, "AgentRole", lambda *args, **kw: FakeAgent())
+    monkeypatch.setattr("codex_bridge.host.role.HostRole", lambda *args, **kw: FakeHostRole())
+    monkeypatch.setattr(resident, "host_config_path", lambda: tmp_path / "host.yaml")
+
+    async def notify_ready():
+        if failure == "notify":
+            raise RuntimeError("before readiness")
+
+    def wait_for_previous():
+        if failure == "wait":
+            raise RuntimeError("after readiness, waiting for old process")
+
+    def run(self, *, check_updates, update_ready):
+        if update_ready is not None:
+            asyncio.run(update_ready())
+        raise RuntimeError("resident crash")
+
+    monkeypatch.setattr(Resident, "run", run)
+    log = tmp_path / "logs" / "crash.log"
+    if failure != "notify":
+        assert resident.main(update_ready=notify_ready, wait_for_previous=wait_for_previous) == 0
+        first = log.read_text(encoding="utf-8")
+        assert re.match(r"--- \d{4}-\d\d-\d\d \d\d:\d\d:\d\d \(agent [^)]+\)", first)
+        reason = "after readiness, waiting for old process" if failure == "wait" else "resident crash"
+        assert f"RuntimeError: {reason}" in first
+        assert len(notices) == 1 and notices[0][1] == {"error": True}
+        assert str(log) in notices[0][0]
+        assert resident.main() == 0
+        appended = log.read_text(encoding="utf-8")
+        assert appended.startswith(first)
+        assert appended[len(first):].count("RuntimeError: resident crash") == 1
+    else:
+        with pytest.raises(RuntimeError, match="before readiness"):
+            resident.main(update_ready=notify_ready, wait_for_previous=wait_for_previous)
+        assert not log.exists() and not notices
+
+
+@pytest.mark.parametrize("port_free", [True, False])
+async def test_mutex_recovery_is_bounded_keeps_app_alive_and_reports_failure(res, monkeypatch, port_free):
+    res.stop_event = asyncio.Event()
+    res._handover = True
+    res.update_phase = "failed"
+    res.update_message = "新しい exe の起動を確認できませんでした"
+    res.tray = FakeTray()
+    res.update_exe = res.config_path.with_name(updater.EXE)
+    monkeypatch.setattr(entry, "claim_agent_instance", lambda: False)
+    monkeypatch.setattr(resident, "HANDOVER_RECOVERY_TIMEOUT", 0)
+    attempts = []
+
+    def start_ui():
+        attempts.append("screen")
+        if not port_free:
+            raise RuntimeError("port taken")
+
+    monkeypatch.setattr(res, "_start_ui", start_ui)
+    await asyncio.wait_for(res._restore_update_handover(), 1)
+
+    status = res.update_status()
+    assert attempts == ["screen"]
+    assert not res.stop_event.is_set() and not res._handover
+    assert not status["can_install"] and status["phase"] == "failed"
+    assert "ミューテックスを取り直せませんでした" in status["message"]
+    assert ("画面の待ち受けを再開できませんでした" in status["message"]) is not port_free
+    assert "ミューテックス" in res.applog.entries()[0]["text"]
+    assert "ミューテックス" in res.tray.notices[0][1]
+
+
+@pytest.mark.parametrize("configured,running", [(True, False), (True, True), (False, False)])
+async def test_handover_recovery_restarts_only_configured_stopped_host(res, monkeypatch, configured, running):
+    res.stop_event = asyncio.Event()
+    res._handover = True
+    res.host_role.running = running
+    if configured:
+        res.config_path.touch()
+    monkeypatch.setattr(entry, "claim_agent_instance", lambda: True)
+    monkeypatch.setattr(res, "_start_ui", lambda: None)
+    attempts = []
+
+    async def start_host():
+        assert not res._handover
+        attempts.append("start")
+
+    monkeypatch.setattr(res, "start_host", start_host)
+    await res._restore_update_handover()
+    assert attempts == (["start"] if configured and not running else [])
+
+
+
+

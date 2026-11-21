@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import yaml
 
-from .policy_form import _abs, add_folder, remove_folder, set_main_folder
+from .policy_form import _abs, add_folder, folder_removal_form, remove_folder, save_form, set_main_folder
 
 UNWRITABLE_WARNING = "このフォルダは、今のユーザーの権限では書き込めません。Codex が書こうとしても Windows に断られます。"
 
@@ -41,10 +41,10 @@ class ShareBusy(Exception):
     pass
 
 
-def _guard(host, path: str, *, busy_check: bool = True, removing: bool = False) -> Path:
+def _guard(host, path: str, *, busy_check: bool = False, removing: bool = False) -> Path:
     p = Path(_abs(path))
     if busy_check and host.mgr.current_task_id():
-        raise ShareBusy("作業中のタスクがあるため、共有フォルダは変えられません。終わってから変えてください")
+        raise ShareBusy("作業中はメインのフォルダを切り替えられません。終わってから切り替えてください")
     if not removing:
         host.policy.guard_shared_folder(p)
         install = host.paths.install_dir
@@ -69,9 +69,12 @@ def add_shared_folder(host, path: str, level: str = "read") -> Path:
 
 def remove_shared_folder(host, path: str) -> Path:
     p = _guard(host, path, removing=True)
-    host.share_warning = None
     before = host.paths.root
-    remove_folder(host.policy, p.as_posix())
+    form, loses_main = folder_removal_form(host.policy, p.as_posix())
+    if loses_main and host.mgr.active_task_ids():
+        raise ShareBusy("作業中はメインのフォルダを外せません（メインのフォルダが共有から外れるため）。終わってから外してください")
+    host.share_warning = None
+    save_form(host.policy, form)
     after = host.paths.root
     if after != before:  # the main folder moved on (or is gone): host.yaml must say the same
         _follow_main(host, after)
@@ -123,7 +126,7 @@ def _follow_main(host, root: Path | None) -> None:
 
 
 def set_main_shared_folder(host, path: str) -> Path:
-    p = _guard(host, path)
+    p = _guard(host, path, busy_check=True)
     host.share_warning = None
     was_unset = host.paths.root is None  # a real main that already exists keeps the user's list as is
     set_main_folder(host.policy, p.as_posix())
@@ -150,7 +153,7 @@ def drop_sample_folders(store) -> list[Path]:
 
 def change_share_root(host, new_path: str) -> Path:
     """v0.1 name: share this folder (writable) and make it the main folder."""
-    p = _guard(host, new_path)
+    p = _guard(host, new_path, busy_check=True)
     if not p.is_dir():
         raise ValueError(f"フォルダが見つかりません: {p}")
     if host.policy.current().level_for_abs(p) != "write":

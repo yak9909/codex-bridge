@@ -27,7 +27,7 @@ async def test_busy_elsewhere_lender_is_skipped_by_auto_routing(mgr):
 async def test_named_busy_elsewhere_lender_gets_busy_answer(mgr):
     alice = await FakeAgent.join(mgr, "alice")
     await alice.push("lender_status", busy_elsewhere=True)
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("one", lender="alice")
     assert not alice.all("task_start")
     await alice.push("lender_status", busy_elsewhere="false")
@@ -77,7 +77,7 @@ def test_pick_uses_lower_of_host_and_friend_limits():
 
 
 def test_pick_skips_busy_offline_blocked():
-    busy = lender("busy", five_hour=0, current_task_id="t1")
+    busy = lender("busy", five_hour=0, current_task_id="t1", active_task_ids=["t1"])
     offline = lender("offline", five_hour=0, connected=False)
     blocked = lender("blocked", five_hour=85)
     blocked_by_own_limit = lender("own", five_hour=50, limits={"five_hour": 40, "weekly": None, "force": False})
@@ -151,16 +151,16 @@ def test_normalize_window(raw, expected):
 
 
 @pytest.mark.parametrize("raw, expected", [
-    ({"resumable": False, "pre_approval": True}, {"resumable": False, "pre_approval": True, "model_select": False}),
-    ({"resumable": False}, {"resumable": False, "pre_approval": False, "model_select": False}),
+    ({"resumable": False, "pre_approval": True}, {"resumable": False, "pre_approval": True, "model_select": False, "max_parallel": 1}),
+    ({"resumable": False}, {"resumable": False, "pre_approval": False, "model_select": False, "max_parallel": 1}),
     ({"resumable": "no", "pre_approval": 1, "extra": float("nan")},
-     {"resumable": True, "pre_approval": False, "model_select": False}),
-    ({}, {"resumable": True, "pre_approval": False, "model_select": False}),
-    (None, {"resumable": True, "pre_approval": False, "model_select": False}),   # a v0.1 agent sends none
-    ("all", {"resumable": True, "pre_approval": False, "model_select": False}),
+     {"resumable": True, "pre_approval": False, "model_select": False, "max_parallel": 1}),
+    ({}, {"resumable": True, "pre_approval": False, "model_select": False, "max_parallel": 1}),
+    (None, {"resumable": True, "pre_approval": False, "model_select": False, "max_parallel": 1}),   # a v0.1 agent sends none
+    ("all", {"resumable": True, "pre_approval": False, "model_select": False, "max_parallel": 1}),
 ])
 def test_normalize_capabilities_keeps_the_known_flags(raw, expected):
-    assert normalize_capabilities(raw) == expected
+    assert normalize_capabilities(raw) == {**expected, "max_parallel": 1}
 
 
 def test_capabilities_keep_model_select():
@@ -323,7 +323,7 @@ async def test_two_lenders_work_in_parallel(mgr):
     assert mgr.tasks[t1].lender == "alice" and mgr.tasks[t2].lender == "bob"
     assert mgr.current_task_id("alice") == t1 and mgr.current_task_id("bob") == t2
     assert mgr.current_task_id() in (t1, t2)
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("three")
 
     await mgr.followup(t2, "more")
@@ -346,7 +346,7 @@ async def test_explicit_lender_is_used(mgr):
     await bob.push("usage", **usage(five_hour=50))
     tid = await mgr.start("one", lender="bob")
     assert bob.last("task_start")["task_id"] == tid and not alice.all("task_start")
-    with pytest.raises(ToolError, match="作業中"):
+    with pytest.raises(ToolError, match="上限"):
         await mgr.start("two", lender="bob")
     with pytest.raises(ToolError, match="接続されていません"):
         await mgr.start("two", lender="carol")
@@ -406,7 +406,7 @@ async def test_continue_goes_to_same_lender(mgr):
     assert alice.last("task_start")["task_id"] == t2 and alice.last("task_start")["continue_thread_id"] == "thA"
     assert not bob.all("task_start") and mgr.tasks[t2].lender == "alice"
 
-    with pytest.raises(ToolError, match=RETRY_ADVICE):  # alice is working
+    with pytest.raises(ToolError, match="会話は作業中"):  # The same conversation is still active.
         await mgr.start("again", continue_task_id=t1)
     await alice.finish(t2, seq=2, thread_id="thA")
     with pytest.raises(ToolError, match=RETRY_ADVICE):  # someone else was named
@@ -434,7 +434,7 @@ async def test_v1_agent_without_capabilities_is_resumable(mgr):
     await alice.push("hello", agent_version="0.1.0", codex_version="x", auth_mode="chatgpt", current_task_id=None)
     info = mgr.lenders()[0]
     assert info["name"] == "alice" and info["protocol"] == 1
-    assert info["capabilities"] == {"resumable": True, "pre_approval": False, "model_select": False}
+    assert info["capabilities"] == {"resumable": True, "pre_approval": False, "model_select": False, "max_parallel": 1}
     t1 = await mgr.start("one")
     await alice.finish(t1, seq=1, thread_id="thA")
     await mgr.start("more", continue_task_id=t1)
@@ -447,7 +447,7 @@ async def test_hello_v2_records_capabilities_and_limits(mgr):
                      capabilities={"resumable": True, "pre_approval": True},
                      limits={"five_hour": 50, "weekly": 60, "force": False}, current_task_id=None)
     info = mgr.lenders()[0]
-    assert info["protocol"] == 2 and info["capabilities"] == {"resumable": True, "pre_approval": True, "model_select": False}
+    assert info["protocol"] == 2 and info["capabilities"] == {"resumable": True, "pre_approval": True, "model_select": False, "max_parallel": 1}
     assert info["limits"] == {"five_hour": 50, "weekly": 60, "force": False}
     await alice.push("usage", **usage(five_hour=55))  # over alice's own limit, under the host's
     with pytest.raises(ToolError, match="再開可能"):
@@ -488,7 +488,7 @@ async def test_nothing_a_lender_sends_keeps_the_lists_from_being_json(mgr):
                      ts=NAN, friend_limits={"five_hour": INF, "weekly": NAN, "force": NAN}, extra=NAN)
     row = json.loads(json.dumps(mgr.lenders(), allow_nan=False))[0]
     assert (row["agent_version"], row["codex_version"], row["auth_mode"], row["protocol"]) == (None, None, None, 1)
-    assert row["capabilities"] == {"resumable": True, "pre_approval": False, "model_select": False}
+    assert row["capabilities"] == {"resumable": True, "pre_approval": False, "model_select": False, "max_parallel": 1}
     assert row["limits"] == NO_LIMITS
     assert row["usage"]["five_hour"] == {"used_percent": 10, "resets_at": None, "resets_at_local": None}
     assert set(row["usage"]["weekly"]) == {"used_percent", "resets_at", "resets_at_local"}
@@ -665,7 +665,7 @@ async def test_automatic_routing_skips_a_lender_before_its_hello(mgr):
     await bob.push("usage", **usage(five_hour=70))
     tid = await mgr.start("one")
     assert mgr.tasks[tid].lender == "bob" and not alice.all("task_start")
-    with pytest.raises(ToolError, match="作業中"):  # bob works; alice still cannot be chosen
+    with pytest.raises(ToolError, match="上限"):  # bob works; alice still cannot be chosen
         await mgr.start("two")
 
 
@@ -685,3 +685,14 @@ async def test_continuation_waits_for_the_hello_of_a_new_connection(mgr):
     with pytest.raises(ToolError, match=RETRY_ADVICE):
         await mgr.start("more", continue_task_id=t1)
     assert not again.all("task_start") and len(mgr.tasks) == 1
+
+
+async def test_named_lender_at_its_own_capacity_reports_the_capacity(mgr):
+    alice = await FakeAgent.join(mgr, "alice")
+    await alice.push("hello", protocol=5, capabilities={"max_parallel": 2})
+    ids = [await mgr.start("first", lender="alice"), await mgr.start("second", lender="alice")]
+    await alice.push("lender_status", busy_elsewhere=True)
+    with pytest.raises(ToolError) as error:
+        await mgr.start("third", lender="alice")
+    assert str(error.value) == "同時に受ける依頼の上限（2 件）に達しています"
+    assert "ほかの依頼主" not in str(error.value) and mgr.active_task_ids("alice") == ids

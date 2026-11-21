@@ -79,7 +79,7 @@ class QuotaGuard:
         self.thresholds = dict(thresholds)
         self.grace_sec = grace_sec
         self.clock = clock
-        self.enabled = True
+        self._enabled = True
         self.active_turn: str | None = None
         self.stopping = False
         self.steer_at = 0.0
@@ -88,6 +88,18 @@ class QuotaGuard:
         # Limits set by the friend (the Codex owner) on their own PC; the lower of host/friend applies.
         self.local: dict = {"five_hour": None, "weekly": None}
         self.force = False  # friend's choice: interrupt at once instead of asking Codex to wrap up
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    @enabled.setter
+    def enabled(self, enabled: bool) -> None:
+        self._enabled = bool(enabled)
+        if not self._enabled:
+            self.stopping = False
+            self.blocked_until = None
+            self._retry_steer = False
 
     def set_thresholds(self, thresholds: dict) -> None:
         self.thresholds.update({k: v for k, v in thresholds.items() if v is not None})

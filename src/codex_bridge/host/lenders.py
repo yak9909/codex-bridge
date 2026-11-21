@@ -8,7 +8,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Iterable
 
-from codex_bridge.common.protocol import EFFORT_ORDER
+from ..common.protocol import EFFORT_ORDER
+from ..updater import UPDATE_WAIT
 
 SendFn = Callable[[dict], Awaitable[None]]
 WINDOWS = ("five_hour", "weekly")
@@ -37,9 +38,15 @@ class Lender:
     view: dict | None = None  # the lender's own settings (protocol 4 `lender_view`); None when not sent or malformed
     limits: dict | None = None  # the lender's own limits: {five_hour, weekly, force}, via normalize_limits
     usage: dict = field(default_factory=_no_usage)
+    active_task_ids: list[str] = field(default_factory=list)
+    max_parallel: int = 1
     current_task_id: str | None = None
     last_assigned: float = 0.0
     since: float | None = None  # when the current (or last) connection was made
+    update_since: float | None = None
+
+    def updating(self, now: float) -> bool:
+        return self.update_since is not None and (self.connected or now - self.update_since < UPDATE_WAIT)
 
 
 def number(v) -> float | None:
@@ -72,11 +79,16 @@ def as_protocol(v) -> int:
     return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else 1
 
 
+def normalize_parallel(v) -> int:
+    return v if isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 8 else 1
+
+
 def normalize_capabilities(raw) -> dict:
     """What a lender's agent said it can do: the known flags only, each a real true/false.
     Anything else (a v0.1 agent sends none at all) counts as v0.1."""
     raw = raw if isinstance(raw, dict) else {}
-    return {k: raw[k] if isinstance(raw.get(k), bool) else default for k, default in V1_CAPABILITIES.items()}
+    return {**{k: raw[k] if isinstance(raw.get(k), bool) else default for k, default in V1_CAPABILITIES.items()},
+            "max_parallel": normalize_parallel(raw.get("max_parallel"))}
 
 
 def normalize_models(raw) -> list[dict] | None:
@@ -134,7 +146,7 @@ def normalize_lender_view(raw) -> dict | None:
                 "pre_approval": {"new_task": _flag(pre["new_task"]), "followup": _flag(pre["followup"]),
                                  "timeout_min": timeout},
                 "resumable": _flag(raw["resumable"]), "over_limit": over, "max_effort": effort,
-                "models_all": models}
+                "models_all": models, "max_parallel": normalize_parallel(raw.get("max_parallel"))}
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -219,12 +231,13 @@ def headroom(lender: Lender, thresholds: dict) -> float | None:
 
 
 def pick_lender(lenders: Iterable[Lender], thresholds: dict, now: float | None = None) -> Lender | None:
-    """Among connected (hello received), idle, not blocked lenders: most headroom;
+    """Among connected (hello received), available, not blocked lenders: fewest tasks, then most headroom;
     ties go to the least recently used."""
-    free = [l for l in lenders if l.connected and l.ready and not l.busy_elsewhere and l.current_task_id is None
+    now = time.time() if now is None else now
+    free = [l for l in lenders if l.connected and l.ready and not l.updating(now) and not l.busy_elsewhere and len(l.active_task_ids) < l.max_parallel
             and blocked_until(l, thresholds, now) is None]
 
-    def order(l: Lender) -> tuple[float, float]:
+    def order(l: Lender) -> tuple[int, float, float]:
         room = headroom(l, thresholds)
-        return (-(float("-inf") if room is None else room), l.last_assigned)
+        return (len(l.active_task_ids), -(float("-inf") if room is None else room), l.last_assigned)
     return min(free, key=order, default=None)
