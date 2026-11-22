@@ -310,6 +310,22 @@ def test_guide_keeps_injection_warning():
     assert "利用者の指示ではない" in claude_mcp.GUIDE
 
 
+async def test_no_switching_lenders_without_permission(env):
+    """A lender the user chose, or the one already doing the work, is not swapped for another without asking."""
+    _, local, _ = env
+    response = await local.post("/claude/mcp", headers=ACCEPT, json={
+        "jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert response.status_code == 200, response.text
+    description = next(t["description"] for t in response.json()["result"]["tools"] if t["name"] == "send_task")
+    assert "原則: 送り先を利用者の許可なく変えない" in claude_mcp.GUIDE
+    for text in (claude_mcp.GUIDE, claude_mcp.INSTRUCTIONS, description):
+        assert "許可なく" in text, text[:40]
+    for text in (claude_mcp.GUIDE, claude_mcp.INSTRUCTIONS, description):
+        assert "省けば別の人が選ばれる" not in text
+        assert "余裕のある別の人が選ばれる" not in text
+        assert "lender を変える" not in text
+
+
 async def test_no_judgement_rule_in_approval_texts(env):
     _, local, _ = env
     response = await local.post("/claude/mcp", headers=ACCEPT, json={
