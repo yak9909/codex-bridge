@@ -437,6 +437,32 @@ async def test_final_review_output_path_is_unguessable_and_owner_can_retrieve(sh
         await share.runner.get_command_result(r["job_id"], 0)
 
 
+async def test_get_command_result_ignores_wait_sec_and_uses_the_fixed_wait(share):
+    """Codex passed wait_sec=1 or 10 and polled a long command many times; the wait is now always sync_wait_sec."""
+    import time
+    share.set_policy(exec_mode="all", limits={"sync_wait_sec": 0})
+    r = await share.runner.run_command(f'{PY} -c "import time; time.sleep(2); print(7)"')
+    assert r["status"] == "running"
+    share.set_policy(exec_mode="all", limits={"sync_wait_sec": 30})
+    started = time.monotonic()
+    done = await share.runner.get_command_result(r["job_id"], 1)  # a tiny wait_sec still waits for the end
+    elapsed = time.monotonic() - started
+    assert done["status"] == "done" and done["stdout"].strip() == "7"
+    assert elapsed < 15  # returned when the command ended, not after the full 30 s
+
+
+async def test_get_command_result_never_waits_past_the_fixed_wait(share):
+    import time
+    share.set_policy(exec_mode="all", limits={"sync_wait_sec": 0})
+    r = await share.runner.run_command(f'{PY} -c "import time; time.sleep(5)"')
+    share.set_policy(exec_mode="all", limits={"sync_wait_sec": 1})
+    started = time.monotonic()
+    still = await share.runner.get_command_result(r["job_id"], 600)  # a large wait_sec is capped too
+    assert still["status"] == "running" and time.monotonic() - started < 4
+    share.set_policy(exec_mode="all", limits={"sync_wait_sec": 30})
+    assert (await share.runner.get_command_result(r["job_id"]))["status"] == "done"
+
+
 async def test_allowlisted_runs_without_approval(share):
     (share.root / "scripts/hello.py").write_text("print('hi')\n", encoding="utf-8")
     share.set_policy(exec_allow=[f"{PY} scripts/*.py *"])

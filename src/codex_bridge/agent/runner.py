@@ -28,7 +28,9 @@ PREAMBLE = ("ファイルの一覧・検索・読み書き・コマンド実行�
             '明示的な "." はメインを指し、find_files と grep は path 省略で見えるすべてのフォルダを検索します。'
             "結果のパスも同じ規則です。作業フォルダ（cwd）は空で、使いません。"
             "run_command や delete_path が承認待ち（waiting_approval）を返したら、作業を終えずに "
-            "get_command_result（削除は同じ呼び出しのやり直し）で結果を待ってください。承認には数分かかることがあります。")
+            "get_command_result（削除は同じ呼び出しのやり直し）で結果を待ってください。承認には数分かかることがあります。"
+            "get_command_result は、コマンドが終わればすぐ返り、終わらなくても最長 60 秒待ってから返ります。"
+            "続けて呼べばよく、wait_sec を小さくしたり、間をあけたりしないでください。")
 NOT_OWNED = "このツールで作ったセッションではありません"
 NO_RESUME = "この PC の Codex は使い捨てセッションの設定のため、続きの依頼はできません。新しい依頼として出し直してください"
 DISCARD_TIMEOUT = 5.0  # asking Codex to drop a disposable thread must never hold up the next event
