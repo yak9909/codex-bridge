@@ -202,14 +202,18 @@ class CommandRunner:
         t.add_done_callback(self._tasks.discard)
         return await self._wait(job, p.limits.sync_wait_sec)
 
-    async def get_command_result(self, job_id: str, wait_sec: int = 30) -> dict:
+    async def get_command_result(self, job_id: str, wait_sec: int | None = None) -> dict:
+        """Wait until the job ends or sync_wait_sec (60 s by default) passes, whatever wait_sec says.
+
+        wait_sec is accepted for older callers and ignored: Codex passed 1 or 10 and polled a long command
+        many times, spending the lender's quota on each call."""
         job = self.jobs.get(job_id)
         # Another lender's job gets the same answer as a job that does not exist.
         if (job is None or job.lender != self.lender_fn()
                 or (job.lender is not None and (job.thread_id != self.thread_fn() if job.thread_id
                     else job.task_id != self.task_id_fn()))):
             raise ToolError(f"ジョブが見つかりません: {job_id}")
-        return await self._wait(job, min(wait_sec, self.policy.current().limits.sync_wait_sec))
+        return await self._wait(job, self.policy.current().limits.sync_wait_sec)
 
     async def _wait(self, job: Job, seconds: float) -> dict:
         try:

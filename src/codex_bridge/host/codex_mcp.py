@@ -172,8 +172,10 @@ def build_codex_mcp(s: HostServices, match_token: Callable[[str], str | None]) -
         return await run("run_command", {"command": command, "cwd": cwd},
                          lambda: s.runner.run_command(command, cwd, timeout_sec), blocking=False)
 
-    @tool("run_command が返した job_id の結果を取得します。まだ終わっていなければ最大 wait_sec 秒待ちます。")
-    async def get_command_result(job_id: str, wait_sec: int = 30) -> CallToolResult:
+    @tool("run_command が返した job_id の結果を取得します。まだ終わっていなければ、終わった時点ですぐ返り、"
+          "終わらなくても最長 60 秒で返ります（status が running か waiting_approval なら、もう一度呼んでください）。"
+          "wait_sec は使いません（渡しても待つ時間は変わりません）。間をあけたり、ほかの方法で待ったりする必要はありません。")
+    async def get_command_result(job_id: str, wait_sec: int | None = None) -> CallToolResult:
         return await run("get_command_result", {"job_id": job_id},
                          lambda: s.runner.get_command_result(job_id, wait_sec), blocking=False)
 
