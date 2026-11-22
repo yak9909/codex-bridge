@@ -1,6 +1,6 @@
 [project]
 name = "codex-bridge"
-version = "0.3.2"
+version = "0.3.3"
 description = "Let a friend's Codex work on local files through MCP"
 readme = "README.md"
 authors = [
